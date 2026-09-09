@@ -1,0 +1,26 @@
+# Rust (backend/)
+/target
+/backend/target
+*.db
+*.db-wal
+*.db-shm
+.env
+
+# UniFFI 生成产物（由 uniffi generate 生成）
+/backend/bindings
+
+# 编辑器
+.vscode/
+.idea/
+
+# Web 前端 (frontend/)
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Android (android/)
+android/.gradle/
+android/.idea/
+android/build/
+android/app/build/
+android/local.properties

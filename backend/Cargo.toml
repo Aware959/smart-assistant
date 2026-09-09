@@ -1,0 +1,73 @@
+[package]
+name = "smart-assistant"
+version = "0.1.0"
+edition = "2021"
+autobins = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "smart_assistant"
+
+[[bin]]
+name = "smart-assistant-server"
+path = "src/bin/smart-assistant-server.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "smart-assistant-cli"
+path = "src/bin/smart-assistant-cli.rs"
+required-features = ["desktop"]
+
+[dependencies]
+# UniFFI
+uniffi = { version = "0.28", features = ["cli"] }
+
+# SQLite
+rusqlite = { version = "0.37", features = ["bundled", "vtab", "backup"] }
+
+# 向量搜索
+sqlite-vec = "0.1"
+
+# LLM API 调用（多厂商适配）
+genai = "0.6"
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 异步流 (SSE 实时输出)
+futures = "0.3"
+
+# 异步运行时 (genai 需要；本库通过全局 runtime 以同步接口暴露)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+
+# Web 框架 (desktop 调试用)
+axum = { version = "0.8", features = ["ws", "json"], optional = true }
+
+# 错误处理
+thiserror = "2"
+anyhow = "1"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+# 时间
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Ctrl+C 优雅退出（CLI）
+ctrlc = "3"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[features]
+default = ["desktop"]
+desktop = ["axum", "tracing-subscriber"]
+
+[profile.release]
+lto = true
+opt-level = 3
