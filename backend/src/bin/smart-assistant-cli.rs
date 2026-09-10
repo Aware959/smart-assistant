@@ -8,6 +8,9 @@ use smart_assistant::{Assistant, ChatInput};
 /// - 无参数：进入交互式 REPL（流式输出到终端）；
 /// - `smart-assistant-cli "一句话"`：单发问答，打印完整回复后退出。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 加载运行目录下的 .env 文件（不存在则静默跳过，环境变量优先）。
+    dotenvy::dotenv().ok();
+
     // Ctrl+C：安装处理器后用 exit(0) 干净退出（Windows 下默认是 STATUS_CONTROL_C_EXIT 非正常终止）。
     ctrlc::set_handler(|| {
         println!("\n[Ctrl+C] 再见");
