@@ -6,6 +6,17 @@
 - **frontend/**：Web 端（Vite + React），直接消费 HTTP / SSE 接口
 - **android/**：Android 端（占位，经 UniFFI 绑定 + 内嵌 `.so` 调用同一套内核；iOS 不考虑）
 
+## 快速启动（根目录）
+
+```bash
+make dev      # 一键启动：自动生成证书（缺失时）+ 后台后端 + 前台前端
+make stop     # 停止占用 3000/5173 端口的进程
+make build    # 编译后端 + 构建前端
+make test     # 后端测试
+```
+
+`scripts/dev.ps1` 与 `Makefile` 等价（无 make 时直接 `powershell -File scripts/dev.ps1`）。后端日志写入 `.dev-server.log`；退出 `npm run dev` 时自动停止本次启动的后端。
+
 ## 架构
 
 ```
@@ -61,9 +72,13 @@ $env:LLM_API_KEY = "sk-..."
 $env:EMBEDDING_API_KEY = "sk-..."
 
 cd backend
+# 首次启动前生成自签名 TLS 证书（backend/certs/，已 gitignore）
+powershell .\scripts\gen-cert.ps1
+
 cargo run --bin smart-assistant-server
-# 服务地址: http://127.0.0.1:3000  (可用 SMART_ASSISTANT_ADDR 覆盖)
+# 服务地址: https://127.0.0.1:3000  (可用 SMART_ASSISTANT_ADDR 覆盖)
 # 数据库文件: backend/smart_assistant.db (可用 SMART_ASSISTANT_DB 覆盖)
+# 若 certs/ 下没有证书则自动回退为纯 HTTP（本地调试也能跑）
 
 # 命令行交互式聊天（流式输出）
 cargo run --bin smart-assistant-cli
@@ -71,20 +86,26 @@ cargo run --bin smart-assistant-cli
 cargo run --bin smart-assistant-cli -- "一句话"
 ```
 
+后端以 **TLS** 提供服务：证书取自 env `SMART_ASSISTANT_TLS_CERT` / `SMART_ASSISTANT_TLS_KEY`，缺省回退到运行目录 `certs/server.pem` + `certs/server.key`（`scripts/gen-cert.ps1` 用 Windows 内置 .NET 生成，无需 openssl，SAN 已含 localhost 与本机局域网 IP）。若配置了前端产物（默认 `../frontend/dist`，env `SMART_ASSISTANT_WEB_DIST` 覆盖），则 **同源托管 SPA**：访问 `https://<ADDR>/` 即完整应用，其它未知路径回退到 `index.html`。
+
 ### Web 端（frontend）
 
 ```bash
 cd frontend
 npm install
-npm run dev        # http://localhost:5173，/chat、/sessions 等代理到 3000
-npm run build      # 产物在 frontend/dist（路由级 code-split）
+npm run dev        # http://localhost:5173；/chat、/sessions 等经 vite 代理到 https 后端（secure:false 跳过自签校验）
+npm run build      # 产物在 frontend/dist（路由级 code-split），由后端同源托管
 ```
 
 技术栈：Vite 8 + React 19 + TypeScript（strict）+ Tailwind v4（shadcn/ui 组件体系）+ assistant-ui（`useLocalRuntime` 流式对话 + react-markdown 渲染）+ TanStack Query + React Router + Zustand + React Hook Form + zod + axios + sonner。
 
-打开页面：新建会话 → 输入 → 助手回复实时流式呈现；左侧可切换会话 / 记忆 / 图谱。生产部署时将 `dist` 放到任意静态服务器，并让 `/chat`、`/sessions`、`/memories`、`/search` 等路径反代到 backend（或给 backend 加 CORS）。
+打开页面：新建会话 → 输入 → 助手回复实时流式呈现；左侧可切换会话 / 记忆 / 图谱。`npm run build` 后启动 backend 即可让后端同时托管前端产物与 API（同源 https，无 CORS 问题）。
 
-手机访问（同一局域网）：`vite` 已配置 `host: true`（监听所有网卡），手机浏览器打开 `http://<电脑内网IP>:5173` 即可；`/chat`、`/sessions` 等仍由 vite 在本机代理到 backend，无需改动后端。若仍连不上，检查 Windows 防火墙是否放行 5173 端口入站（私有网络），并确认手机与电脑在同一网段。
+手机访问（同一局域网）：`vite` 已配置 `host: true`（监听所有网卡）。两种方式任选：
+- 开发模式：手机打开 `http://<电脑内网IP>:5173`，`/chat`、`/sessions` 等由 vite 在本机代理到 https 后端，无需改动后端；
+- 生产模式：`npm run build` 后再起 backend，手机打开 `https://<电脑内网IP>:3000`（该 IP 已包含在 `scripts/gen-cert.ps1` 生成的证书 SAN 中）。
+
+若仍连不上，检查 Windows 防火墙放行 5173 / 3000 端口入站，并确认手机与电脑在同一网段。首次使用请手动信任自签名证书（Chrome `thisisunsafe` / Firefox 添加例外；手机安装 `backend/certs/server.pem` 并信任）。
 
 ## API
 
@@ -137,6 +158,9 @@ curl -N -X POST http://127.0.0.1:3000/chat/stream \
 | EMBEDDING_DIM | 768 |
 | SMART_ASSISTANT_DB | smart_assistant.db（相对 backend/ 运行目录） |
 | SMART_ASSISTANT_ADDR | 127.0.0.1:3000 |
+| SMART_ASSISTANT_TLS_CERT | 证书 PEM（缺省回退 `certs/server.pem`） |
+| SMART_ASSISTANT_TLS_KEY | 私钥 PEM（缺省回退 `certs/server.key`） |
+| SMART_ASSISTANT_WEB_DIST | `../frontend/dist`（前端 SPA 静态目录，不存在则不托管） |
 
 LLM URL 可指向任何 OpenAI 兼容接口（本地 Ollama / 其它厂商网关）。LLM 与 embedding 调用统一走 [genai](https://crates.io/crates/genai) 适配层（多厂商、OpenAI 兼容优先）；API Key 留空时回退读取 `OPENAI_API_KEY`。
 

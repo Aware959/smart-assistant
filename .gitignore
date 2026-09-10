@@ -9,6 +9,15 @@
 # UniFFI 生成产物（由 uniffi generate 生成）
 /backend/bindings
 
+# 本地自签名 TLS 证书（由 backend/scripts/gen-cert.ps1 生成）
+/backend/certs
+
+# 一键启动脚本产生的后端日志
+.dev-server.log
+
+# 微信 iLink 扫码凭证（ Bearer token，密钥）
+/backend/ilink_session.json
+
 # 编辑器
 .vscode/
 .idea/

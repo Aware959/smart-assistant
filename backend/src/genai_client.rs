@@ -55,11 +55,19 @@ pub(crate) fn embed_client() -> &'static Client {
 /// 构建绑定到 OpenAI 兼容端点的 Client。
 ///
 /// - `api_url`  非空时作为 Endpoint；为空回退到 genai 默认（OpenAI 官方）。
-/// - `api_key`  非空时直接使用；为空回退到环境变量 `OPENAI_API_KEY`。
+/// - `api_key`  非空时直接使用；为空时：自定义端点 → `AuthData::None`（本地无鉴权），
+///   官方端点 → 回退读取环境变量 `OPENAI_API_KEY`。
 fn build_client(api_url: &str, api_key: &str) -> Client {
     let url = resolve_url(api_url).map(ToOwned::to_owned);
     let auth = if api_key.is_empty() {
-        AuthData::from_env("OPENAI_API_KEY")
+        if url.is_some() {
+            // 自建/本地 OpenAI 兼容端点（LM Studio、llama.cpp 等）不校验 token。
+            // 用占位 key 绕开 genai 对 OPENAI_API_KEY 的强制要求；请求会带上
+            // `Authorization: Bearer none`，本地服务会忽略它。
+            AuthData::from_single("none")
+        } else {
+            AuthData::from_env("OPENAI_API_KEY")
+        }
     } else {
         AuthData::from_single(api_key)
     };
