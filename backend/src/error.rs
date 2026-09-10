@@ -12,6 +12,8 @@ pub enum SqlError {
     Json(#[from] serde_json::Error),
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("http error: {0}")]
+    Http(String),
     #[error("not found: {0}")]
     NotFound(String),
 }

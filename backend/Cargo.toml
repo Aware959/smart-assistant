@@ -43,6 +43,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 
 # Web 框架 (desktop 调试用)
 axum = { version = "0.8", features = ["ws", "json"], optional = true }
+# TLS 支持：以 HTTPS 暴露 API（自签名证书见 scripts/gen-cert.ps1）
+axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+# 静态文件托管：由后端直接提供前端 build 产物 (SPA)
+tower-http = { version = "0.6", features = ["fs"], optional = true }
 
 # 错误处理
 thiserror = "2"
@@ -61,12 +65,23 @@ uuid = { version = "1", features = ["v4"] }
 # Ctrl+C 优雅退出（CLI）
 ctrlc = "3"
 
+# .env 文件加载（server / cli 启动时）
+dotenvy = "0.15"
+
+# Telegram Bot API 调用（channels/telegram 长轮询）
+reqwest = { version = "0.12", optional = true, features = ["json"] }
+# 微信 iLink 通道：base64（X-WECHAT-UIN）+ 终端二维码渲染（扫码登录）
+base64 = { version = "0.22", optional = true }
+qrcode = { version = "0.14", optional = true }
+
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }
 
 [features]
-default = ["desktop"]
-desktop = ["axum", "tracing-subscriber"]
+default = ["desktop", "telegram", "ilink"]
+desktop = ["axum", "axum-server", "tower-http", "tracing-subscriber"]
+telegram = ["dep:reqwest"]
+ilink = ["dep:reqwest", "dep:base64", "dep:qrcode"]
 
 [profile.release]
 lto = true
