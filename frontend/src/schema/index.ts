@@ -34,30 +34,10 @@ export const memoryHitSchema = memorySchema.extend({
 })
 export type MemoryHit = z.infer<typeof memoryHitSchema>
 
-export const entitySchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  entity_type: z.string(),
-  memory_id: z.string().nullable(),
-})
-export type Entity = z.infer<typeof entitySchema>
-
-export const relationSchema = z.object({
-  id: z.string(),
-  source_id: z.string(),
-  target_id: z.string(),
-  relation_type: z.string(),
-  weight: z.number(),
-  memory_id: z.string().nullable(),
-})
-export type Relation = z.infer<typeof relationSchema>
-
 export const chatOutputSchema = z.object({
   session_id: z.string(),
   reply: z.string(),
   memory: memorySchema.nullable(),
-  entities: z.array(entitySchema),
-  relations: z.array(relationSchema),
 })
 export type ChatOutput = z.infer<typeof chatOutputSchema>
 

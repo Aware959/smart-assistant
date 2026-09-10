@@ -1,6 +1,6 @@
+pub mod channel;
 pub mod memory;
 pub mod message;
-pub mod relation;
 pub mod session;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -71,7 +71,7 @@ pub fn ensure_vec_extension(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 fn init_schema(conn: &Connection) -> Result<()> {
@@ -107,29 +107,17 @@ fn init_schema(conn: &Connection) -> Result<()> {
             updated_at  TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS entities (
-            id          TEXT PRIMARY KEY,
-            name        TEXT NOT NULL,
-            entity_type TEXT NOT NULL,
-            memory_id   TEXT REFERENCES memories(id) ON DELETE CASCADE,
-            created_at  TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS relations (
-            id            TEXT PRIMARY KEY,
-            source_id     TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-            target_id     TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-            relation_type TEXT NOT NULL,
-            weight        REAL DEFAULT 1.0,
-            memory_id     TEXT REFERENCES memories(id) ON DELETE CASCADE,
-            created_at    TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS channel_sessions (
+            channel     TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (channel, external_id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
-        CREATE INDEX IF NOT EXISTS idx_entities_memory ON entities(memory_id);
-        CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
-        CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
         "#,
     )?;
 
@@ -140,7 +128,7 @@ fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// 数据库迁移：将旧版（消息即记忆）schema 升级到 v3（会话/消息/事实记忆分离）。
+/// 数据库迁移：将旧版 schema 升级到 v4（移除 entities/relations 表）。
 fn migrate(conn: &Connection) -> Result<()> {
     let version = meta_get(conn, KEY_SCHEMA_VERSION)?
         .and_then(|v| v.parse::<i64>().ok())
@@ -150,9 +138,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    // 旧库（无 sessions 表）与新模型差异过大：重建业务表（meta 表保留 embedding_dim）。
     tracing::warn!(
-        "数据库 schema 版本 {version} 过旧，重建业务表（memories/entities/relations/vectors 清空）"
+        "数据库 schema 版本 {version} 过旧，重建业务表（memories/vectors 清空）"
     );
 
     conn.execute_batch(
@@ -213,9 +200,6 @@ fn existing_vec_dim(conn: &Connection) -> Result<Option<usize>> {
 }
 
 /// 保证向量表存在且维度与 `dim` 一致。
-///
-/// 维度不一致时重建 `memory_vectors`：旧向量丢弃（无法跨维度使用），
-/// `memories` 文本记录保留，待后续对话重新向量化写入。
 fn ensure_vector_table(conn: &Connection, dim: usize) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
@@ -269,13 +253,11 @@ mod tests {
         )
         .unwrap();
 
-        // 重建前：数据存在，meta 记 4
         assert_eq!(
             meta_get(&conn, KEY_EMBEDDING_DIM).unwrap().unwrap(),
             "4"
         );
 
-        // 维度变化 → 表重建，旧向量清除
         ensure_vector_table(&conn, 8).unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM memory_vectors", [], |row| row.get(0))
@@ -286,7 +268,6 @@ mod tests {
             "8"
         );
 
-        // 维度一致 → 数据保留
         let v = memory::to_byte_array(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         conn.execute(
             "INSERT INTO memory_vectors (memory_id, embedding) VALUES ('b', ?1)",
@@ -305,14 +286,12 @@ mod tests {
         register_vec_extension();
         let conn = Connection::open_in_memory().unwrap();
 
-        // 模拟旧库：无 meta 记录，但已有 12 维 vec0 表
         conn.execute_batch(
             "CREATE VIRTUAL TABLE memory_vectors
              USING vec0(memory_id TEXT PRIMARY KEY, embedding FLOAT[12]);",
         )
         .unwrap();
 
-        // 维度一致时不重建，数据保留
         let v = memory::to_byte_array(&(0..12).map(|i| i as f32).collect::<Vec<_>>());
         conn.execute(
             "INSERT INTO memory_vectors (memory_id, embedding) VALUES ('legacy', ?1)",
@@ -325,7 +304,6 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "旧库维度一致时不应重建");
 
-        // 与配置不一致 → 重建
         ensure_vector_table(&conn, 20).unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM memory_vectors", [], |row| row.get(0))

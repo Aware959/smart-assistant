@@ -29,10 +29,6 @@ pub fn routes(state: Arc<Assistant>) -> Router {
         .route("/memory/{id}", delete(delete_memory))
         .route("/memories", get(list_memories))
         .route("/search", post(search_memory))
-        .route("/entities", get(list_entities))
-        .route("/relations", get(list_relations))
-        .route("/relations/{id}", delete(delete_relation))
-        .route("/entities/{id}", delete(delete_entity))
         .route("/sessions", get(list_sessions))
         .route("/sessions", post(create_session))
         .route("/sessions/{id}", delete(delete_session))
@@ -143,42 +139,4 @@ async fn search_memory(
         .search_memory(&req.query, req.limit)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(hits))
-}
-
-async fn list_entities(
-    State(state): State<Arc<Assistant>>,
-) -> Result<Json<Vec<crate::EntityRecord>>, (StatusCode, String)> {
-    let entities = state
-        .list_entities()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(entities))
-}
-
-async fn list_relations(
-    State(state): State<Arc<Assistant>>,
-) -> Result<Json<Vec<crate::RelationRecord>>, (StatusCode, String)> {
-    let relations = state
-        .list_relations()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(relations))
-}
-
-async fn delete_relation(
-    State(state): State<Arc<Assistant>>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    state
-        .delete_relation(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn delete_entity(
-    State(state): State<Arc<Assistant>>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    state
-        .delete_entity(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(StatusCode::NO_CONTENT)
 }

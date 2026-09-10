@@ -1,5 +1,5 @@
 import { NavLink, useNavigate } from 'react-router-dom'
-import { Library, MessageSquareText, Moon, Network, SquarePen, Sun } from 'lucide-react'
+import { Library, MessageSquareText, Moon, SquarePen, Sun } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useCreateSession } from '@/features/sessions/hooks'
 import { useUiStore } from '@/stores/ui'
@@ -9,7 +9,6 @@ import { cn } from '@/lib/utils'
 const NAV = [
   { to: '/', label: '对话', icon: MessageSquareText, end: true },
   { to: '/memories', label: '记忆', icon: Library, end: false },
-  { to: '/graph', label: '图谱', icon: Network, end: false },
 ]
 
 export function NavRail() {

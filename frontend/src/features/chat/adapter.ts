@@ -90,8 +90,6 @@ export function createChatAdapter(ctx: ChatAdapterContext): ChatModelAdapter {
             ? {
                 sessionId: output.session_id,
                 memorySaved: output.memory !== null,
-                entities: output.entities.length,
-                relations: output.relations.length,
               }
             : undefined,
         },

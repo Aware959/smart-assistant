@@ -98,14 +98,6 @@ pub fn update(db: &Database, id: &str, new_content: &str, new_embedding: &[f32])
 
 pub fn delete(db: &Database, id: &str) -> Result<()> {
     let tx = db.conn().unchecked_transaction()?;
-    // 该记忆派生实体的参与关系，先于实体显式删除（不依赖外键级联）。
-    tx.execute(
-        "DELETE FROM relations
-         WHERE source_id IN (SELECT id FROM entities WHERE memory_id = ?1)
-            OR target_id IN (SELECT id FROM entities WHERE memory_id = ?1)",
-        [id],
-    )?;
-    tx.execute("DELETE FROM entities WHERE memory_id = ?1", [id])?;
     tx.execute("DELETE FROM memory_vectors WHERE memory_id = ?1", [id])?;
     tx.execute("DELETE FROM memories WHERE id = ?1", [id])?;
     tx.commit()?;

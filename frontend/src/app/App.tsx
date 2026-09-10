@@ -5,7 +5,6 @@ import { PageLoader } from '@/components/layout/page-loader'
 
 const ChatPage = lazy(() => import('@/routes/chat-page'))
 const MemoriesPage = lazy(() => import('@/routes/memories-page'))
-const GraphPage = lazy(() => import('@/routes/graph-page'))
 
 export default function App() {
   return (
@@ -24,14 +23,6 @@ export default function App() {
           element={
             <Suspense fallback={<PageLoader />}>
               <MemoriesPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="graph"
-          element={
-            <Suspense fallback={<PageLoader />}>
-              <GraphPage />
             </Suspense>
           }
         />

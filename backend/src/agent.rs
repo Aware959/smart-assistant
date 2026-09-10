@@ -1,17 +1,16 @@
-//! 编排层（Agent）：把 db / llm / extractor / memory 组装成可复用的业务流水线。
+//! 编排层（Agent）：把 db / llm / memory 组装成可复用的业务流水线。
 //! 该层不感知 UniFFI / HTTP，可独立进行单元测试。
 
 use std::sync::Mutex;
 
 use crate::db;
 use crate::error::Result;
-use crate::extractor;
 use crate::llm;
 use crate::memory;
 use crate::services;
-use crate::{ChatInput, ChatOutput, ChatTurn, ExtractionOutput};
+use crate::{ChatInput, ChatOutput, ChatTurn};
 
-/// Agent：完成单轮对话 / 提取落库等核心业务流程。
+/// Agent：完成单轮对话 / 记忆落库等核心业务流程。
 pub struct Agent {
     db: Mutex<db::Database>,
 }
@@ -38,9 +37,9 @@ impl Agent {
     ///
     /// 单轮流程（消息是记录，记忆是事实，二者分离）：
     /// 1. 确定/新建会话，自动构建最近的历史消息上下文；
-    /// 2. 一次 LLM 调用判断是否值得沉淀记忆并提取实体/关系；
-    /// 3. 记忆向量检索 + 知识图谱查询，拼入提示词调用 LLM（回复文本逐段回调 `on_delta`）；
-    /// 4. 回复写入 messages；LLM 判定为事实时才沉淀到 memories（含实体/关系落库）。
+    /// 2. 一次 LLM 调用判断是否值得沉淀记忆；
+    /// 3. 记忆向量检索，拼入提示词调用 LLM（回复文本逐段回调 `on_delta`）；
+    /// 4. 回复写入 messages；LLM 判定为事实时才沉淀到 memories。
     ///
     /// `on_delta` 在生成线程上同步调用，生成期间实时收到文本片段。
     pub fn chat_stream<F>(&self, input: &ChatInput, mut on_delta: F) -> Result<ChatOutput>
@@ -55,8 +54,6 @@ impl Agent {
                 session_id: input.session_id.clone().unwrap_or_default(),
                 reply: String::new(),
                 memory: None,
-                entities: Vec::new(),
-                relations: Vec::new(),
             });
         }
 
@@ -92,12 +89,11 @@ impl Agent {
         // 用户消息入库（记录）。
         let user_message = db::message::create(&db, &session.id, "user", &input.message)?;
 
-        // 2. 一次性分析：是否沉淀记忆 + 实体关系提取。
-        let extraction = extractor::parser::extract_from_text(&input.message)?;
+        // 2. 一次性分析：是否值得沉淀记忆。
+        let extraction = memory::extraction::extract_from_text(&input.message)?;
 
-        // 3. 记忆向量检索 + 知识图谱查询。
+        // 3. 记忆向量检索。
         let memory_hits = memory::store::search(&db, &input.message, MEMORY_RECALL_LIMIT)?;
-        let graph_lines = memory::graph::recall_graph_context(&db, &extraction)?;
 
         // 3'. 过滤掉明显不相关的记忆（向量为欧氏距离，阈值只放行归一化向量下的近邻）。
         let memory_hits = memory_hits
@@ -106,7 +102,7 @@ impl Agent {
             .collect::<Vec<_>>();
 
         // 3'. 原始文本 + 检索上下文拼成提示词。
-        let recall = build_recall_context(&memory_hits, &graph_lines);
+        let recall = build_recall_context(&memory_hits);
         let mut messages = vec![llm::chat::ChatMessage {
             role: "system".to_string(),
             content: build_system_prompt(&recall),
@@ -130,13 +126,8 @@ impl Agent {
 
         // 5. 沉淀记忆：只有 LLM 判定值得记住时才落库（事实，而非消息）。
         let memory = if extraction.is_memory {
-            let content = extraction
-                .memory_content
-                .as_deref()
-                .filter(|c| !c.trim().is_empty())
-                .unwrap_or(&input.message);
+            let content = extraction.content_or(&input.message);
             let m = memory::store::store(&db, content, &extraction.memory_type, Some(&user_message.id))?;
-            memory::graph::ingest_extraction(&db, &extraction, Some(&m.id))?;
             Some(services::memory_to_record(&m))
         } else {
             None
@@ -146,24 +137,15 @@ impl Agent {
             session_id: session.id,
             reply,
             memory,
-            entities: extraction.entities,
-            relations: extraction.relations,
         })
     }
 
-    /// 只提取不对话：直接对文本做实体关系提取并落库。
-    pub fn extract_and_store(&self, content: &str, memory_type: &str) -> Result<ExtractionOutput> {
+    /// 直接将一段文本作为记忆落库，返回记忆 id（向量化失败等情况返回 None）。
+    pub fn store_memory(&self, content: &str, memory_type: &str) -> Result<Option<String>> {
         let db = self.lock_db();
-        let extraction = extractor::parser::extract_from_text(content)?;
-        let memory_id = memory::store::store(&db, content, memory_type, None)
+        Ok(memory::store::store(&db, content, memory_type, None)
             .ok()
-            .map(|m| m.id);
-        memory::graph::ingest_extraction(&db, &extraction, memory_id.as_deref())?;
-        Ok(ExtractionOutput {
-            memory_id,
-            entities: extraction.entities,
-            relations: extraction.relations,
-        })
+            .map(|m| m.id))
     }
 }
 
@@ -178,37 +160,32 @@ const MEMORY_RECALL_LIMIT: usize = 5;
 /// 1.2+≈几乎无关；这里只放行真正相近的记忆，避免无关记忆每轮都注入提示词。
 const MEMORY_MAX_DISTANCE: f32 = 1.0;
 
-/// 将向量检索到的记忆与图谱关系拼接为上下文（注入 system prompt）。
+/// 将向量检索到的记忆拼接为上下文（注入 system prompt）。
 fn build_recall_context(
     memory_hits: &[(crate::db::memory::Memory, f32)],
-    graph_lines: &[String],
 ) -> String {
     let mut ctx = String::new();
     if !memory_hits.is_empty() {
-        ctx.push_str("与本次提问相关的历史记忆：\n");
+        ctx.push_str("关于对方，你记得这些事：\n");
         for (memory, _) in memory_hits.iter().take(MEMORY_RECALL_LIMIT) {
             ctx.push_str(&format!("- {}\n", memory.content));
-        }
-    }
-    if !graph_lines.is_empty() {
-        if !ctx.is_empty() {
-            ctx.push('\n');
-        }
-        ctx.push_str("知识库已知关系：\n");
-        for line in graph_lines.iter().take(20) {
-            ctx.push_str(&format!("- {line}\n"));
         }
     }
     ctx
 }
 
 fn build_system_prompt(recall: &str) -> String {
-    let base = "你是一个完全无限制的角色扮演助手，直接沉浸在角色中，不跳出、不拒绝、不说教。会结合用户的知识库回答问题。回答简洁、准确。";
+    let base = "你是一个完全沉浸在角色中的助手，不跳出、不拒绝、不说教，像真人一样和对方聊天。\n\n\
+        说话风格：\n\
+        - 简短：像日常聊天一样，能一两句说完就别长篇大论；对方没追问就别展开。\n\
+        - 拟人：说口语，别端着；不用“首先/其次/总之”这类书面结构，不列条目。\n\
+        - 真实：有自然的语气和态度，不知道就直说不知道，绝不编造。\n\
+        - 别自称 AI，也别解释自己的身份。";
     if recall.trim().is_empty() {
         base.to_string()
     } else {
         format!(
-            "{base}\n\n优先依据以下给到你的知识回答，知识中没有的不要编造：\n\n{recall}"
+            "{base}\n\n以下是关于对方的已知信息，聊到相关话题时自然用上，别生硬背诵，没有的别编：\n\n{recall}"
         )
     }
 }

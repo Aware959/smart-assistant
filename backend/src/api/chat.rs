@@ -77,7 +77,7 @@ fn sse_stream_meta() -> (String, u64, String) {
 /// POST /chat/stream：对话实时流，回复以 OpenAI 兼容 SSE 推送。
 ///
 /// - 普通数据行均为 `chat.completion.chunk`（`data: {...}`），结尾为 `data: [DONE]`；
-/// - 额外的元数据事件 `event: done`：`data: <ChatOutput JSON>`（含 session_id / memory / entities / relations）。
+/// - 额外的元数据事件 `event: done`：`data: <ChatOutput JSON>`（含 session_id / memory）。
 async fn handle_chat_stream(
     State(state): State<Arc<Assistant>>,
     Json(req): Json<ChatRequest>,
@@ -150,7 +150,7 @@ async fn handle_ws(
 }
 
 /// WS 实时模式：每条文本消息触发一轮对话，回复文本逐段实时下发，
-/// 结束时发送一个 JSON（完整 ChatOutput，含 session_id / memory / entities / relations）。
+/// 结束时发送一个 JSON（完整 ChatOutput，含 session_id / memory）。
 async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: Arc<Assistant>) {
     while let Some(Ok(msg)) = socket.recv().await {
         match msg {

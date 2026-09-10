@@ -3,6 +3,10 @@ import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
+// 后端默认以 HTTPS (自签证书) 提供服务，见 backend/scripts/gen-cert.ps1。
+// secure:false —— 开发代理跳过对自签名证书的校验。
+const API_TARGET = 'https://127.0.0.1:3000'
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -14,13 +18,11 @@ export default defineConfig({
     host: true,
     port: 5173,
     proxy: {
-      '/chat': 'http://127.0.0.1:3000',
-      '/sessions': 'http://127.0.0.1:3000',
-      '/memories': 'http://127.0.0.1:3000',
-      '/memory': 'http://127.0.0.1:3000',
-      '/search': 'http://127.0.0.1:3000',
-      '/entities': 'http://127.0.0.1:3000',
-      '/relations': 'http://127.0.0.1:3000',
+      '/chat': { target: API_TARGET, secure: false },
+      '/sessions': { target: API_TARGET, secure: false },
+      '/memories': { target: API_TARGET, secure: false },
+      '/memory': { target: API_TARGET, secure: false },
+      '/search': { target: API_TARGET, secure: false },
     },
   },
   build: {

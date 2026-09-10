@@ -3,7 +3,6 @@ pub mod config;
 pub mod db;
 pub mod embedding;
 pub mod error;
-pub mod extractor;
 pub mod genai_client;
 pub mod llm;
 pub mod memory;
@@ -12,16 +11,14 @@ pub mod services;
 #[cfg(feature = "desktop")]
 pub mod api;
 
-pub use services::{
-    EntityRecord, MemoryHit, MemoryRecord, MessageRecord, RelationRecord, SessionRecord,
-};
+#[cfg(any(feature = "telegram", feature = "ilink"))]
+pub mod channels;
+
+pub use services::{MemoryHit, MemoryRecord, MessageRecord, SessionRecord};
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FfiResult, Result};
-
-// UniFFI 需要这些类型可序列化往返，这里复用到 extractor 中的类型定义。
-use crate::extractor::parser::{ExtractedEntity, ExtractedRelation};
 
 /// 应用外壳：持有编排层 [`agent::Agent`]，对外提供 UniFFI 导出与能力门面。
 /// 业务流水线在 Agent 中实现，本层不做状态与逻辑，仅做薄委托与类型映射。
@@ -45,9 +42,6 @@ impl Assistant {
     }
 
     /// 对话主入口（流式）：完整流水线见 [`agent::Agent::chat_stream`]。
-    ///
-    /// 消息是记录、记忆是事实，二者分离；历史上下文自动取该会话最近 `history_count`
-    /// 条消息（缺省 6），`on_delta` 在生成线程上同步回调文本片段。
     pub fn chat_stream<F>(&self, input: &ChatInput, on_delta: F) -> Result<ChatOutput>
     where
         F: FnMut(&str) + Send,
@@ -55,9 +49,9 @@ impl Assistant {
         self.inner.chat_stream(input, on_delta)
     }
 
-    /// 只提取不对话：直接对文本做实体关系提取并落库。
-    pub fn extract_and_store(&self, content: &str, memory_type: &str) -> Result<ExtractionOutput> {
-        self.inner.extract_and_store(content, memory_type)
+    /// 直接将一段文本作为记忆落库，返回记忆 id（失败时返回 None）。
+    pub fn store_memory(&self, content: &str, memory_type: &str) -> Result<Option<String>> {
+        self.inner.store_memory(content, memory_type)
     }
 
     // ---------- 服务门面（委托 services 层） ----------
@@ -115,28 +109,10 @@ impl Assistant {
         services::delete_memory(&db, id)
     }
 
-    /// 列出全部实体。
-    pub fn list_entities(&self) -> Result<Vec<EntityRecord>> {
-        let db = self.inner.lock_db();
-        services::list_entities(&db)
-    }
-
-    /// 列出全部关系。
-    pub fn list_relations(&self) -> Result<Vec<RelationRecord>> {
-        let db = self.inner.lock_db();
-        services::list_relations(&db)
-    }
-
-    /// 删除一条关系（记忆手动调整）。
-    pub fn delete_relation(&self, id: &str) -> Result<()> {
-        let db = self.inner.lock_db();
-        services::delete_relation(&db, id)
-    }
-
-    /// 删除一个实体。
-    pub fn delete_entity(&self, id: &str) -> Result<()> {
-        let db = self.inner.lock_db();
-        services::delete_entity(&db, id)
+    /// 供渠道接入（telegram / ilink 等）复用内部数据库连接。
+    #[cfg(any(feature = "telegram", feature = "ilink"))]
+    pub(crate) fn inner_db(&self) -> std::sync::MutexGuard<'_, crate::db::Database> {
+        self.inner.lock_db()
     }
 }
 
@@ -168,15 +144,6 @@ pub struct ChatOutput {
     pub reply: String,
     /// 本次对话沉淀出的记忆（LLM 判定值得记住时才有）。
     pub memory: Option<MemoryRecord>,
-    pub entities: Vec<ExtractedEntity>,
-    pub relations: Vec<ExtractedRelation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtractionOutput {
-    pub memory_id: Option<String>,
-    pub entities: Vec<ExtractedEntity>,
-    pub relations: Vec<ExtractedRelation>,
 }
 
 // ---------- UniFFI 导出 ----------
@@ -256,27 +223,5 @@ impl Assistant {
     #[uniffi::method]
     pub fn delete_memory_ffi(&self, id: String) -> FfiResult<()> {
         self.delete_memory(&id).map_err(Into::into)
-    }
-
-    #[uniffi::method]
-    pub fn list_entities_ffi(&self) -> FfiResult<String> {
-        let entities = self.list_entities()?;
-        serde_json::to_string(&entities).map_err(Into::into)
-    }
-
-    #[uniffi::method]
-    pub fn list_relations_ffi(&self) -> FfiResult<String> {
-        let relations = self.list_relations()?;
-        serde_json::to_string(&relations).map_err(Into::into)
-    }
-
-    #[uniffi::method]
-    pub fn delete_relation_ffi(&self, id: String) -> FfiResult<()> {
-        self.delete_relation(&id).map_err(Into::into)
-    }
-
-    #[uniffi::method]
-    pub fn delete_entity_ffi(&self, id: String) -> FfiResult<()> {
-        self.delete_entity(&id).map_err(Into::into)
     }
 }

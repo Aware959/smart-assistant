@@ -39,7 +39,7 @@ pub fn search(db: &Database, query: &str, limit: usize) -> Result<Vec<(Memory, f
     db_memory::search_similar(db, &vector, limit)
 }
 
-/// 删除一条记忆（级联删除实体与关系）。
+/// 删除一条记忆（含向量）。
 pub fn remove(db: &Database, id: &str) -> Result<()> {
     db_memory::delete(db, id)?;
     Ok(())
