@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::OnceLock;
 
 use genai::adapter::AdapterKind;
+use genai::chat::ChatOptions;
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
 use tokio::runtime::Runtime;
@@ -42,14 +43,25 @@ fn runtime() -> &'static Runtime {
 }
 
 /// LLM chat 专用的 genai Client。
+///
+/// 客户端默认开启 `normalize_reasoning_content`：本地模型常把推理过程写进
+/// content 的 ` thinking...response` 标签块，genai 会剥掉并归入
+/// `reasoning_content`，正文只保留真正的回答。
+/// 注意：该归一化作用于非流式 `exec_chat`；流式 `exec_chat_stream` 只分离
+/// provider 返回在 `delta.reasoning_content` 里的思考（LLM 内联在 content 里
+/// 的标签块不会在流式路径被剥离，需保留给上层或依赖 provider 行为）。
 pub(crate) fn chat_client() -> &'static Client {
-    CHAT_CLIENT.get_or_init(|| build_client(&Config::get().llm_api_url, &Config::get().llm_api_key))
+    let chat_options = ChatOptions {
+        normalize_reasoning_content: Some(true),
+        ..Default::default()
+    };
+    CHAT_CLIENT.get_or_init(|| build_client(&Config::get().llm_api_url, &Config::get().llm_api_key, Some(&chat_options)))
 }
 
 /// embedding 专用的 genai Client。
 pub(crate) fn embed_client() -> &'static Client {
     EMBED_CLIENT
-        .get_or_init(|| build_client(&Config::get().embedding_api_url, &Config::get().embedding_api_key))
+        .get_or_init(|| build_client(&Config::get().embedding_api_url, &Config::get().embedding_api_key, None))
 }
 
 /// 构建绑定到 OpenAI 兼容端点的 Client。
@@ -57,7 +69,8 @@ pub(crate) fn embed_client() -> &'static Client {
 /// - `api_url`  非空时作为 Endpoint；为空回退到 genai 默认（OpenAI 官方）。
 /// - `api_key`  非空时直接使用；为空时：自定义端点 → `AuthData::None`（本地无鉴权），
 ///   官方端点 → 回退读取环境变量 `OPENAI_API_KEY`。
-fn build_client(api_url: &str, api_key: &str) -> Client {
+/// - `chat_options` 非空时设为客户端默认行为（作用于该 client 的全部 chat 请求）。
+fn build_client(api_url: &str, api_key: &str, chat_options: Option<&ChatOptions>) -> Client {
     let url = resolve_url(api_url).map(ToOwned::to_owned);
     let auth = if api_key.is_empty() {
         if url.is_some() {
@@ -88,9 +101,11 @@ fn build_client(api_url: &str, api_key: &str) -> Client {
         },
     );
 
-    Client::builder()
-        .with_service_target_resolver(service_target_resolver)
-        .build()
+    let mut builder = Client::builder().with_service_target_resolver(service_target_resolver);
+    if let Some(options) = chat_options {
+        builder = builder.with_chat_options(options.clone());
+    }
+    builder.build()
 }
 
 /// URL 为空字符串或等于已知默认值时，返回 None（让 genai 用其内置默认端点）。

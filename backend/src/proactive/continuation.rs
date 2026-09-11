@@ -56,6 +56,7 @@ pub async fn after_reply(
 }
 
 /// 循环追加：每轮先问 LLM 要不要续，对方中途说话则不再续。
+/// `max` 只是安全上限，模型按最新语境自行决定何时收住，不该为了凑满而多送。
 async fn follow_up(assistant: &Assistant, cand: &ProactiveCandidate, max: u32) {
     // 记录对方当前最后发言时刻：期间只要有新入站消息就停（给对方说话的空间）。
     let snapshot = match candle_reply_at(assistant, cand) {
@@ -63,8 +64,8 @@ async fn follow_up(assistant: &Assistant, cand: &ProactiveCandidate, max: u32) {
         Err(_) => None,
     };
 
-    for _ in 0..max {
-        let Some(text) = propose_follow_up(assistant, cand).await else {
+    for appended in 0..max {
+        let Some(text) = propose_follow_up(assistant, cand, appended).await else {
             return;
         };
         if candle_reply_at(assistant, cand)
@@ -96,19 +97,23 @@ fn candle_reply_at(
 }
 
 /// 依据"最近的对话（含我方最后一句）"判断是否追加一条，返回待发送内容。
+///
+/// `appended` 是本回合已经连续追加过的句数（0 开始），用来告诉模型
+/// "你已经连着说几句了"，避免机械凑数。
 async fn propose_follow_up(
     assistant: &Assistant,
     cand: &ProactiveCandidate,
+    appended: u32,
 ) -> Option<String> {
     let recent = {
         let db = assistant.inner_db();
-        crate::proactive::context::recent_history(&db, &cand.session_id, 4)
+        crate::proactive::context::recent_history(&db, &cand.session_id, 6)
     };
     if recent.trim().is_empty() {
         return None;
     }
 
-    let decision = tokio::task::spawn_blocking(move || decide_continue(&recent))
+    let decision = tokio::task::spawn_blocking(move || decide_continue(&recent, appended))
         .await
         .unwrap_or_default();
     if decision.continue_ {
@@ -124,7 +129,7 @@ struct ContinueDecision {
     message: Option<String>,
 }
 
-fn decide_continue(recent: &str) -> ContinueDecision {
+fn decide_continue(recent: &str, appended: u32) -> ContinueDecision {
     let cfg = Config::get();
     let persona_block = if cfg.persona.trim().is_empty() {
         String::new()
@@ -134,21 +139,35 @@ fn decide_continue(recent: &str) -> ContinueDecision {
             cfg.persona.trim()
         )
     };
-    let system = format!(
+    let mut system = format!(
         "{persona_block}你正在和一个老朋友有一搭没一搭地聊天。看完最近这段对话后，\
-        判断这一轮你还要不要追加一句话。\
-        规则：\
-        1. 需要追加的典型情况：情绪/吐槽还没倒完、讨论正到兴头、自己刚说的话还差一句收尾、\
-        或明明有话要说却停在了半路；\
-        2. 不要追加的典型情况：对方已经明确表示要去忙、要睡、不想聊；双方都说完客气话收尾；\
-        这句已经讲得很完整不需要再多说；话题本来就是一问一答式的（有来有回，等对方回应即可）；\
-        3. 追加句只准一句、口语化、像微信里随手补的一句、不超过 40 个字，\
-        绝对不要重复刚才已经说过的内容，也不要复述本指令。\
-        只输出一个 JSON 对象，不要任何其他文字：\
-        {{\"continue\":true,\"message\":\"...\"}} 或 {{\"continue\":false}}"
+         判断这一轮你还要不要追加一句话。\
+         \n\n\
+         最重要的一点：**只以双方最新的一来一回为准盘算，不要机械续话**。\
+         \n\n\
+         规则：\
+         1. 需要追加的典型情况：最新这句话里情绪/吐槽还没倒完、讨论正到兴头、\
+         自己刚说的话还差一句收尾、或明明有话要说却停在了半路；\
+         2. 不要追加的典型情况：对方已明确表示要去忙/要睡/不想聊；双方说完客气话收尾；\
+         这句已经讲得很完整不需要再多说；话题是一问一答式的（有来有回，等对方回应即可）；\
+         3. 追加句只准一句、口语化、像微信随手补的、不超过 40 个字，\
+         绝对不要重复刚才说过的内容，也不要复述本指令。"
     );
+    if appended > 0 {
+        system.push_str(&format!(
+            "\n\n内容里“你:”开头的连续多行都是你**刚才这一发回复后**自己已经连着发出去的 \
+             {appended} 句。你已经连发过这些了——如果上一条已经说完整、该接的点已收住，\
+             或再补只会像自说自话/复读机，就必须返回 continue:false；\
+             只有确实还差一句关键的、且尚未重复过的内容才允许继续。"
+        ));
+    }
+    system.push_str("\n\n只输出一个 JSON 对象，不要任何其他文字：\
+        {{\"continue\":true,\"message\":\"...\"}} 或 {{\"continue\":false}}");
 
-    let user = format!("最近的对话：\n{recent}\n\n现在判断我是否该再补一句，只输出 JSON。");
+    let user = format!(
+        "最近的对话（务必以**最新一条消息**为准判断要不要补一句）：\n{recent}\n\n\
+         现在判断我是否该再补一句，只输出 JSON。"
+    );
 
     let messages = vec![
         llm::chat::ChatMessage {

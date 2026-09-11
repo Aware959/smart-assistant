@@ -76,12 +76,27 @@ pub fn extract_from_text(user_input: &str) -> Result<MemoryExtraction> {
     ];
 
     let raw = if let Some(model) = extract_model() {
-        chat::complete_with_model(&messages, &model)?
+        chat::complete_structured(&messages, &model, "memory_extraction", extraction_schema())?
     } else {
-        chat::complete(&messages)?
+        chat::complete_structured(&messages, &Config::get().llm_model, "memory_extraction", extraction_schema())?
     };
 
     parse_raw(&raw)
+}
+
+/// `MemoryExtraction` 的 JSON Schema：交给支持 `json_schema` 的端点（llama.cpp 系）
+/// 用 grammar 约束输出，强制纯 JSON、不再混入思考段。
+fn extraction_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "is_memory": { "type": "boolean" },
+            "memory_content": { "type": ["string", "null"] },
+            "memory_type": { "type": "string" },
+            "tier": { "type": "string" }
+        },
+        "required": ["is_memory", "memory_type", "tier"]
+    })
 }
 
 fn extract_model() -> Option<String> {
@@ -154,7 +169,7 @@ tier 取值与判定规则：
 
 规则：
 1. is_memory：仅当消息包含值得日后回想的实质信息时才为 true（个人信息、偏好、重要经历、计划、任务进度等）。闲聊寒暄、单纯提问、昵称寒暄、无新信息的重复抱怨、情绪宣泄而无具体事实时一律 false，宁可漏掉不要硬存。
-2. memory_content：is_memory 为 true 时给出规范化的一句话陈述——去除口语、指代补全（"我"→"用户"）、只保留一个核心事实，不要写成大段摘抄。
+2. memory_content：is_memory 为 true 时给出规范化的一句话陈述——去除口语、只保留一个核心事实，不要写成大段摘抄。人称必须归一：无论用户原句怎么自称，一律用"对方"（或"用户"）作主语，禁止出现"我/我们/俺/咱们/本人"等第一人称（原话引语除外）。例如用户说"我最喜欢蓝色了"应写成"对方最喜欢的颜色是蓝色"。
 3. memory_type 常用取值：fact / preference / personal / todo / event，不确定用 fact。
 4. 不要虚构用户输入中不存在的信息。
 

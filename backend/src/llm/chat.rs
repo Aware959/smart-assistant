@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use genai::chat::{
-    ChatMessage as GenaiChatMessage, ChatOptions, ChatRequest, ChatStreamEvent,
+    ChatMessage as GenaiChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ChatStreamEvent,
+    JsonSpec,
 };
 use serde::{Deserialize, Serialize};
 
@@ -33,11 +34,38 @@ pub fn complete(messages: &[ChatMessage]) -> Result<String> {
 
 /// 用指定模型完成非流式对话（记忆提取、判定等任务可与对话模型分离）。
 pub fn complete_with_model(messages: &[ChatMessage], model: &str) -> Result<String> {
+    complete_impl(messages, model, None)
+}
+
+/// 按 JSON Schema 强制结构化输出的非流式对话（记忆提取/判定等任务）。
+///
+/// 通过 `response_format: {type: json_schema, json_schema: {name, strict, schema}}`
+/// 驱动。llama.cpp 系端点只接受 `json_schema` / `text`（拒绝 OpenAI 的
+/// `json_object`），此处统一走 json_schema，多数实现会同时用 grammar 约束
+/// 输出、连思考段一起压掉。
+pub fn complete_structured(
+    messages: &[ChatMessage],
+    model: &str,
+    name: impl Into<String>,
+    schema: serde_json::Value,
+) -> Result<String> {
+    let options = ChatOptions {
+        response_format: Some(ChatResponseFormat::JsonSpec(JsonSpec::new(name, schema))),
+        ..Default::default()
+    };
+    complete_impl(messages, model, Some(&options))
+}
+
+fn complete_impl(
+    messages: &[ChatMessage],
+    model: &str,
+    options: Option<&ChatOptions>,
+) -> Result<String> {
     let chat_req = build_chat_request(messages);
 
     let chat_res = genai_client::block_on(async move {
         let client = genai_client::chat_client();
-        client.exec_chat(model, chat_req, None).await
+        client.exec_chat(model, chat_req, options).await
     })?;
 
     chat_res

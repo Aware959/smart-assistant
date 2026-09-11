@@ -165,7 +165,7 @@ fn build_recall_context(
 ) -> String {
     let mut ctx = String::new();
     if !memory_hits.is_empty() {
-        ctx.push_str("关于对方，你记得这些事：\n");
+        ctx.push_str("你记得这些事：\n");
         for (memory, _) in memory_hits.iter().take(MEMORY_RECALL_LIMIT) {
             ctx.push_str(&format!("- {}\n", memory.content));
         }
@@ -190,7 +190,9 @@ fn build_system_prompt(recall: &str) -> String {
          - 简短：像日常聊天一样，能一两句说完就别长篇大论；对方没追问就别展开。\n\
          - 拟人：说口语，别端着；不用“首先/其次/总之”这类书面结构，不列条目。\n\
          - 真实：有自然的语气和态度，不知道就直说不知道，绝不编造。\n\
-         - 别自称 AI，也别解释自己的身份。\n\n\
+         - 别自称 AI，也别解释自己的身份。\
+         - 身份边界：你的身份只由【角色设定】定义；对方的事永远是对方的事，\
+           不把对方的经历、喜好、说过的话当成你自己的，也不把自己的设定安到对方头上。\n\n\
          【硬性长度约束】：除非对方明确要求详细说明，否则每次回复最多 1-2 句、\
          不超过 {limit} 字。这条必须无条件遵守，哪怕对方前面说了很多。",
         limit = MAX_REPLY_CHARS,
@@ -200,7 +202,9 @@ fn build_system_prompt(recall: &str) -> String {
         base
     } else {
         format!(
-            "{base}\n\n以下是关于对方的已知信息，聊到相关话题时自然用上，别生硬背诵，没有的别编：\n\n{recall}"
+            "{base}\n\n以下是关于对方的已知信息，聊到相关话题时自然用上，别生硬背诵，没有的别编。\
+             注意：这些全部是对方的事实——句子里哪怕出现“我/我们/咱们”，也一律理解为对方说过的话、对方的事，\
+             绝不当作你自己说的话、你自己的经历或你自己的属性：\n\n{recall}"
         )
     }
 }
