@@ -129,6 +129,24 @@ async fn send_typing(client: &reqwest::Client, base: &str, chat_id: i64) {
         .await;
 }
 
+/// 主动推送：与长轮询解耦，独立构建 client 直接发送（Telegram 无推送窗口限制）。
+pub(crate) async fn push_send(chat_id: i64, text: &str) -> Result<(), String> {
+    let token = Config::get().telegram_bot_token.trim().to_string();
+    if token.is_empty() {
+        return Err("未配置 TELEGRAM_BOT_TOKEN".to_string());
+    }
+    let client = build_client()?;
+    send_text(&client, &api_base(&token), chat_id, text).await
+}
+
+/// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
+fn touch_user_reply(assistant: &Assistant, external_id: &str) {
+    let db = assistant.inner_db();
+    if let Ok(session) = crate::db::channel::get_or_create_session(&db, CHANNEL, external_id) {
+        let _ = crate::db::proactive::touch_user_reply(&db, CHANNEL, external_id, &session.id);
+    }
+}
+
 /// 处理一条 TG 文本消息，返回回复文本（None 表示无需回复）。
 async fn handle_text(
     assistant: Arc<Assistant>,
@@ -210,6 +228,9 @@ async fn run_loop(assistant: Arc<Assistant>, token: &str) -> Result<(), String> 
         ));
     }
     tracing::info!("telegram bot 已连接，开始长轮询");
+    super::shared_push()
+        .telegram_ready
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     // 丢弃启动前积压的 update，避免重启后重复回复
     //（offset 语义：小于 offset 的 update 视为已确认）。
@@ -264,19 +285,30 @@ async fn run_loop(assistant: Arc<Assistant>, token: &str) -> Result<(), String> 
                 continue;
             }
 
+            touch_user_reply(&assistant, &chat_id.to_string());
+
             send_typing(&client, &base, chat_id).await;
 
-            let reply = match handle_text(assistant.clone(), chat_id, &text).await {
-                Ok(Some(reply)) => reply,
+            let (next_reply, is_fallback) = match handle_text(assistant.clone(), chat_id, &text).await
+            {
+                Ok(Some(reply)) => (reply, false),
                 Ok(None) => continue,
                 Err(e) => {
                     tracing::error!(error = %e, "对话失败");
-                    "刚才走神了，再发一次试试。".to_string()
+                    ("刚才走神了，再发一次试试。".to_string(), true)
                 }
             };
 
-            if let Err(e) = send_text(&client, &base, chat_id, &reply).await {
+            if let Err(e) = send_text(&client, &base, chat_id, &next_reply).await {
                 tracing::error!(error = %e, chat_id, "回复发送失败");
+            } else if !is_fallback {
+                // 正常回复发送成功：按语境决定是否像真人一样接着补几句。
+                crate::proactive::continuation::after_reply(
+                    assistant.clone(),
+                    CHANNEL,
+                    &chat_id.to_string(),
+                )
+                .await;
             }
         }
     }

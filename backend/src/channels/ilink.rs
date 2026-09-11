@@ -5,7 +5,9 @@
 //!
 //! 与 Telegram 的差异：
 //! - 无 AppSecret，只能扫码登录；token 失效（会话过期）后需重新扫码；
-//! - 不能主动推送，回复必须带入站消息的 `context_token`；
+//! - **主动推送是"窗口式"的**：需要用户先发消息拿到 `context_token`，服务端缓存后
+//!   可在窗口内（约 24h / 10 次外发的保守取值）主动发送；超窗或超次数须等用户
+//!   再次入站刷新。对外表现由 [`super::IlinkRegistry`] 管理；
 //! - 每个请求头需携带随机 `X-WECHAT-UIN`。
 
 use std::sync::Arc;
@@ -37,7 +39,7 @@ const QR_POLL_INTERVAL_SECS: u64 = 2;
 
 /// 持久化扫码登录凭证，避免每次重启都重新扫码。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct SavedSession {
+pub(crate) struct SavedSession {
     #[serde(default)]
     bot_token: String,
     #[serde(default)]
@@ -414,6 +416,105 @@ async fn send_text(
     Ok(())
 }
 
+// ---------- 主动推送（窗口式） ----------
+
+fn push_registry() -> &'static std::sync::Mutex<Option<super::IlinkRegistry>> {
+    &super::shared_push().ilink
+}
+
+/// 登录会话更新：登录/重登录后调用（重登录时清空全部用户 token 缓存）。
+pub(crate) fn set_session(sess: SavedSession, drop_contacts: bool) {
+    let mut reg = push_registry().lock().unwrap_or_else(|p| p.into_inner());
+    let entry = reg.get_or_insert_with(super::IlinkRegistry::default);
+    entry.sess = Some(sess);
+    if drop_contacts {
+        entry.contacts.clear();
+    }
+}
+
+/// 入站消息刷新某用户的 context_token（同时作为"对方刚说话"的证明）。
+fn refresh_contact(from_user_id: &str, context_token: &str) {
+    if context_token.trim().is_empty() {
+        return;
+    }
+    let mut reg = push_registry().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(entry) = reg.as_mut() {
+        entry.contacts.insert(
+            from_user_id.to_string(),
+            super::IlinkContact {
+                context_token: context_token.to_string(),
+                observed_at: chrono::Utc::now(),
+                sends_since_refresh: 0,
+            },
+        );
+    }
+}
+
+/// 主动推送：仅当该用户带新鲜 context_token 时才会真正发送。
+/// 返回 Err 表示当前无可用窗口（token 缺失/过期/超次），调用方应跳过该用户。
+pub(crate) async fn push_send(external_id: &str, text: &str) -> Result<(), String> {
+    let cfg = Config::get();
+    let (sess, token) = {
+        let reg = push_registry().lock().unwrap_or_else(|p| p.into_inner());
+        let Some(entry) = reg.as_ref() else {
+            return Err("iLink 尚未登录".to_string());
+        };
+        let Some(sess) = entry.sess.clone() else {
+            return Err("iLink 会话为空".to_string());
+        };
+        let Some(contact) = entry.contacts.get(external_id) else {
+            return Err("该用户无 context_token（需先主动发消息）".to_string());
+        };
+        if !contact.is_fresh(chrono::Utc::now(), cfg.ilink_context_max_age_hours) {
+            return Err("context_token 已过窗口，等待用户再次入站刷新".to_string());
+        }
+        (sess, contact.context_token.clone())
+    };
+
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+    let base = if sess.baseurl.trim().is_empty() {
+        DEFAULT_BASE.to_string()
+    } else {
+        sess.baseurl.clone()
+    };
+
+    match send_text(&client, &base, &sess, external_id, &token, text).await {
+        Ok(()) => {
+            // 发送成功：递增窗口计数（iLink 200 不代表 100% 投递，按协议层成功计，
+            // 用户下次入站自然会刷新窗口）。
+            let mut reg = push_registry().lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = reg.as_mut() {
+                if let Some(c) = entry.contacts.get_mut(external_id) {
+                    c.sends_since_refresh += 1;
+                }
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::warn!(
+                user = external_id,
+                error = %e,
+                "iLink 主动推送失败，丢弃该用户 token"
+            );
+            let mut reg = push_registry().lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = reg.as_mut() {
+                entry.contacts.remove(external_id);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
+fn touch_user_reply(assistant: &Assistant, external_id: &str) {
+    let db = assistant.inner_db();
+    if let Ok(session) = crate::db::channel::get_or_create_session(&db, CHANNEL, external_id) {
+        let _ = crate::db::proactive::touch_user_reply(&db, CHANNEL, external_id, &session.id);
+    }
+}
+
 /// 处理一条用户文本消息，返回回复文本。
 async fn handle_text(
     assistant: Arc<Assistant>,
@@ -525,19 +626,22 @@ async fn run_loop(
                 continue;
             }
 
+            refresh_contact(&msg.from_user_id, &msg.context_token);
+            touch_user_reply(&assistant, &msg.from_user_id);
+
             send_typing(client, &base, sess, &msg.context_token).await;
 
-            let reply = match handle_text(
+            let (reply, is_fallback) = match handle_text(
                 assistant.clone(),
                 msg.from_user_id.clone(),
                 text,
             )
             .await
             {
-                Ok(reply) => reply,
+                Ok(reply) => (reply, false),
                 Err(e) => {
                     tracing::error!(error = %e, "对话失败");
-                    "刚才走神了，再发一次试试。".to_string()
+                    ("刚才走神了，再发一次试试。".to_string(), true)
                 }
             };
 
@@ -552,6 +656,14 @@ async fn run_loop(
             .await
             {
                 tracing::error!(error = %e, "回复发送失败");
+            } else if !is_fallback {
+                // 正常回复发送成功：按语境决定是否像真人一样接着补几句。
+                crate::proactive::continuation::after_reply(
+                    assistant.clone(),
+                    CHANNEL,
+                    &msg.from_user_id,
+                )
+                .await;
             }
         }
     }
@@ -587,6 +699,7 @@ pub async fn run(assistant: Arc<Assistant>) {
                     if let Err(e) = save_session(&session_file, &s) {
                         tracing::error!(error = %e, "保存会话失败，下次重启需重新扫码");
                     }
+                    set_session(s.clone(), true);
                     sess = s;
                 }
                 Err(e) => {
@@ -595,6 +708,8 @@ pub async fn run(assistant: Arc<Assistant>) {
                     continue;
                 }
             }
+        } else {
+            set_session(sess.clone(), true);
         }
 
         tracing::info!("iLink 通道已连接，开始长轮询");

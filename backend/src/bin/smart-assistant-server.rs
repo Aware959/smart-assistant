@@ -116,6 +116,13 @@ async fn main() {
         tokio::spawn(smart_assistant::channels::ilink::run(assistant.clone()));
     }
 
+    // 主动陪伴引擎：PROACTIVE_ENABLED=1 时开启（依赖通道状态做频率/窗口控制）。
+    #[cfg(any(feature = "telegram", feature = "ilink"))]
+    if cfg.proactive_enabled {
+        tracing::info!("PROACTIVE_ENABLED 已开启，启动主动陪伴引擎");
+        tokio::spawn(smart_assistant::proactive::run(assistant.clone()));
+    }
+
     // 构建路由（若配置了前端产物，则同源托管 SPA 静态文件）
     let app = api::build_router(assistant);
     let app = match cfg.web_dist.as_deref() {

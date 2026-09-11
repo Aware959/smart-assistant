@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod memory;
 pub mod message;
+pub mod proactive;
 pub mod session;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -185,6 +186,17 @@ fn init_schema(conn: &Connection) -> Result<()> {
             session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL,
+            PRIMARY KEY (channel, external_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS proactive_state (
+            channel            TEXT NOT NULL,
+            external_id        TEXT NOT NULL,
+            session_id         TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            last_user_reply_at TEXT,
+            last_proactive_at  TEXT,
+            today_count        INTEGER NOT NULL DEFAULT 0,
+            today_date         TEXT,
             PRIMARY KEY (channel, external_id)
         );
 

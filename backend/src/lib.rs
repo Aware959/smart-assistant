@@ -14,6 +14,9 @@ pub mod api;
 #[cfg(any(feature = "telegram", feature = "ilink"))]
 pub mod channels;
 
+#[cfg(any(feature = "telegram", feature = "ilink"))]
+pub mod proactive;
+
 pub use services::{MemoryHit, MemoryRecord, MessageRecord, SessionRecord};
 
 use serde::{Deserialize, Serialize};

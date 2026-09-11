@@ -2,12 +2,72 @@
 //!
 //! 每个渠道只做三件事：收消息 → 调 [`crate::Assistant::chat_stream`] → 回消息。
 //! 会话隔离由 [`crate::db::channel`] 负责。
+//!
+//! 主动推送：各渠道的 run 循环把"当前可推状态"写入 [`shared_push`]，由
+//! [`crate::proactive`] 引擎只读查询后调用对应通道的 `push_send`。
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "telegram")]
 pub mod telegram;
 
 #[cfg(feature = "ilink")]
 pub mod ilink;
+
+/// iLink 每次入站刷新后，最多允许的主动外发条数（协议窗口约束的保守取值）。
+#[cfg(feature = "ilink")]
+pub(crate) const ILINK_MAX_SENDS_PER_REFRESH: usize = 10;
+
+/// 全局推送状态注册表：由各通道 relay 维护，proactive 引擎只读。
+#[derive(Default)]
+pub struct PushChannels {
+    /// Telegram 长轮询已连通（token 有效）时置位，之后即可随时主动推。
+    pub(crate) telegram_ready: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "ilink")]
+    pub(crate) ilink: Mutex<Option<IlinkRegistry>>,
+}
+
+/// iLink 推送上下文：登录会话 + 每个用户的最近 context_token 缓存。
+#[cfg(feature = "ilink")]
+#[derive(Default)]
+pub(crate) struct IlinkRegistry {
+    pub(crate) sess: Option<crate::channels::ilink::SavedSession>,
+    pub(crate) contacts: HashMap<String, IlinkContact>,
+}
+
+#[cfg(feature = "ilink")]
+#[derive(Clone)]
+pub(crate) struct IlinkContact {
+    pub(crate) context_token: String,
+    /// 该 token 最后被（入站消息）刷新的时刻。
+    pub(crate) observed_at: chrono::DateTime<chrono::Utc>,
+    /// 自上次刷新以来已主动发送的条数。
+    pub(crate) sends_since_refresh: usize,
+}
+
+#[cfg(feature = "ilink")]
+impl IlinkContact {
+    /// context_token 是否仍在新鲜窗口内（时效 + 次数上限）。
+    pub(crate) fn is_fresh(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        max_age_hours: i64,
+    ) -> bool {
+        let age = chrono::Duration::max(
+            now.signed_duration_since(self.observed_at),
+            chrono::Duration::zero(),
+        );
+        age < chrono::Duration::hours(max_age_hours)
+            && self.sends_since_refresh < ILINK_MAX_SENDS_PER_REFRESH
+    }
+}
+
+/// 获取全局推送注册表（进程级单例）。
+pub(crate) fn shared_push() -> &'static PushChannels {
+    static PUSH: OnceLock<PushChannels> = OnceLock::new();
+    PUSH.get_or_init(PushChannels::default)
+}
 
 /// 把长文本按字符上限切分为多段（优先在换行处断开，中文按字符计数）。
 /// 各渠道发送接口都有单条长度限制，统一用该函数分片。
