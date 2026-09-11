@@ -8,10 +8,25 @@ pub struct Config {
     pub llm_api_url: String,
     pub llm_api_key: String,
     pub llm_model: String,
+    /// 记忆提取专用模型：留空则复用 llm_model。推荐用更强的模型负责
+    /// 记忆判定/事实化，对话模型只管聊天（两者可分离）。
+    pub llm_extract_model: String,
+    /// 角色设定（人设/性格/喜欢…）。非空时每一轮对话都以硬约束注入 system 提示词。
+    pub persona: String,
     pub embedding_api_url: String,
     pub embedding_api_key: String,
     pub embedding_model: String,
     pub embedding_dim: usize,
+    /// 记忆召回的相似度阈值（欧氏距离，≤ 该值才入选；越严越少）。过放宽会
+    /// 把无关记忆每轮都注入提示词，过严会"失忆"。需随 embedding 模型微调。
+    pub memory_recall_threshold: f32,
+    /// 记忆去重阈值：新记忆与库中某条距离 ≤ 该值时视为同一事实，不新增、
+    /// 只刷新 updated_at。只有高度近似才算重复，避免误杀同主题的不同事实。
+    pub memory_dedup_threshold: f32,
+    /// 短期记忆（short）存活天数：如"身体不舒服"这类过期信息。
+    pub memory_short_ttl_days: i64,
+    /// 意向记忆（intent）存活天数：如"打算下个月去看电影"这类计划。
+    pub memory_intent_ttl_days: i64,
     /// HTTPS 证书链文件（PEM）。留空时回退到运行目录 `certs/server.pem`。
     pub tls_cert: Option<String>,
     /// HTTPS 私钥文件（PEM）。留空时回退到运行目录 `certs/server.key`。
@@ -32,6 +47,27 @@ pub struct Config {
     pub ilink_session_file: String,
     /// 允许接入的微信用户 id 白名单（逗号分隔，形如 xxx@im.wechat）。留空表示不限制。
     pub ilink_allowed_ids: Vec<String>,
+    /// iLink 的 context_token 新鲜窗口（小时）：超过该时长的 token 视为过期，
+    /// 期间需用户再发消息才能刷新（官方表现为约 24h / 10 次主动外发）。
+    pub ilink_context_max_age_hours: i64,
+    /// 主动陪伴总开关。
+    pub proactive_enabled: bool,
+    /// 主动发送的随机间隔最小值（分钟）。
+    pub proactive_min_minutes: i64,
+    /// 主动发送的随机间隔最大值（分钟）。
+    pub proactive_max_minutes: i64,
+    /// 安静时段（本机时间，HH-HH 半开区间，如 "23-7" 表示 23:00~6:59 不主动；
+    /// 起止相同视为全天不安静）。
+    pub proactive_quiet_hours: (u32, u32),
+    /// 每用户每天的主动消息上限。
+    pub proactive_daily_limit: u32,
+    /// 距用户最后一次说话超过多少小时后才可能被主动联系（避免打断热聊）。
+    pub proactive_min_silence_hours: i64,
+    /// 距用户最后一次说话超过多少天还未回复则不再主动打扰（避免骚扰沉睡用户）。
+    pub proactive_max_idle_days: i64,
+    /// 每轮回复后最多连续追加的语句数：话题有延展性时 AI 会像真人一样接着说
+    /// （倾诉/吐槽/讨论进行中）；设为 0 关闭该能力。
+    pub proactive_max_followups: u32,
 }
 
 impl Default for Config {
@@ -41,10 +77,16 @@ impl Default for Config {
             llm_api_url: "http://127.0.0.1:1234/v1/completions".to_string(),
             llm_api_key: String::new(),
             llm_model: "qwen3.5-9b-uncensored-hauhaucs-aggressive".to_string(),
+            llm_extract_model: String::new(),
+            persona: String::new(),
             embedding_api_url: "http://127.0.0.1:1234/v1/embeddings".to_string(),
             embedding_api_key: String::new(),
             embedding_model: "text-embedding-embeddinggemma-300m".to_string(),
             embedding_dim: 768,
+            memory_recall_threshold: 0.9,
+            memory_dedup_threshold: 0.25,
+            memory_short_ttl_days: 7,
+            memory_intent_ttl_days: 90,
             tls_cert: None,
             tls_key: None,
             web_dist: Some("../frontend/dist".to_string()),
@@ -55,6 +97,15 @@ impl Default for Config {
             ilink_bot_token: String::new(),
             ilink_session_file: "ilink_session.json".to_string(),
             ilink_allowed_ids: Vec::new(),
+            ilink_context_max_age_hours: 12,
+            proactive_enabled: false,
+            proactive_min_minutes: 45,
+            proactive_max_minutes: 180,
+            proactive_quiet_hours: (23, 7),
+            proactive_daily_limit: 8,
+            proactive_min_silence_hours: 2,
+            proactive_max_idle_days: 7,
+            proactive_max_followups: 3,
         }
     }
 }
@@ -69,6 +120,8 @@ impl Config {
             llm_api_key: std::env::var("LLM_API_KEY").unwrap_or_default(),
             llm_model: std::env::var("LLM_MODEL")
                 .unwrap_or_else(|_| "google/gemma-4-26b-a4b-qat".to_string()),
+            llm_extract_model: std::env::var("LLM_EXTRACT_MODEL").unwrap_or_default(),
+            persona: std::env::var("PERSONA").unwrap_or_default(),
             embedding_api_url: std::env::var("EMBEDDING_API_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:1234/v1/embeddings".to_string()),
             embedding_api_key: std::env::var("EMBEDDING_API_KEY").unwrap_or_default(),
@@ -78,6 +131,22 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(768),
+            memory_recall_threshold: std::env::var("MEMORY_RECALL_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.9),
+            memory_dedup_threshold: std::env::var("MEMORY_DEDUP_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.25),
+            memory_short_ttl_days: std::env::var("MEMORY_SHORT_TTL_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(7),
+            memory_intent_ttl_days: std::env::var("MEMORY_INTENT_TTL_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(90),
             tls_cert: std::env::var("SMART_ASSISTANT_TLS_CERT").ok(),
             tls_key: std::env::var("SMART_ASSISTANT_TLS_KEY").ok(),
             web_dist: std::env::var("SMART_ASSISTANT_WEB_DIST").ok().or_else(|| {
@@ -108,10 +177,69 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+            ilink_context_max_age_hours: std::env::var("ILINK_CONTEXT_MAX_AGE_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(12),
+            proactive_enabled: std::env::var("PROACTIVE_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            proactive_min_minutes: std::env::var("PROACTIVE_MIN_MINUTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(45),
+            proactive_max_minutes: std::env::var("PROACTIVE_MAX_MINUTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(180),
+            proactive_quiet_hours: parse_quiet_hours(
+                std::env::var("PROACTIVE_QUIET_HOURS").unwrap_or_default().as_str(),
+            ),
+            proactive_daily_limit: std::env::var("PROACTIVE_DAILY_LIMIT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(8),
+            proactive_min_silence_hours: std::env::var("PROACTIVE_MIN_SILENCE_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2),
+            proactive_max_idle_days: std::env::var("PROACTIVE_MAX_IDLE_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(7),
+            proactive_max_followups: std::env::var("PROACTIVE_MAX_FOLLOWUPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
         }
     }
 
     pub fn get() -> &'static Config {
         CONFIG.get_or_init(Config::init_from_env)
+    }
+}
+
+/// 解析 "HH-HH" 形式的安静时段；非法或缺失回退 (0, 7)。
+fn parse_quiet_hours(v: &str) -> (u32, u32) {
+    let mut iter = v.split('-').map(|p| p.trim().parse::<u32>().ok());
+    match (iter.next(), iter.next()) {
+        (Some(Some(a)), Some(Some(b))) if a <= 23 && b <= 23 => (a, b),
+        _ => (23, 7),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_hours_parsing() {
+        assert_eq!(parse_quiet_hours("23-7"), (23, 7));
+        assert_eq!(parse_quiet_hours("0-23"), (0, 23));
+        assert_eq!(parse_quiet_hours(""), (23, 7));
+        assert_eq!(parse_quiet_hours("abc"), (23, 7));
+        assert_eq!(parse_quiet_hours("3"), (23, 7));
+        assert_eq!(parse_quiet_hours("26-7"), (23, 7));
+        assert_eq!(parse_quiet_hours("7-7"), (7, 7));
     }
 }
