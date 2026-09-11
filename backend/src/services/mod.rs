@@ -14,6 +14,10 @@ pub struct MemoryRecord {
     pub id: String,
     pub content: String,
     pub memory_type: String,
+    /// 记忆层级：short / intent / core。
+    pub tier: String,
+    /// 过期时间（RFC3339）；None 表示长期记忆。
+    pub expires_at: Option<String>,
     pub message_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -24,6 +28,7 @@ pub struct MemoryHit {
     pub id: String,
     pub content: String,
     pub memory_type: String,
+    pub tier: String,
     pub created_at: String,
     pub score: f32,
 }
@@ -50,6 +55,8 @@ pub(crate) fn memory_to_record(m: &crate::db::memory::Memory) -> MemoryRecord {
         id: m.id.clone(),
         content: m.content.clone(),
         memory_type: m.memory_type.clone(),
+        tier: m.tier.clone(),
+        expires_at: m.expires_at.clone(),
         message_id: m.message_id.clone(),
         created_at: m.created_at.clone(),
         updated_at: m.updated_at.clone(),
@@ -87,20 +94,21 @@ pub fn search_memory(db: &Database, query: &str, limit: u32) -> Result<Vec<Memor
             id: m.id,
             content: m.content,
             memory_type: m.memory_type,
+            tier: m.tier,
             created_at: m.created_at,
             score,
         })
         .collect())
 }
 
-/// 手动添加一条记忆，返回记忆 id。
+/// 手动添加一条记忆（无来源消息），默认按 core 长期记忆处理，返回记忆 id。
 pub fn add_memory(
     db: &Database,
     content: &str,
     memory_type: &str,
     message_id: Option<&str>,
 ) -> Result<String> {
-    let memory = memory::store::store(db, content, memory_type, message_id)?;
+    let memory = memory::store::store(db, content, memory_type, "core", message_id)?;
     Ok(memory.id)
 }
 

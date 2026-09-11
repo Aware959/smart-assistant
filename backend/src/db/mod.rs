@@ -82,7 +82,7 @@ pub fn ensure_vec_extension(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 6;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 向量表的“签名”：embedding 维度 + 模型名。
@@ -172,6 +172,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             id          TEXT PRIMARY KEY,
             content     TEXT NOT NULL,
             memory_type TEXT NOT NULL DEFAULT 'fact',
+            tier        TEXT NOT NULL DEFAULT 'core',
+            expires_at  TEXT,
             message_id  TEXT REFERENCES messages(id) ON DELETE SET NULL,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
@@ -214,12 +216,45 @@ fn migrate(conn: &Connection) -> Result<()> {
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
 
+    if version < 6 {
+        // v6：记忆分层（tier 短/中/长 + 过期时间）。旧库补列，新库建表已带。
+        add_column_if_missing(conn, "memories", "tier", "TEXT NOT NULL DEFAULT 'core'")?;
+        add_column_if_missing(conn, "memories", "expires_at", "TEXT")?;
+    }
+
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
 
     tracing::info!("数据库 schema 版本 {version} -> {SCHEMA_VERSION}（增量迁移，业务数据保留）");
     meta_set(conn, KEY_SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
+    Ok(())
+}
+
+/// 给旧表补列（表不存在或列已存在则跳过）。SQLite 的 ALTER 无法加带约束列到
+/// 尚未创建的表，新库的列由 init_schema 的 CREATE TABLE 负责，这里只服务旧库。
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, def: &str) -> Result<()> {
+    let table_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |row| row.get(0),
+    )?;
+    if !table_exists {
+        return Ok(());
+    }
+
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if cols.iter().any(|c| c == column) {
+        return Ok(());
+    }
+
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {def};"
+    ))?;
+    tracing::info!("迁移：memories 补列 {column} {def}");
     Ok(())
 }
 

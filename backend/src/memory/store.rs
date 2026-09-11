@@ -1,12 +1,19 @@
+use chrono::Utc;
+
+use crate::config::Config;
 use crate::db::memory as db_memory;
 use crate::db::Database;
 use crate::db::memory::Memory;
 use crate::embedding;
 use crate::error::{Result, SqlError};
 
-/// 将一段内容沉淀为记忆（事实）：向量化 → 存入 memories 与 memory_vectors。
+/// 将一段内容沉淀为记忆：向量化 → 存入 memories 与 memory_vectors。
 ///
-/// `message_id` 记录该记忆来源的对话消息（手动添加时传 None）。
+/// - **去重**：与库中某条距离 ≤ `memory_dedup_threshold` 时视为同一事实，
+///   只刷新 updated_at 不新增（避免同一件事反复沉淀）；
+/// - **分层**：`tier` 决定存活期——`short` 按 `memory_short_ttl_days`，
+///   `intent` 按 `memory_intent_ttl_days` 写入 expires_at，`core` 永不过期；
+/// - `message_id` 记录该记忆来源的对话消息（手动添加时传 None）。
 ///
 /// 向量签名不匹配（维度变更未重建）时退化为只存 [`memories`] 内容、不写向量；
 /// 后续由 `smart-assistant-memory rebuild` 统一补齐。
@@ -14,11 +21,48 @@ pub fn store(
     db: &Database,
     content: &str,
     memory_type: &str,
+    tier: &str,
     message_id: Option<&str>,
 ) -> Result<Memory> {
-    let memory = Memory::new(content.to_string(), memory_type.to_string(), message_id.map(String::from));
-    if db.vec_status()?.search_usable() {
-        let vector = embedding::embed_text(content)?;
+    let cfg = Config::get();
+    let usable = db.vec_status()?.search_usable();
+
+    // 向量化一次，同时用于去重判定与正式写入。
+    let mut vector = Vec::new();
+    let mut dedup_hits: Vec<(Memory, f32)> = Vec::new();
+    if usable {
+        vector = embedding::embed_text(content)?;
+        dedup_hits = db_memory::search_similar(db, &vector, 1)?;
+    }
+    if let Some((existing, distance)) = dedup_hits.into_iter().next() {
+        if distance <= cfg.memory_dedup_threshold {
+            db_memory::touch(db, &existing.id)?;
+            tracing::debug!(
+                id = %existing.id,
+                distance,
+                "记忆去重：命中现有条目，刷新 updated_at 不新增"
+            );
+            return Ok(existing);
+        }
+    }
+
+    let ttl: i64 = match tier {
+        "short" => cfg.memory_short_ttl_days,
+        "intent" => cfg.memory_intent_ttl_days,
+        _ => 0,
+    };
+    let expires_at = (ttl > 0)
+        .then(|| (Utc::now() + chrono::Duration::days(ttl)).to_rfc3339());
+
+    let memory = Memory::new(
+        content.to_string(),
+        memory_type.to_string(),
+        tier.to_string(),
+        message_id.map(String::from),
+        expires_at,
+    );
+
+    if usable && !vector.is_empty() {
         db_memory::create(db, &memory, &vector)?;
     } else {
         db_memory::create_record(db, &memory)?;
@@ -40,13 +84,18 @@ pub fn update(db: &Database, id: &str, new_content: Option<&str>, reembed: bool)
     Ok(())
 }
 
-/// 语义检索记忆。向量签名不匹配时返回空结果（检索暂停，等待确认重建）。
+/// 语义检索记忆。**只返回未过期且距离 ≤ `memory_recall_threshold` 的条目**；
+/// 向量签名不匹配时返回空结果（检索暂停，等待确认重建）。
 pub fn search(db: &Database, query: &str, limit: usize) -> Result<Vec<(Memory, f32)>> {
     if !db.vec_status()?.search_usable() {
         return Ok(Vec::new());
     }
     let vector = embedding::embed_text(query)?;
-    db_memory::search_similar(db, &vector, limit)
+    let threshold = Config::get().memory_recall_threshold;
+    Ok(db_memory::search_similar(db, &vector, limit)?
+        .into_iter()
+        .filter(|(_, distance)| *distance <= threshold)
+        .collect())
 }
 
 /// 删除一条记忆（含向量）。

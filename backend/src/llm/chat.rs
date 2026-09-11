@@ -28,12 +28,16 @@ fn build_chat_request(messages: &[ChatMessage]) -> ChatRequest {
 
 /// 调用远程 LLM 完成非流式对话，返回回复文本。
 pub fn complete(messages: &[ChatMessage]) -> Result<String> {
+    complete_with_model(messages, &crate::config::Config::get().llm_model)
+}
+
+/// 用指定模型完成非流式对话（记忆提取、判定等任务可与对话模型分离）。
+pub fn complete_with_model(messages: &[ChatMessage], model: &str) -> Result<String> {
     let chat_req = build_chat_request(messages);
-    let model = crate::config::Config::get().llm_model.clone();
 
     let chat_res = genai_client::block_on(async move {
         let client = genai_client::chat_client();
-        client.exec_chat(&model, chat_req, None).await
+        client.exec_chat(model, chat_req, None).await
     })?;
 
     chat_res

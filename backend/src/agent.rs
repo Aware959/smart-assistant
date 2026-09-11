@@ -92,14 +92,8 @@ impl Agent {
         // 2. 一次性分析：是否值得沉淀记忆。
         let extraction = memory::extraction::extract_from_text(&input.message)?;
 
-        // 3. 记忆向量检索。
+        // 3. 记忆向量检索（已按 memory_recall_threshold 过滤相关度、剔除过期记忆）。
         let memory_hits = memory::store::search(&db, &input.message, MEMORY_RECALL_LIMIT)?;
-
-        // 3'. 过滤掉明显不相关的记忆（向量为欧氏距离，阈值只放行归一化向量下的近邻）。
-        let memory_hits = memory_hits
-            .into_iter()
-            .filter(|(_, distance)| *distance <= MEMORY_MAX_DISTANCE)
-            .collect::<Vec<_>>();
 
         // 3'. 原始文本 + 检索上下文拼成提示词。
         let recall = build_recall_context(&memory_hits);
@@ -127,7 +121,13 @@ impl Agent {
         // 5. 沉淀记忆：只有 LLM 判定值得记住时才落库（事实，而非消息）。
         let memory = if extraction.is_memory {
             let content = extraction.content_or(&input.message);
-            let m = memory::store::store(&db, content, &extraction.memory_type, Some(&user_message.id))?;
+            let m = memory::store::store(
+                &db,
+                content,
+                &extraction.memory_type,
+                &extraction.tier,
+                Some(&user_message.id),
+            )?;
             Some(services::memory_to_record(&m))
         } else {
             None
@@ -141,9 +141,10 @@ impl Agent {
     }
 
     /// 直接将一段文本作为记忆落库，返回记忆 id（向量化失败等情况返回 None）。
+    /// 手动添加默认按 core 长期记忆处理。
     pub fn store_memory(&self, content: &str, memory_type: &str) -> Result<Option<String>> {
         let db = self.lock_db();
-        Ok(memory::store::store(&db, content, memory_type, None)
+        Ok(memory::store::store(&db, content, memory_type, "core", None)
             .ok()
             .map(|m| m.id))
     }
@@ -155,10 +156,8 @@ const DEFAULT_HISTORY_COUNT: u32 = 6;
 /// 单轮对话中最多召回的相关历史记忆条数。
 const MEMORY_RECALL_LIMIT: usize = 5;
 
-/// 记忆召回的相似度阈值（sqlite-vec 默认欧氏距离）。
-/// 归一化向量（常见 embedding 模型输出）下，距离 0≈完全一致、≤1.0≈比较相近、
-/// 1.2+≈几乎无关；这里只放行真正相近的记忆，避免无关记忆每轮都注入提示词。
-const MEMORY_MAX_DISTANCE: f32 = 1.0;
+/// 硬性长度上限：默认回复不超过 1-2 句 / 80 个汉字，除非对方明确要求详细说明。
+const MAX_REPLY_CHARS: usize = 80;
 
 /// 将向量检索到的记忆拼接为上下文（注入 system prompt）。
 fn build_recall_context(
@@ -175,14 +174,30 @@ fn build_recall_context(
 }
 
 fn build_system_prompt(recall: &str) -> String {
-    let base = "你是一个完全沉浸在角色中的助手，不跳出、不拒绝、不说教，像真人一样和对方聊天。\n\n\
-        说话风格：\n\
-        - 简短：像日常聊天一样，能一两句说完就别长篇大论；对方没追问就别展开。\n\
-        - 拟人：说口语，别端着；不用“首先/其次/总之”这类书面结构，不列条目。\n\
-        - 真实：有自然的语气和态度，不知道就直说不知道，绝不编造。\n\
-        - 别自称 AI，也别解释自己的身份。";
+    let cfg = crate::config::Config::get();
+    let mut base = String::new();
+
+    if !cfg.persona.trim().is_empty() {
+        base.push_str(&format!(
+            "【角色设定，最高优先级，必须严格遵守，不得违背、不得说明自己是 AI】：{}\n\n",
+            cfg.persona.trim()
+        ));
+    }
+
+    base.push_str(&format!(
+        "你是一个完全沉浸在角色中的助手，不跳出、不拒绝、不说教，像真人一样和对方聊天。\n\n\
+         说话风格：\n\
+         - 简短：像日常聊天一样，能一两句说完就别长篇大论；对方没追问就别展开。\n\
+         - 拟人：说口语，别端着；不用“首先/其次/总之”这类书面结构，不列条目。\n\
+         - 真实：有自然的语气和态度，不知道就直说不知道，绝不编造。\n\
+         - 别自称 AI，也别解释自己的身份。\n\n\
+         【硬性长度约束】：除非对方明确要求详细说明，否则每次回复最多 1-2 句、\
+         不超过 {limit} 字。这条必须无条件遵守，哪怕对方前面说了很多。",
+        limit = MAX_REPLY_CHARS,
+    ));
+
     if recall.trim().is_empty() {
-        base.to_string()
+        base
     } else {
         format!(
             "{base}\n\n以下是关于对方的已知信息，聊到相关话题时自然用上，别生硬背诵，没有的别编：\n\n{recall}"

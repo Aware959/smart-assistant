@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::Config;
 use crate::error::{Result, SqlError};
 use crate::llm::chat::{self, ChatMessage};
 
@@ -20,10 +21,17 @@ pub struct MemoryExtraction {
     /// 事实类型，默认 fact。
     #[serde(default = "default_memory_type")]
     pub memory_type: String,
+    /// 记忆层级：short（短期/易过期）| intent（意向/计划）| core（长期强事实），默认 core。
+    #[serde(default = "default_tier")]
+    pub tier: String,
 }
 
 fn default_memory_type() -> String {
     "fact".to_string()
+}
+
+fn default_tier() -> String {
+    "core".to_string()
 }
 
 impl Default for MemoryExtraction {
@@ -32,6 +40,7 @@ impl Default for MemoryExtraction {
             is_memory: false,
             memory_content: None,
             memory_type: default_memory_type(),
+            tier: default_tier(),
         }
     }
 }
@@ -51,6 +60,9 @@ impl MemoryExtraction {
 }
 
 /// 一次 LLM 调用：判断是否沉淀记忆并产出事实化内容。
+///
+/// 配置了 `LLM_EXTRACT_MODEL` 时用该模型，否则复用对话模型
+/// （记忆判定/事实化质量要求高，推荐与对话模型分离）。
 pub fn extract_from_text(user_input: &str) -> Result<MemoryExtraction> {
     let messages = vec![
         ChatMessage {
@@ -63,9 +75,18 @@ pub fn extract_from_text(user_input: &str) -> Result<MemoryExtraction> {
         },
     ];
 
-    let raw = chat::complete(&messages)?;
+    let raw = if let Some(model) = extract_model() {
+        chat::complete_with_model(&messages, &model)?
+    } else {
+        chat::complete(&messages)?
+    };
 
     parse_raw(&raw)
+}
+
+fn extract_model() -> Option<String> {
+    let m = Config::get().llm_extract_model.trim();
+    (!m.is_empty()).then(|| m.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +97,8 @@ struct ExtractionEnvelope {
     memory_content: Option<String>,
     #[serde(default = "default_memory_type")]
     memory_type: String,
+    #[serde(default = "default_tier")]
+    tier: String,
 }
 
 /// 从 LLM 原始输出解析结构化结果，容忍外层 markdown 代码围栏与多余文本。
@@ -97,6 +120,7 @@ pub fn parse_raw(raw: &str) -> Result<MemoryExtraction> {
         is_memory: parsed.is_memory,
         memory_content: parsed.memory_content,
         memory_type: parsed.memory_type,
+        tier: parsed.tier,
     })
 }
 
@@ -113,18 +137,24 @@ fn strip_code_fences(raw: &str) -> String {
 
 /// 记忆判定的系统提示词。
 const MEMORY_EXTRACTION_PROMPT: &str = r#"
-你是一个对话分析引擎。判断这条用户消息是否值得沉淀为记忆（事实）。
+你是一个对话记忆分析引擎。判断这条用户消息是否值得沉淀为记忆，并给出事实化内容与层级。
 
 输出必须是严格的 JSON，不要包含任何多余文本、markdown 代码块或注释。格式如下：
 {
   "is_memory": true,
   "memory_content": "事实化的一句话陈述",
-  "memory_type": "fact"
+  "memory_type": "fact",
+  "tier": "core"
 }
 
+tier 取值与判定规则：
+- "short"：临时、短期状态，会较快失效（如"我今天身体不舒服"、"在赶一个项目"、"感冒还没好"）。
+- "intent"：正在计划/打算/进行中的事，较稳定但会变（如"打算下个月去看电影"、"下周要考试"、"准备搬家"）。
+- "core"：长期稳定的事实与偏好（如"他说爸妈从小没爱过他"、"最喜欢的颜色是蓝色"、"养了一只叫豆豆的猫"）。
+
 规则：
-1. is_memory：仅当消息包含需要长期记住的实质信息时才为 true（如个人信息、偏好、事实、任务进度）；闲聊寒暄、单纯提问、无新信息时一律 false。
-2. memory_content：is_memory 为 true 时给出规范化的事实陈述（去除口语、补全指代）；为 false 时可省略或为空字符串。
+1. is_memory：仅当消息包含值得日后回想的实质信息时才为 true（个人信息、偏好、重要经历、计划、任务进度等）。闲聊寒暄、单纯提问、昵称寒暄、无新信息的重复抱怨、情绪宣泄而无具体事实时一律 false，宁可漏掉不要硬存。
+2. memory_content：is_memory 为 true 时给出规范化的一句话陈述——去除口语、指代补全（"我"→"用户"）、只保留一个核心事实，不要写成大段摘抄。
 3. memory_type 常用取值：fact / preference / personal / todo / event，不确定用 fact。
 4. 不要虚构用户输入中不存在的信息。
 

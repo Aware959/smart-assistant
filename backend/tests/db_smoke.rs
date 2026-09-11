@@ -28,10 +28,10 @@ fn store_and_search_memory() {
 
     let d = dim();
     let v: Vec<f32> = vector(d, 0);
-    let m1 = db_memory::Memory::new("关于小明的事实".into(), "user".into(), None);
+    let m1 = db_memory::Memory::new("关于小明的事实".into(), "user".into(), "core".into(), None, None);
     db_memory::create(&db, &m1, &v).unwrap();
 
-    let m2 = db_memory::Memory::new("另一个记忆".into(), "user".into(), None);
+    let m2 = db_memory::Memory::new("另一个记忆".into(), "user".into(), "core".into(), None, None);
     let v2: Vec<f32> = vector(d, d);
     db_memory::create(&db, &m2, &v2).unwrap();
 
@@ -48,7 +48,7 @@ fn update_and_delete_memory() {
     let db = db::Database::in_memory().unwrap();
 
     let v: Vec<f32> = vector(dim(), 0);
-    let m = db_memory::Memory::new("待更新".into(), "user".into(), None);
+    let m = db_memory::Memory::new("待更新".into(), "user".into(), "core".into(), None, None);
     db_memory::create(&db, &m, &v).unwrap();
 
     db_memory::update(&db, &m.id, "已更新", &v).unwrap();
@@ -168,7 +168,7 @@ fn services_layer_roundtrip() {
     assert_eq!(services::list_messages(&db, &sid, 10).unwrap().len(), 0);
 
     let d = dim();
-    let m = db_memory::Memory::new("小明是产品的负责人".into(), "fact".into(), None);
+    let m = db_memory::Memory::new("小明是产品的负责人".into(), "fact".into(), "core".into(), None, None);
     db_memory::create(&db, &m, &vector(d, 10)).unwrap();
 
     let memories = services::list_memories(&db, 10).unwrap();
