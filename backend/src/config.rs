@@ -68,7 +68,7 @@ impl Config {
                 .unwrap_or_else(|_| "http://127.0.0.1:1234/v1/completions".to_string()),
             llm_api_key: std::env::var("LLM_API_KEY").unwrap_or_default(),
             llm_model: std::env::var("LLM_MODEL")
-                .unwrap_or_else(|_| "qwen3.5-9b-uncensored-hauhaucs-aggressive".to_string()),
+                .unwrap_or_else(|_| "google/gemma-4-26b-a4b-qat".to_string()),
             embedding_api_url: std::env::var("EMBEDDING_API_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:1234/v1/embeddings".to_string()),
             embedding_api_key: std::env::var("EMBEDDING_API_KEY").unwrap_or_default(),

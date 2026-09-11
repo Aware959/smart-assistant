@@ -18,6 +18,11 @@ name = "smart-assistant-cli"
 path = "src/bin/smart-assistant-cli.rs"
 required-features = ["desktop"]
 
+# 记忆向量维护工具：与主程序解耦，负责巡检与确认重建（仅依赖核心库，无需 desktop）
+[[bin]]
+name = "smart-assistant-memory"
+path = "src/bin/smart-assistant-memory.rs"
+
 [dependencies]
 # UniFFI
 uniffi = { version = "0.28", features = ["cli"] }

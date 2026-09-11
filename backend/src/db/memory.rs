@@ -30,7 +30,7 @@ impl Memory {
     }
 }
 
-pub fn create(db: &Database, memory: &Memory, embedding: &[f32]) -> Result<()> {
+pub fn create_record(db: &Database, memory: &Memory) -> Result<()> {
     db.conn().execute(
         "INSERT INTO memories (id, content, memory_type, message_id, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -43,13 +43,21 @@ pub fn create(db: &Database, memory: &Memory, embedding: &[f32]) -> Result<()> {
             memory.updated_at
         ],
     )?;
+    Ok(())
+}
 
+pub fn create(db: &Database, memory: &Memory, embedding: &[f32]) -> Result<()> {
+    create_record(db, memory)?;
+    insert_vector(db, &memory.id, embedding)
+}
+
+/// 仅写入向量（供重建时按 memories.content 回填）。
+pub fn insert_vector(db: &Database, memory_id: &str, embedding: &[f32]) -> Result<()> {
     let bytes = to_byte_array(embedding);
     db.conn().execute(
         "INSERT INTO memory_vectors (memory_id, embedding) VALUES (?1, ?2)",
-        rusqlite::params![memory.id, bytes.as_slice()],
+        rusqlite::params![memory_id, bytes.as_slice()],
     )?;
-
     Ok(())
 }
 
