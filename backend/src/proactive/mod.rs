@@ -74,7 +74,7 @@ async fn run_once(assistant: &Assistant) {
 
 /// 先组装上下文，再问 LLM 要不要开口；返回待发送的内容（不开口则为 None）。
 async fn propose(assistant: &Assistant, cand: &crate::db::proactive::ProactiveCandidate) -> Option<String> {
-    let (recent, rec) = {
+    let (recent, rec, world) = {
         let db = assistant.inner_db();
         let recent = context::recent_history(&db, &cand.session_id, 8);
         let query = recent.chars().take(200).collect::<String>();
@@ -83,11 +83,12 @@ async fn propose(assistant: &Assistant, cand: &crate::db::proactive::ProactiveCa
         } else {
             context::recall(&db, &query)
         };
-        (recent, rec)
+        let world = crate::timeworld::render(&crate::timeworld::snapshot(&db, &cand.session_id));
+        (recent, rec, world)
     };
 
     // LLM 调用是同步阻塞的（genai 全局 runtime），挪到阻塞线程池避免卡住异步任务。
-    let decision = tokio::task::spawn_blocking(move || decider::decide(&recent, &rec))
+    let decision = tokio::task::spawn_blocking(move || decider::decide(&recent, &rec, &world))
         .await
         .unwrap_or_default();
 

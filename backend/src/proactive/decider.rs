@@ -17,7 +17,7 @@ pub struct Decision {
 }
 
 /// 正常对话接口（非流式、阻塞执行）；需要长耗时的调用方请用 `spawn_blocking` 包裹。
-pub fn decide(recent: &str, recall: &str) -> Decision {
+pub fn decide(recent: &str, recall: &str, world: &str) -> Decision {
     let cfg = Config::get();
     let persona_block = if cfg.persona.trim().is_empty() {
         String::new()
@@ -39,8 +39,13 @@ pub fn decide(recent: &str, recall: &str) -> Decision {
         或 {{\"speak\":false,\"reason\":\"...\"}}"
     );
 
+    let world_block = if world.trim().is_empty() {
+        String::new()
+    } else {
+        format!("【此刻的世界状态】：\n{world}\n\n")
+    };
     let user = format!(
-        "你们最近聊过的内容：\n{recent}\n\n关于对方你记得的事：\n{recall}\n\n现在请你决定是否主动发一条消息，只输出 JSON。"
+        "{world_block}你们最近聊过的内容：\n{recent}\n\n关于对方你记得的事：\n{recall}\n\n现在请你决定是否主动发一条消息，只输出 JSON。"
     );
 
     let messages = vec![

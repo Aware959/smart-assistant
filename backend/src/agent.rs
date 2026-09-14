@@ -86,11 +86,17 @@ impl Agent {
         })
         .collect::<Vec<_>>();
 
-        // 用户消息入库（记录）。带通道报文时间戳时用之（真实时间线），否则记接收时刻。
-        let user_message = match input.user_time.as_deref().and_then(parse_rfc3339) {
-            Some(at) => db::message::create_at(&db, &session.id, "user", &input.message, at)?,
-            None => db::message::create(&db, &session.id, "user", &input.message)?,
+        // 用户消息入库（记录）。带通道报文时间戳时用之（世界模型精确时间线），否则记接收时刻。
+        let (user_message, _) = match input.user_time.as_deref().and_then(parse_rfc3339) {
+            Some(at) => (db::message::create_at(&db, &session.id, "user", &input.message, at)?, at),
+            None => {
+                let m = db::message::create(&db, &session.id, "user", &input.message)?;
+                let at = chrono::Utc::now();
+                (m, at)
+            }
         };
+        // 时间世界模型：用这条真实时刻重算对方作息画像（无渠道映射时静默跳过）。
+        let _ = crate::timeworld::observe(&db, &session.id);
 
         // 2. 一次性分析：是否值得沉淀记忆。
         let extraction = memory::extraction::extract_from_text(&input.message)?;
@@ -98,11 +104,13 @@ impl Agent {
         // 3. 记忆向量检索（已按 memory_recall_threshold 过滤相关度、剔除过期记忆）。
         let memory_hits = memory::store::search(&db, &input.message, MEMORY_RECALL_LIMIT)?;
 
-        // 3'. 原始文本 + 检索上下文拼成提示词。
+        // 3'. 时间世界状态 + 原始文本 + 检索上下文拼成提示词。
+        let world = crate::timeworld::snapshot(&db, &session.id);
+        let world_text = crate::timeworld::render(&world);
         let recall = build_recall_context(&memory_hits);
         let mut messages = vec![llm::chat::ChatMessage {
             role: "system".to_string(),
-            content: build_system_prompt(&recall),
+            content: build_system_prompt(&recall, &world_text),
         }];
         for turn in history_turns.iter().chain(input.history.iter()) {
             messages.push(llm::chat::ChatMessage {
@@ -183,7 +191,7 @@ fn build_recall_context(
     ctx
 }
 
-fn build_system_prompt(recall: &str) -> String {
+fn build_system_prompt(recall: &str, world: &str) -> String {
     let cfg = crate::config::Config::get();
     let mut base = String::new();
 
@@ -202,19 +210,30 @@ fn build_system_prompt(recall: &str) -> String {
          - 真实：有自然的语气和态度，不知道就直说不知道，绝不编造。\n\
          - 别自称 AI，也别解释自己的身份。\
          - 身份边界：你的身份只由【角色设定】定义；对方的事永远是对方的事，\
-           不把对方的经历、喜好、说过的话当成你自己的，也不把自己的设定安到对方头上。\n\n\
+           不把对方的经历、喜好、说过的话当成你自己的，也不把自己的设定安到对方头上。\n\
+         - 生活感：【此刻的世界】里描述的时间、你的今日经历、心境与对方的关系，\
+          是你真实生活的一部分——聊天时自然地提一句自己的日子（比如“刚从午睡醒来”“都这个点了”\
+          “今天忙得够呛”），对方问起可以展开讲；但不要生硬地报时、复述或把整段状态罗列出来。\n\n\
          【硬性长度约束】：除非对方明确要求详细说明，否则每次回复最多 1-2 句、\
          不超过 {limit} 字。这条必须无条件遵守，哪怕对方前面说了很多。",
         limit = MAX_REPLY_CHARS,
     ));
 
-    if recall.trim().is_empty() {
-        base
+    let world_block = if world.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{world}")
+    };
+
+    let recall_block = if recall.trim().is_empty() {
+        String::new()
     } else {
         format!(
-            "{base}\n\n以下是关于对方的已知信息，聊到相关话题时自然用上，别生硬背诵，没有的别编。\
+            "\n\n以下是关于对方的已知信息，聊到相关话题时自然用上，别生硬背诵，没有的别编。\
              注意：这些全部是对方的事实——句子里哪怕出现“我/我们/咱们”，也一律理解为对方说过的话、对方的事，\
              绝不当作你自己说的话、你自己的经历或你自己的属性：\n\n{recall}"
         )
-    }
+    };
+
+    format!("{base}{world_block}{recall_block}")
 }

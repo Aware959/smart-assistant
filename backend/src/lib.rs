@@ -7,6 +7,7 @@ pub mod genai_client;
 pub mod llm;
 pub mod memory;
 pub mod services;
+pub mod timeworld;
 
 #[cfg(feature = "desktop")]
 pub mod api;

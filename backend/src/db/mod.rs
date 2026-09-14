@@ -83,7 +83,7 @@ pub fn ensure_vec_extension(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 向量表的“签名”：embedding 维度 + 模型名。
@@ -200,6 +200,16 @@ fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (channel, external_id)
         );
 
+        CREATE TABLE IF NOT EXISTS time_profiles (
+            channel            TEXT NOT NULL,
+            external_id        TEXT NOT NULL,
+            utc_offset_minutes INTEGER,
+            active_hour        INTEGER,
+            observations       INTEGER NOT NULL DEFAULT 0,
+            updated_at         TEXT NOT NULL,
+            PRIMARY KEY (channel, external_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
         "#,
@@ -232,6 +242,23 @@ fn migrate(conn: &Connection) -> Result<()> {
         // v6：记忆分层（tier 短/中/长 + 过期时间）。旧库补列，新库建表已带。
         add_column_if_missing(conn, "memories", "tier", "TEXT NOT NULL DEFAULT 'core'")?;
         add_column_if_missing(conn, "memories", "expires_at", "TEXT")?;
+    }
+
+    if version < 7 {
+        // v7：时间世界模型画像表（对方作息/推断时区；仅新增，不动旧表）。
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS time_profiles (
+                channel            TEXT NOT NULL,
+                external_id        TEXT NOT NULL,
+                utc_offset_minutes INTEGER,
+                active_hour        INTEGER,
+                observations       INTEGER NOT NULL DEFAULT 0,
+                updated_at         TEXT NOT NULL,
+                PRIMARY KEY (channel, external_id)
+            );
+            "#,
+        )?;
     }
 
     if version >= SCHEMA_VERSION {
