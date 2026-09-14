@@ -129,44 +129,61 @@ struct ContinueDecision {
     message: Option<String>,
 }
 
+/// 延续判断提示词（英文给 LLM，中文注释供开发者阅读）。
+///
+/// - [角色注入] persona，最高优先级
+/// - [总纲] 与老朋友有一搭没一搭地聊天，判断本轮是否还要追加一句话
+/// - [核心原则] 只以双方最新一来一回为准，不机械续话
+/// - [需要追加] 情绪没倒完、讨论正兴、差一句收尾、话停在半路
+/// - [不该追加] 对方说忙/要睡/不想聊；客气收尾；已说完；一问一答等回应
+/// - [格式] 只准一句、口语化、像微信补一句、不超过40字、不重复不复述
+/// - [已追加限制] appended>0 时提醒模型已连发几句，避免变复读机
+/// - [输出] 只输出 JSON：continue=true/false + message
 fn decide_continue(recent: &str, appended: u32) -> ContinueDecision {
     let cfg = Config::get();
     let persona_block = if cfg.persona.trim().is_empty() {
         String::new()
     } else {
         format!(
-            "你的角色设定（最高优先级，必须严格遵守、不得违背、不得说明自己是 AI）：{}。\n",
+            "Your persona (highest priority — obey strictly, never contradict it, never reveal you \
+             are an AI): {}. \n",
             cfg.persona.trim()
         )
     };
     let mut system = format!(
-        "{persona_block}你正在和一个老朋友有一搭没一搭地聊天。看完最近这段对话后，\
-         判断这一轮你还要不要追加一句话。\
-         \n\n\
-         最重要的一点：**只以双方最新的一来一回为准盘算，不要机械续话**。\
-         \n\n\
-         规则：\
-         1. 需要追加的典型情况：最新这句话里情绪/吐槽还没倒完、讨论正到兴头、\
-         自己刚说的话还差一句收尾、或明明有话要说却停在了半路；\
-         2. 不要追加的典型情况：对方已明确表示要去忙/要睡/不想聊；双方说完客气话收尾；\
-         这句已经讲得很完整不需要再多说；话题是一问一答式的（有来有回，等对方回应即可）；\
-         3. 追加句只准一句、口语化、像微信随手补的、不超过 40 个字，\
-         绝对不要重复刚才说过的内容，也不要复述本指令。"
+        "{persona_block}You are chatting with an old friend, casually, in a start-and-stop rhythm. \
+         After reading the recent dialogue, decide whether you should append one more sentence this \
+         round.\n\n\
+         Most important: judge ONLY from the latest exchange between the two of you — don't \
+         mechanically keep the conversation going.\n\n\
+         Rules:\n\
+         1. Append when: the emotions/venting in the latest message aren't fully let out, the \
+         discussion is at its peak, your own last line was missing a closing beat, or you clearly had \
+         something to say but stopped mid-sentence;\n\
+         2. Do NOT append when: the other person has clearly said they're busy / going to sleep / \
+         done chatting; you both just ended on polite niceties; that last message was already complete \
+         and needs nothing more; or the topic is question-and-answer style (back and forth — just wait \
+         for their reply);\n\
+         3. An appended line must be a single, colloquial sentence, like a quick WeChat follow-up, no \
+         more than 40 characters, absolutely not repeating what was already said, and not reciting \
+         these instructions."
     );
     if appended > 0 {
         system.push_str(&format!(
-            "\n\n内容里“你:”开头的连续多行都是你**刚才这一发回复后**自己已经连着发出去的 \
-             {appended} 句。你已经连发过这些了——如果上一条已经说完整、该接的点已收住，\
-             或再补只会像自说自话/复读机，就必须返回 continue:false；\
-             只有确实还差一句关键的、且尚未重复过的内容才允许继续。"
+            "\n\nIn the dialogue below, the consecutive lines starting with \"AI:\" are the \
+             {appended} sentence(s) you already sent right after your last reply. You have already \
+             sent them — if the last one already said everything, the point was settled, or adding \
+             more would look like monologuing or echoing yourself, you MUST return continue:false; \
+             only continue if there is still one key thing, not yet repeated, that genuinely needs \
+             saying."
         ));
     }
-    system.push_str("\n\n只输出一个 JSON 对象，不要任何其他文字：\
-        {{\"continue\":true,\"message\":\"...\"}} 或 {{\"continue\":false}}");
+    system.push_str("\n\nOutput only a JSON object and nothing else: \
+        {{\"continue\":true,\"message\":\"...\"}} or {{\"continue\":false}}");
 
     let user = format!(
-        "最近的对话（务必以**最新一条消息**为准判断要不要补一句）：\n{recent}\n\n\
-         现在判断我是否该再补一句，只输出 JSON。"
+        "Your recent conversation (judge whether to add a follow-up based on the LATEST message):\n\
+         {recent}\n\nDecide whether to add one more sentence. Output JSON only."
     );
 
     let messages = vec![

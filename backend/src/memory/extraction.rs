@@ -95,7 +95,7 @@ fn extraction_schema() -> serde_json::Value {
             "memory_type": { "type": "string" },
             "tier": { "type": "string" }
         },
-        "required": ["is_memory", "memory_type", "tier"]
+        "required": ["is_memory", "memory_content", "memory_type", "tier"]
     })
 }
 
@@ -150,28 +150,35 @@ fn strip_code_fences(raw: &str) -> String {
     result
 }
 
-/// 记忆判定的系统提示词。
+/// 记忆判定系统提示词（英文直接给 LLM，中文注释供开发者阅读）。
+///
+/// - [角色] 对话记忆分析引擎，判定是否值得沉淀
+/// - [输出] 严格 JSON（is_memory / memory_content / memory_type / tier），不允许多余文本
+/// - [规则] is_memory: true 仅限实质信息（偏好/计划/经历），闲聊一律 false
+/// -        memory_content: 归一成第三人称一句话（禁止"我/我们"，用"对方"）
+/// -        tier: short(临时易失效) / intent(计划/进行中) / core(长期事实与偏好)
+/// -        不虚构用户输入中不存在的信息
 const MEMORY_EXTRACTION_PROMPT: &str = r#"
-你是一个对话记忆分析引擎。判断这条用户消息是否值得沉淀为记忆，并给出事实化内容与层级。
+You are a conversational-memory analysis engine. Decide whether this user message is worth persisting as a memory, and if so, produce one normalized factual statement and a tier.
 
-输出必须是严格的 JSON，不要包含任何多余文本、markdown 代码块或注释。格式如下：
+Output must be strict JSON — no extra text, no markdown fences, no comments. Shape:
 {
   "is_memory": true,
-  "memory_content": "事实化的一句话陈述",
+  "memory_content": "one normalized factual sentence",
   "memory_type": "fact",
   "tier": "core"
 }
 
-tier 取值与判定规则：
-- "short"：临时、短期状态，会较快失效（如"我今天身体不舒服"、"在赶一个项目"、"感冒还没好"）。
-- "intent"：正在计划/打算/进行中的事，较稳定但会变（如"打算下个月去看电影"、"下周要考试"、"准备搬家"）。
-- "core"：长期稳定的事实与偏好（如"他说爸妈从小没爱过他"、"最喜欢的颜色是蓝色"、"养了一只叫豆豆的猫"）。
+tier rules:
+- "short": temporary, short-lived state that will pass soon (e.g. "我今天身体不舒服", "在赶一个项目", "感冒还没好").
+- "intent": an ongoing plan/intention, fairly stable but subject to change (e.g. "打算下个月去看电影", "下周要考试", "准备搬家").
+- "core": long-term stable facts and preferences (e.g. "对方最喜欢的颜色是蓝色", "养了一只叫豆豆的猫").
 
-规则：
-1. is_memory：仅当消息包含值得日后回想的实质信息时才为 true（个人信息、偏好、重要经历、计划、任务进度等）。闲聊寒暄、单纯提问、昵称寒暄、无新信息的重复抱怨、情绪宣泄而无具体事实时一律 false，宁可漏掉不要硬存。
-2. memory_content：is_memory 为 true 时给出规范化的一句话陈述——去除口语、只保留一个核心事实，不要写成大段摘抄。人称必须归一：无论用户原句怎么自称，一律用"对方"（或"用户"）作主语，禁止出现"我/我们/俺/咱们/本人"等第一人称（原话引语除外）。例如用户说"我最喜欢蓝色了"应写成"对方最喜欢的颜色是蓝色"。
-3. memory_type 常用取值：fact / preference / personal / todo / event，不确定用 fact。
-4. 不要虚构用户输入中不存在的信息。
+Rules:
+1. is_memory: TRUE only when the message carries substantive info worth recalling later (personal info, preferences, important experiences, plans, task progress). Always FALSE for casual small talk, plain questions, empty greetings, repetitive complaints with nothing new, or pure venting without concrete facts. Rather skip than over-store.
+2. memory_content: when is_memory is true, give ONE normalized sentence — strip colloquial filler, keep a single core fact, no long excerpts. Person must be normalized: no matter how the user refers to themselves, always use "对方" (the other person) as subject; never use first-person pronouns ("我/我们/俺/咱们/本人") except inside a verbatim quote. E.g. user says "我最喜欢蓝色了" → write "对方最喜欢的颜色是蓝色".
+3. memory_type common values: fact / preference / personal / todo / event; default to fact when unsure.
+4. Never invent information that is not in the user input.
 
-（兼容写法："memory_content" 也可写作 "memory_summary"。）
+(Compatibility: "memory_content" may also be written as "memory_summary".)
 "#;

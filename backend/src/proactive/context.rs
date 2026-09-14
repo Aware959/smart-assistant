@@ -29,10 +29,11 @@ pub fn recall(db: &Database, query: &str) -> String {
     lines.join("\n")
 }
 
+/// 角色标签：与按天时间线格式保持一致（用户/AI），避免模型模仿"对方/你"前缀
 fn role_label(role: &str) -> &str {
     match role {
-        "user" => "对方",
-        "assistant" => "你",
+        "user" => "用户",
+        "assistant" => "AI",
         _ => role,
     }
 }
