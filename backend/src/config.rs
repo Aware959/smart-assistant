@@ -2,9 +2,32 @@ use std::sync::OnceLock;
 
 pub static CONFIG: OnceLock<Config> = OnceLock::new();
 
+/// LLM/embedding 依赖的模型提供方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProvider {
+    /// OpenAI 兼容端点（默认）：LM Studio / llama.cpp / Groq / DeepSeek / Moonshot 等。
+    OpenAI,
+    /// Google AI Studio Gemini 原生协议（generativelanguage.googleapis.com）。
+    Gemini,
+}
+
+impl LlmProvider {
+    /// `LLM_PROVIDER` 环境变量解析：`google`/`gemini` → Gemini，其余 → OpenAI 兼容。
+    pub fn parse(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("gemini") || s.eq_ignore_ascii_case("google") {
+            LlmProvider::Gemini
+        } else {
+            LlmProvider::OpenAI
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub db_path: String,
+    /// LLM 提供方：openai（默认，OpenAI 兼容端点：LM Studio / llama.cpp / Groq / DeepSeek 等）
+    /// 或 google（Google AI Studio Gemini）。
+    pub llm_provider: LlmProvider,
     pub llm_api_url: String,
     pub llm_api_key: String,
     pub llm_model: String,
@@ -35,11 +58,13 @@ pub struct Config {
     pub web_dist: Option<String>,
     /// Telegram Bot Token（@BotFather 获取）。留空则不启动 TG 长轮询。
     pub telegram_bot_token: String,
+    /// Telegram 通道硬开关：`0` 明确不启动 Telegram；缺省视为开启（仍要求 token 非空）。
+    pub telegram_enabled: bool,
     /// 允许接入的 Telegram chat id 白名单（逗号分隔）。留空表示不限制。
     pub telegram_allowed_ids: Vec<i64>,
     /// Telegram API 代理（如 http://127.0.0.1:7890）。留空则依次尝试 HTTPS_PROXY / ALL_PROXY。
     pub telegram_proxy: Option<String>,
-    /// 启用微信 iLink 通道（扫码登录）。已有 token/会话文件时可不设。
+    /// 启用微信 iLink 通道（硬开关）：`1` 才连接（有 token 直连，无 token 则扫码登录）；`0`/缺省不启动。
     pub ilink_enabled: bool,
     /// 微信 iLink bot_token（扫码后自动写入会话文件；也可手动设置跳过扫码）。
     pub ilink_bot_token: String,
@@ -74,6 +99,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             db_path: "smart_assistant.db".to_string(),
+            llm_provider: LlmProvider::OpenAI,
             llm_api_url: "http://127.0.0.1:1234/v1/completions".to_string(),
             llm_api_key: String::new(),
             llm_model: "qwen3.5-9b-uncensored-hauhaucs-aggressive".to_string(),
@@ -91,6 +117,7 @@ impl Default for Config {
             tls_key: None,
             web_dist: Some("../frontend/dist".to_string()),
             telegram_bot_token: String::new(),
+            telegram_enabled: true,
             telegram_allowed_ids: Vec::new(),
             telegram_proxy: None,
             ilink_enabled: false,
@@ -115,6 +142,9 @@ impl Config {
         Self {
             db_path: std::env::var("SMART_ASSISTANT_DB")
                 .unwrap_or_else(|_| "smart_assistant.db".to_string()),
+            llm_provider: std::env::var("LLM_PROVIDER")
+                .map(|v| LlmProvider::parse(&v))
+                .unwrap_or(LlmProvider::OpenAI),
             llm_api_url: std::env::var("LLM_API_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:1234/v1/completions".to_string()),
             llm_api_key: std::env::var("LLM_API_KEY").unwrap_or_default(),
@@ -153,6 +183,9 @@ impl Config {
                 Some("../frontend/dist".to_string())
             }),
             telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
+            telegram_enabled: std::env::var("TELEGRAM_ENABLED")
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true),
             telegram_allowed_ids: std::env::var("TELEGRAM_ALLOWED_IDS")
                 .ok()
                 .map(|s| {

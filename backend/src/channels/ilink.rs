@@ -687,9 +687,14 @@ async fn run_loop(
     }
 }
 
-/// iLink 通道入口：无 token 且未启用时静默跳过；异常退出后自动重连。
+/// iLink 通道入口：仅在 `ILINK_ENABLED=1` 时启动（有 token 直连，无 token 扫码登录）。
+/// 需外显关闭时设 `ILINK_ENABLED=0`，即使已有会话文件也不会再连接。
 pub async fn run(assistant: Arc<Assistant>) {
     let cfg = Config::get();
+    if !cfg.ilink_enabled {
+        tracing::info!("iLink 通道未启用（设置 ILINK_ENABLED=1 开启）");
+        return;
+    }
     let session_file = cfg.ilink_session_file.clone();
 
     // token 来源：环境变量 > 会话文件。
@@ -697,8 +702,8 @@ pub async fn run(assistant: Arc<Assistant>) {
     if !cfg.ilink_bot_token.trim().is_empty() {
         sess.bot_token = cfg.ilink_bot_token.trim().to_string();
     }
-    if sess.bot_token.trim().is_empty() && !cfg.ilink_enabled {
-        return;
+    if sess.bot_token.trim().is_empty() {
+        tracing::info!("iLink 无有效 token，将进入扫码登录");
     }
 
     let client = match reqwest::Client::builder().build() {

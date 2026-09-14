@@ -10,7 +10,7 @@ use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
 use tokio::runtime::Runtime;
 
-use crate::config::Config;
+use crate::config::{Config, LlmProvider};
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static CHAT_CLIENT: OnceLock<Client> = OnceLock::new();
@@ -55,13 +55,60 @@ pub(crate) fn chat_client() -> &'static Client {
         normalize_reasoning_content: Some(true),
         ..Default::default()
     };
-    CHAT_CLIENT.get_or_init(|| build_client(&Config::get().llm_api_url, &Config::get().llm_api_key, Some(&chat_options)))
+    CHAT_CLIENT.get_or_init(|| {
+        let cfg = Config::get();
+        match cfg.llm_provider {
+            LlmProvider::OpenAI => {
+                build_client(&cfg.llm_api_url, &cfg.llm_api_key, Some(&chat_options))
+            }
+            LlmProvider::Gemini => {
+                build_gemini_client(&cfg.llm_api_url, &cfg.llm_api_key, Some(&chat_options))
+            }
+        }
+    })
 }
 
-/// embedding 专用的 genai Client。
+/// embedding 专用的 genai Client（genez 的嵌入与 LLM 通道独立，仍按 OpenAI 兼容端点）。
 pub(crate) fn embed_client() -> &'static Client {
     EMBED_CLIENT
         .get_or_init(|| build_client(&Config::get().embedding_api_url, &Config::get().embedding_api_key, None))
+}
+
+/// 构建绑定到 Gemini（Google AI Studio）原生协议的 Client。
+///
+/// - `api_url`  非空时覆盖端点（如走代理网关），为空用 genai 默认
+///   `https://generativelanguage.googleapis.com/v1beta/`。
+/// - `api_key`  非空时直接使用；为空回退环境变量 `GEMINI_API_KEY`。
+/// - 鉴权头为 `x-goog-api-key`（GeminiAdapter 约定），不走 `Authorization: Bearer`。
+fn build_gemini_client(api_url: &str, api_key: &str, chat_options: Option<&ChatOptions>) -> Client {
+    let url = resolve_url(api_url).map(ToOwned::to_owned);
+    let auth = if api_key.is_empty() {
+        AuthData::from_env("GEMINI_API_KEY")
+    } else {
+        AuthData::from_single(api_key)
+    };
+
+    let service_target_resolver = ServiceTargetResolver::from_resolver_fn(
+        move |st: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
+            let ServiceTarget { model, endpoint, .. } = st;
+            let endpoint = match &url {
+                Some(url) => Endpoint::from_owned(url.clone()),
+                None => endpoint,
+            };
+            let model = ModelIden::new(AdapterKind::Gemini, model.model_name);
+            Ok(ServiceTarget {
+                endpoint,
+                auth: auth.clone(),
+                model,
+            })
+        },
+    );
+
+    let mut builder = Client::builder().with_service_target_resolver(service_target_resolver);
+    if let Some(options) = chat_options {
+        builder = builder.with_chat_options(options.clone());
+    }
+    builder.build()
 }
 
 /// 构建绑定到 OpenAI 兼容端点的 Client。

@@ -65,7 +65,9 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+                // qwen3 等思考型模型流式时先吐 reasoning 空增量，genai 会逐个打 WARN：
+                // 压到 error 级，避免噪音（RUST_LOG 手动设置时仍由环境变量说了算）。
+                .unwrap_or_else(|_| "info,genai::adapter::adapters::openai::streamer=error".into()),
         )
         .init();
 
@@ -103,10 +105,10 @@ async fn main() {
         "database ready"
     );
 
-    // 配置了 TELEGRAM_BOT_TOKEN 时，后台启动 Telegram 长轮询（与 HTTP 服务同进程）。
+    // 配置了 TELEGRAM_BOT_TOKEN 且 TELEGRAM_ENABLED != 0 时，后台启动 Telegram 长轮询。
     #[cfg(feature = "telegram")]
-    if !cfg.telegram_bot_token.trim().is_empty() {
-        tracing::info!("TELEGRAM_BOT_TOKEN 已配置，启动 Telegram 长轮询");
+    if cfg.telegram_enabled && !cfg.telegram_bot_token.trim().is_empty() {
+        tracing::info!("TELEGRAM_ENABLED + TELEGRAM_BOT_TOKEN 已配置，启动 Telegram 长轮询");
         tokio::spawn(smart_assistant::channels::telegram::run(assistant.clone()));
     }
 
