@@ -71,6 +71,12 @@ pub struct TimeWorld {
     pub user_offset_minutes: Option<i32>,
     /// 对方历史最活跃小时（UTC，画像众数）。
     pub user_active_hour: Option<u32>,
+    /// 世界引擎的自我状态：生活设定 + 今日叙事 + 情绪（见 [`crate::world`]）。
+    pub ai_base: String,
+    pub ai_day: Option<String>,
+    pub ai_mood: Option<crate::world::emotion::Mood>,
+    /// 与对方的关系（无记录为 None）。
+    pub relation: Option<crate::world::relation::Relation>,
 }
 
 /// 从真实 DB 状态组装一次世界快照（无渠道映射的 CLI/HTTP 会话也可用消息时间线兜底）。
@@ -90,11 +96,19 @@ pub fn snapshot(db: &Database, session_id: &str) -> TimeWorld {
             w.user_offset_minutes = Some(profile.0);
             w.user_active_hour = Some(profile.1);
         }
+        if let Ok(Some(r)) = crate::world::relation::load(db, &channel, &external) {
+            w.relation = Some(r);
+        }
     }
     if w.last_user_at.is_none() {
         if let Ok(Some(t)) = latest_user_msg_at(db, session_id) {
             w.last_user_at = Some(t);
         }
+    }
+    if let Ok(st) = crate::world::self_state::load(db) {
+        w.ai_base = st.self_base;
+        w.ai_day = (!st.today_narrative.trim().is_empty()).then_some(st.today_narrative);
+        w.ai_mood = Some(st.mood);
     }
     w
 }
@@ -132,6 +146,22 @@ pub fn render(w: &TimeWorld) -> String {
     }
     if let Some(p) = w.last_proactive_at {
         s.push_str(&format!("\n- 距上次主动联系：{}前。", fmt_ago(p, w.now)));
+    }
+    if !w.ai_base.trim().is_empty() {
+        s.push_str(&format!("\n- 我的生活设定：{}", w.ai_base.trim()));
+    }
+    if let Some(m) = &w.ai_mood {
+        s.push_str(&format!("\n- 此刻的心境：{}。", crate::world::emotion::label(m)));
+    }
+    if let Some(day) = &w.ai_day {
+        s.push_str(&format!("\n- 今天到现在我经历了：{day}"));
+    }
+    if let Some(r) = &w.relation {
+        s.push_str(&format!(
+            "\n- 我和对方的关系：{}，{}。",
+            crate::world::relation::closeness_label(r.closeness),
+            crate::world::relation::trust_label(r.trust)
+        ));
     }
     s
 }

@@ -123,6 +123,13 @@ async fn main() {
         tokio::spawn(smart_assistant::proactive::run(assistant.clone()));
     }
 
+    // 世界引擎：AI 自身状态持续演进（情绪回落 / 关系降温 / 今日叙事），
+    // 与主动推送解耦，始终运行。
+    #[cfg(any(feature = "telegram", feature = "ilink"))]
+    {
+        tokio::spawn(smart_assistant::world::run(assistant.clone()));
+    }
+
     // 构建路由（若配置了前端产物，则同源托管 SPA 静态文件）
     let app = api::build_router(assistant);
     let app = match cfg.web_dist.as_deref() {

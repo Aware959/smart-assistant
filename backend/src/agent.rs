@@ -97,6 +97,8 @@ impl Agent {
         };
         // 时间世界模型：用这条真实时刻重算对方作息画像（无渠道映射时静默跳过）。
         let _ = crate::timeworld::observe(&db, &session.id);
+        // 世界引擎：对方来了一条消息 → 关系升温。
+        let _ = crate::world::relation::observe(&db, &session.id);
 
         // 2. 一次性分析：是否值得沉淀记忆。
         let extraction = memory::extraction::extract_from_text(&input.message)?;

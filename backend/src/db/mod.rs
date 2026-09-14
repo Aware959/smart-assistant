@@ -83,7 +83,7 @@ pub fn ensure_vec_extension(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 向量表的“签名”：embedding 维度 + 模型名。
@@ -210,6 +210,26 @@ fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (channel, external_id)
         );
 
+        CREATE TABLE IF NOT EXISTS world_state (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            self_base       TEXT NOT NULL DEFAULT '',
+            valence         REAL NOT NULL DEFAULT 0,
+            energy          REAL NOT NULL DEFAULT 0.5,
+            today_date      TEXT,
+            today_narrative TEXT NOT NULL DEFAULT '',
+            last_phase      TEXT,
+            updated_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS relations (
+            channel        TEXT NOT NULL,
+            external_id    TEXT NOT NULL,
+            closeness      REAL NOT NULL DEFAULT 0,
+            trust          REAL NOT NULL DEFAULT 0,
+            updated_at     TEXT NOT NULL,
+            PRIMARY KEY (channel, external_id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
         CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
         "#,
@@ -255,6 +275,33 @@ fn migrate(conn: &Connection) -> Result<()> {
                 active_hour        INTEGER,
                 observations       INTEGER NOT NULL DEFAULT 0,
                 updated_at         TEXT NOT NULL,
+                PRIMARY KEY (channel, external_id)
+            );
+            "#,
+        )?;
+    }
+
+    if version < 8 {
+        // v8：世界引擎 —— AI 自身状态表（情绪/今日叙事/自我档案）与关系表（按用户）。
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS world_state (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                self_base       TEXT NOT NULL DEFAULT '',
+                valence         REAL NOT NULL DEFAULT 0,
+                energy          REAL NOT NULL DEFAULT 0.5,
+                today_date      TEXT,
+                today_narrative TEXT NOT NULL DEFAULT '',
+                last_phase      TEXT,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS relations (
+                channel        TEXT NOT NULL,
+                external_id    TEXT NOT NULL,
+                closeness      REAL NOT NULL DEFAULT 0,
+                trust          REAL NOT NULL DEFAULT 0,
+                updated_at     TEXT NOT NULL,
                 PRIMARY KEY (channel, external_id)
             );
             "#,

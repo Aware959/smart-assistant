@@ -8,6 +8,7 @@ pub mod llm;
 pub mod memory;
 pub mod services;
 pub mod timeworld;
+pub mod world;
 
 #[cfg(feature = "desktop")]
 pub mod api;
