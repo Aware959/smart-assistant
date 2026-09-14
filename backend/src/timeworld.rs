@@ -199,6 +199,17 @@ pub fn observe(db: &Database, session_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// 该会话用户已推断的时区偏移（分钟，东正）。无画像或非渠道会话时返回东八区兜底。
+pub fn user_offset_minutes(db: &Database, session_id: &str) -> i32 {
+    match channel_of(db, session_id) {
+        Ok(Some((channel, external))) => match profile_of(db, &channel, &external) {
+            Ok(Some((off, _))) => off,
+            _ => 8 * 60,
+        },
+        _ => 8 * 60,
+    }
+}
+
 fn profile_of(db: &Database, channel: &str, external: &str) -> Result<Option<Profile>> {
     let mut stmt = db.conn().prepare(
         "SELECT utc_offset_minutes, active_hour, observations

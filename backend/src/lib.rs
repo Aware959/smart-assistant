@@ -138,7 +138,8 @@ pub struct ChatInput {
     /// 显式携带的历史轮次（可选，补充上下文）；留空时后端自动从会话消息构建。
     #[serde(default)]
     pub history: Vec<ChatTurn>,
-    /// 自动构建上下文时取最近的历史消息条数；缺省 6。
+    /// 自动构建上下文的方式：缺省按"今天"取消息（日界=用户当地 06:00、带时间戳，
+    /// 见 agent.rs build_day_history）；显式指定 N 时改为取最近 N 条纯文本。
     #[serde(default)]
     pub history_count: Option<u32>,
     /// 用户端消息的真实发出时刻（RFC3339 世界时，来自通道报文时间戳）。

@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 交互式 REPL
     println!("SMART Assistant CLI（输入 exit 或 Ctrl+C 退出）");
-    println!("发送消息即开始对话，回复将实时输出；上下文自动携带最近 6 条消息。");
+    println!("发送消息即开始对话，回复将实时输出；上下文自动按当天时间线携带（本市凌晨 6 点为一日的开始）。");
 
     let stdin = io::stdin();
     let mut session_id: Option<String> = None;
