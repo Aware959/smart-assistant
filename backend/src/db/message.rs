@@ -26,7 +26,24 @@ impl Message {
 }
 
 pub fn create(db: &Database, session_id: &str, role: &str, content: &str) -> Result<Message> {
-    let message = Message::new(session_id.to_string(), role.to_string(), content.to_string());
+    create_at(db, session_id, role, content, Utc::now())
+}
+
+/// 以给定时刻落库（消息真实发出时间，如通道报文里的时间戳），用于时间世界模型。
+pub fn create_at(
+    db: &Database,
+    session_id: &str,
+    role: &str,
+    content: &str,
+    at: chrono::DateTime<Utc>,
+) -> Result<Message> {
+    let message = Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.to_string(),
+        role: role.to_string(),
+        content: content.to_string(),
+        created_at: at.to_rfc3339(),
+    };
     db.conn().execute(
         "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![

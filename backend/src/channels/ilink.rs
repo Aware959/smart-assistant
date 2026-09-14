@@ -10,6 +10,7 @@
 //!   再次入站刷新。对外表现由 [`super::IlinkRegistry`] 管理；
 //! - 每个请求头需携带随机 `X-WECHAT-UIN`。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -139,6 +140,12 @@ struct RawMsg {
     group_id: Option<String>,
     #[serde(default)]
     item_list: Vec<RawItem>,
+    /// 消息发出时间戳（已实测确认的 iLink 报文字段：`create_time_ms`，Unix 毫秒）。
+    #[serde(default)]
+    create_time_ms: Option<i64>,
+    /// 其余未解析字段（探测真实时间戳字段名用，日志只记录键名不记录内容）。
+    #[serde(default, flatten)]
+    extra: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -520,6 +527,7 @@ async fn handle_text(
     assistant: Arc<Assistant>,
     from_user_id: String,
     text: String,
+    user_time: Option<String>,
 ) -> Result<String, String> {
     match text.trim() {
         "/new" => {
@@ -542,6 +550,7 @@ async fn handle_text(
                     session_id: Some(session_id),
                     history: Vec::new(),
                     history_count: None,
+                    user_time,
                 };
                 assistant
                     .chat_stream(&input, |_| {})
@@ -629,12 +638,21 @@ async fn run_loop(
             refresh_contact(&msg.from_user_id, &msg.context_token);
             touch_user_reply(&assistant, &msg.from_user_id);
 
+            let user_time = super::ts_to_rfc3339(msg.create_time_ms);
+            if msg.create_time_ms.is_none() {
+                let keys: Vec<&String> = msg.extra.keys().collect();
+                tracing::debug!(keys = ?keys, "iLink 报文未命中时间戳字段，实际键名：");
+            } else {
+                tracing::debug!(create_time_ms = ?msg.create_time_ms, user_time = ?user_time, "入站消息时间戳（用于时间世界模型）");
+            }
+
             send_typing(client, &base, sess, &msg.context_token).await;
 
             let (reply, is_fallback) = match handle_text(
                 assistant.clone(),
                 msg.from_user_id.clone(),
                 text,
+                user_time,
             )
             .await
             {

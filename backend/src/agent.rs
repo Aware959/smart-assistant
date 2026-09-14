@@ -86,8 +86,11 @@ impl Agent {
         })
         .collect::<Vec<_>>();
 
-        // 用户消息入库（记录）。
-        let user_message = db::message::create(&db, &session.id, "user", &input.message)?;
+        // 用户消息入库（记录）。带通道报文时间戳时用之（真实时间线），否则记接收时刻。
+        let user_message = match input.user_time.as_deref().and_then(parse_rfc3339) {
+            Some(at) => db::message::create_at(&db, &session.id, "user", &input.message, at)?,
+            None => db::message::create(&db, &session.id, "user", &input.message)?,
+        };
 
         // 2. 一次性分析：是否值得沉淀记忆。
         let extraction = memory::extraction::extract_from_text(&input.message)?;
@@ -158,6 +161,13 @@ const MEMORY_RECALL_LIMIT: usize = 5;
 
 /// 硬性长度上限：默认回复不超过 1-2 句 / 80 个汉字，除非对方明确要求详细说明。
 const MAX_REPLY_CHARS: usize = 80;
+
+/// 将 RFC3339 字符串解析为 UTC 时刻（解析失败视为未提供，回退接收时刻）。
+fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&chrono::Utc))
+}
 
 /// 将向量检索到的记忆拼接为上下文（注入 system prompt）。
 fn build_recall_context(

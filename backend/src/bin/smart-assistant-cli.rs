@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session_id: None,
                 history: vec![],
                 history_count: None,
+                user_time: None,
             },
             |delta| {
                 print!("{delta}");
@@ -78,6 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session_id: session_id.clone(),
                 history: vec![],
                 history_count: None,
+                user_time: None,
             },
             |delta| {
                 print!("{delta}");

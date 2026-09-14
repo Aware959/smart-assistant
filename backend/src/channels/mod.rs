@@ -69,6 +69,14 @@ pub(crate) fn shared_push() -> &'static PushChannels {
     PUSH.get_or_init(PushChannels::default)
 }
 
+/// 把通道报文里的消息时间戳（Unix 秒或毫秒）归一化为 RFC3339 世界时字符串。
+/// Telegram `Message.date` 为秒级；iLink 类微信报文常为毫秒级。None/非法值返回 None。
+pub(crate) fn ts_to_rfc3339(ts: Option<i64>) -> Option<String> {
+    let ts = ts?;
+    let secs = if ts > 1_000_000_000_000 { ts / 1000 } else { ts };
+    chrono::DateTime::from_timestamp(secs, 0).map(|t| t.to_rfc3339())
+}
+
 /// 把长文本按字符上限切分为多段（优先在换行处断开，中文按字符计数）。
 /// 各渠道发送接口都有单条长度限制，统一用该函数分片。
 pub fn chunk_text(text: &str, limit: usize) -> Vec<String> {

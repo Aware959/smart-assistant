@@ -42,6 +42,9 @@ struct TgMessage {
     #[serde(default)]
     text: Option<String>,
     chat: TgChat,
+    /// 消息发出时刻（Unix 秒，服务端收到即记），等于用户按下发送的世界时刻。
+    #[serde(default)]
+    date: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +155,7 @@ async fn handle_text(
     assistant: Arc<Assistant>,
     chat_id: i64,
     text: &str,
+    user_time: Option<String>,
 ) -> Result<Option<String>, String> {
     let external = chat_id.to_string();
     let text = text.to_string();
@@ -180,6 +184,7 @@ async fn handle_text(
                     session_id: Some(session_id),
                     history: Vec::new(),
                     history_count: None,
+                    user_time,
                 };
                 assistant
                     .chat_stream(&input, |_| {})
@@ -284,12 +289,14 @@ async fn run_loop(assistant: Arc<Assistant>, token: &str) -> Result<(), String> 
             if text.trim().is_empty() {
                 continue;
             }
+            let user_time = super::ts_to_rfc3339(message.date);
 
             touch_user_reply(&assistant, &chat_id.to_string());
 
             send_typing(&client, &base, chat_id).await;
 
-            let (next_reply, is_fallback) = match handle_text(assistant.clone(), chat_id, &text).await
+            let (next_reply, is_fallback) =
+                match handle_text(assistant.clone(), chat_id, &text, user_time).await
             {
                 Ok(Some(reply)) => (reply, false),
                 Ok(None) => continue,

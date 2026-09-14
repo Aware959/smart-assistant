@@ -87,6 +87,7 @@ async fn handle_chat_stream(
         session_id: req.session_id,
         history: req.history,
         history_count: req.history_count,
+        user_time: None,
     };
     let (id, created, model) = sse_stream_meta();
 
@@ -160,6 +161,7 @@ async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: Arc<Assi
                     session_id: None,
                     history: vec![],
                     history_count: None,
+                    user_time: None,
                 };
                 let (tx, mut rx) = mpsc::unbounded::<SseMsg>();
                 let state = state.clone();

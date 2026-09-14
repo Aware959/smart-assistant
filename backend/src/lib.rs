@@ -139,6 +139,10 @@ pub struct ChatInput {
     /// 自动构建上下文时取最近的历史消息条数；缺省 6。
     #[serde(default)]
     pub history_count: Option<u32>,
+    /// 用户端消息的真实发出时刻（RFC3339 世界时，来自通道报文时间戳）。
+    /// 缺省时为后端接收时刻；用于时间世界模型的精确时间线。
+    #[serde(default)]
+    pub user_time: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +177,7 @@ impl Assistant {
             session_id,
             history,
             history_count: None,
+            user_time: None,
         };
         let output = self.chat_stream(&input, |_| {})?;
         serde_json::to_string(&output).map_err(Into::into)
