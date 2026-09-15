@@ -34,6 +34,9 @@ pub struct Config {
     /// 记忆提取专用模型：留空则复用 llm_model。推荐用更强的模型负责
     /// 记忆判定/事实化，对话模型只管聊天（两者可分离）。
     pub llm_extract_model: String,
+    /// 结构化输出的请求模式：json_schema（默认，OpenAI/Gemini/本地 llama.cpp 系）
+    /// 或 json_object（DeepSeek 等只支持宽松 JSON 模式的端点）。
+    pub llm_structured_output: String,
     /// 角色设定（人设/性格/喜欢…）。非空时每一轮对话都以硬约束注入 system 提示词。
     pub persona: String,
     pub embedding_api_url: String,
@@ -104,6 +107,7 @@ impl Default for Config {
             llm_api_key: String::new(),
             llm_model: "qwen3.5-9b-uncensored-hauhaucs-aggressive".to_string(),
             llm_extract_model: String::new(),
+            llm_structured_output: "json_schema".to_string(),
             persona: String::new(),
             embedding_api_url: "http://127.0.0.1:1234/v1/embeddings".to_string(),
             embedding_api_key: String::new(),
@@ -151,6 +155,8 @@ impl Config {
             llm_model: std::env::var("LLM_MODEL")
                 .unwrap_or_else(|_| "google/gemma-4-26b-a4b-qat".to_string()),
             llm_extract_model: std::env::var("LLM_EXTRACT_MODEL").unwrap_or_default(),
+            llm_structured_output: std::env::var("LLM_STRUCTURED_OUTPUT")
+                .unwrap_or_else(|_| "json_schema".to_string()),
             persona: std::env::var("PERSONA").unwrap_or_default(),
             embedding_api_url: std::env::var("EMBEDDING_API_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:1234/v1/embeddings".to_string()),

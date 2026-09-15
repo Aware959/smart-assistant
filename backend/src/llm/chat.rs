@@ -5,6 +5,7 @@ use genai::chat::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::config::Config;
 use crate::genai_client;
 use crate::error::{Result, SqlError};
 
@@ -37,21 +38,30 @@ pub fn complete_with_model(messages: &[ChatMessage], model: &str) -> Result<Stri
     complete_impl(messages, model, None)
 }
 
-/// 按 JSON Schema 强制结构化输出的非流式对话（记忆提取/判定等任务）。
+/// 按 JSON 约束强制结构化输出的非流式对话（记忆提取/判定等任务）。
 ///
-/// 通过 `response_format: {type: json_schema, json_schema: {name, strict, schema}}`
-/// 驱动。llama.cpp 系端点只接受 `json_schema` / `text`（拒绝 OpenAI 的
-/// `json_object`），此处统一走 json_schema，多数实现会同时用 grammar 约束
-/// 输出、连思考段一起压掉。
+/// 输出模式由 `LLM_STRUCTURED_OUTPUT` 控制：
+/// - `json_schema`（默认）：`response_format: {type: json_schema, json_schema: {name, strict, schema}}`。
+///   支持端：OpenAI / Gemini / 本地 llama.cpp 系 / Groq 的 Qwen，能同时压掉思考段。
+/// - `json_object`：`response_format: {type: json_object}`，仅提示工程约束（提示词里
+///   必须要求"只输出 JSON"）。DeepSeek 等端点不支持 json_schema 但接受 json_object。
 pub fn complete_structured(
     messages: &[ChatMessage],
     model: &str,
     name: impl Into<String>,
     schema: serde_json::Value,
 ) -> Result<String> {
-    let options = ChatOptions {
-        response_format: Some(ChatResponseFormat::JsonSpec(JsonSpec::new(name, schema))),
-        ..Default::default()
+    let structured = Config::get().llm_structured_output.to_ascii_lowercase();
+    let options = if structured == "json_object" {
+        ChatOptions {
+            response_format: Some(ChatResponseFormat::JsonMode),
+            ..Default::default()
+        }
+    } else {
+        ChatOptions {
+            response_format: Some(ChatResponseFormat::JsonSpec(JsonSpec::new(name, schema))),
+            ..Default::default()
+        }
     };
     complete_impl(messages, model, Some(&options))
 }
