@@ -96,11 +96,12 @@ impl Agent {
         };
         // 时间世界模型：用这条真实时刻重算对方作息画像（无渠道映射时静默跳过）。
         let _ = crate::timeworld::observe(&db, &session.id);
-        // 世界引擎：对方来了一条消息 → 关系升温。
-        let _ = crate::world::relation::observe(&db, &session.id);
 
-        // 2. 一次性分析：是否值得沉淀记忆。
+        // 2. 一次性分析：是否值得沉淀记忆；同时判定本条消息的关系事件类型。
         let extraction = memory::extraction::extract_from_text(&input.message)?;
+        // 世界引擎：按本条消息的关系事件调整关系——日常闲聊影响很小，
+        // 关心/暧昧大幅升温，矛盾/吵架乘法折损，和解专门修复信任。
+        let _ = crate::world::relation::apply_event(&db, &session.id, extraction.relation_event());
 
         // 3. 记忆向量检索（已按 memory_recall_threshold 过滤相关度、剔除过期记忆）。
         let memory_hits = memory::store::search(&db, &input.message, MEMORY_RECALL_LIMIT)?;
