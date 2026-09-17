@@ -61,46 +61,18 @@ fn update_and_delete_memory() {
 }
 
 #[test]
-fn parse_memory_extraction() {
-    use smart_assistant::memory::extraction::parse_raw;
+fn memory_extraction_falls_back_to_raw_text() {
+    use smart_assistant::memory::extraction::MemoryExtraction;
 
-    let raw = r#"{
-  "is_memory": true,
-  "memory_content": "小明生活在北京",
-  "memory_type": "fact"
-}"#;
-    let result = parse_raw(raw).unwrap();
-    assert!(result.is_memory);
-    assert_eq!(result.memory_content.as_deref(), Some("小明生活在北京"));
-    assert_eq!(result.memory_type, "fact");
-}
-
-#[test]
-fn parse_memory_extraction_with_alias() {
-    use smart_assistant::memory::extraction::parse_raw;
-
-    let raw = r#"{
-  "is_memory": true,
-  "memory_summary": "张三喜欢咖啡",
-  "memory_type": "preference"
-}"#;
-    let result = parse_raw(raw).unwrap();
-    assert!(result.is_memory);
-    assert_eq!(result.memory_content.as_deref(), Some("张三喜欢咖啡"));
-    assert_eq!(result.memory_type, "preference");
-}
-
-#[test]
-fn parse_memory_extraction_not_memory() {
-    use smart_assistant::memory::extraction::parse_raw;
-
-    let raw = r#"{
-  "is_memory": false,
-  "memory_content": "",
-  "memory_type": "fact"
-}"#;
-    let result = parse_raw(raw).unwrap();
-    assert!(!result.is_memory);
+    // 事实化内容缺失（未生成或生成失败）时，落库文本应回退到用户原文。
+    let extraction = MemoryExtraction {
+        is_memory: true,
+        memory_content: None,
+        memory_type: "fact".to_string(),
+        tier: "core".to_string(),
+        relation: "neutral".to_string(),
+    };
+    assert_eq!(extraction.content_or("我最喜欢蓝色了"), "我最喜欢蓝色了");
 }
 
 #[test]

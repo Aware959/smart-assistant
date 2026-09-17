@@ -27,7 +27,9 @@
 | messages | 消息记录（role: user/assistant） | 只作记录，不一定产生记忆 |
 | memories | 记忆/事实（content / memory_type / tier / expires_at / message_id） | LLM 判定 `is_memory` 时才沉淀；`tier`=short（短期）\| intent（意向）\| core（长期），short/intent 有 `expires_at`，过期不参与召回 |
 
-对话流程：用户消息 → 一次 LLM 调用（判定 `is_memory`、事实化内容、`tier`）→ 记忆向量检索 → 重组提示词 → 回复 → 消息入库；LLM 判定值得记住时才写入 `memories`。
+对话流程：用户消息 → 消息入库 → 记忆向量检索（失败降级为空召回）→ 重组提示词 → 流式回复 → 回复入库；**回复交付之后**再做记忆沉淀：一次极窄的 LLM 调用判定标签（`is_memory` / `memory_type` / `tier` / `relation`），判定为"值得记住"时再调一次做事实化，最后写入 `memories`。
+
+沉淀刻意后置：判定与事实化都要调 LLM，挂在对话路径上会拉长首字延迟，失败还会让用户拿不到回复。记忆链路（召回 / 判定 / 事实化 / 落库）任何环节失败都只记 warn 并降级，不影响对话本身。
 
 ## 上下文构建
 
@@ -46,7 +48,7 @@ curl -N -X POST http://127.0.0.1:3000/chat/stream \
 
 - 常规数据行均为 OpenAI `chat.completion.chunk`：`data: {"choices":[{"delta":{"content":"..."},...}],"object":"chat.completion.chunk",...}`
 - 结尾 `data: [DONE]`（OpenAI SDK / EventSource 可直接按标准流解析）
-- 附加元数据事件 `event: done`：`data: <ChatOutput JSON>`（含 `session_id` / `memory` / `entities` / `relations`，非标准扩展，标准客户端会忽略）
+- 附加元数据事件 `event: done`：`data: <ChatOutput JSON>`（含 `session_id` / `user_message_id` / `memory`；`memory` 为 null 表示本轮没有值得沉淀的事实，非标准扩展，标准客户端会忽略）
 - 出错时流内返回 `data: {"error":{"message":"...","type":"assistant_stream_error"}}`，随后仍有 `[DONE]` 与 `done` 事件
 
 ## WebSocket（/ws）

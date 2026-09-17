@@ -14,8 +14,10 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::config::Config;
+use crate::core::ports::ChatLlm;
+use crate::core::types::ChatMessage;
 use crate::db::proactive::ProactiveCandidate;
-use crate::llm;
+use crate::host::Host;
 use crate::proactive::{decider, scheduler, sender};
 use crate::Assistant;
 
@@ -113,9 +115,11 @@ async fn propose_follow_up(
         return None;
     }
 
-    let decision = tokio::task::spawn_blocking(move || decide_continue(&recent, appended))
-        .await
-        .unwrap_or_default();
+    let llm = assistant.chat_llm();
+    let decision =
+        tokio::task::spawn_blocking(move || decide_continue(&*llm, &recent, appended))
+            .await
+            .unwrap_or_default();
     if decision.continue_ {
         decision.message
     } else {
@@ -139,7 +143,7 @@ struct ContinueDecision {
 /// - [格式] 只准一句、口语化、像微信补一句、不超过40字、不重复不复述
 /// - [已追加限制] appended>0 时提醒模型已连发几句，避免变复读机
 /// - [输出] 只输出 JSON：continue=true/false + message
-fn decide_continue(recent: &str, appended: u32) -> ContinueDecision {
+fn decide_continue(llm: &dyn ChatLlm, recent: &str, appended: u32) -> ContinueDecision {
     let cfg = Config::get();
     let persona_block = if cfg.persona.trim().is_empty() {
         String::new()
@@ -187,17 +191,17 @@ fn decide_continue(recent: &str, appended: u32) -> ContinueDecision {
     );
 
     let messages = vec![
-        llm::chat::ChatMessage {
+        ChatMessage {
             role: "system".to_string(),
             content: system,
         },
-        llm::chat::ChatMessage {
+        ChatMessage {
             role: "user".to_string(),
             content: user,
         },
     ];
 
-    match llm::chat::complete(&messages) {
+    match llm.complete(&messages) {
         Ok(text) => parse(&text),
         Err(e) => {
             tracing::warn!(error = %e, "延续判断 LLM 调用失败，本轮不再追加");

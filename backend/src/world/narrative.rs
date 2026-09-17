@@ -23,7 +23,7 @@ pub fn should_advance(db: &Database) -> Result<bool> {
     let now = Utc::now();
     let local = now.with_timezone(&Local);
     let today = local.date_naive().to_string();
-    let phase = crate::timeworld::phase_label(crate::timeworld::phase_of(local.hour())).to_string();
+    let phase = crate::world::timeworld::phase_label(crate::world::timeworld::phase_of(local.hour())).to_string();
 
     if st.today_date.as_deref() == Some(today.as_str())
         && st.last_phase.as_deref() == Some(phase.as_str())
@@ -45,7 +45,7 @@ pub fn advance(assistant: &crate::Assistant) -> Result<()> {
     let now = Utc::now();
     let local = now.with_timezone(&Local);
     let today = local.date_naive().to_string();
-    let phase = crate::timeworld::phase_label(crate::timeworld::phase_of(local.hour())).to_string();
+    let phase = crate::world::timeworld::phase_label(crate::world::timeworld::phase_of(local.hour())).to_string();
 
     let (mut st, persona) = {
         let db = assistant.inner_db();
@@ -140,7 +140,7 @@ mod tests {
         let db = Database::in_memory().unwrap();
         let now = chrono::Utc::now();
         let local = now.with_timezone(&Local);
-        let phase = crate::timeworld::phase_label(crate::timeworld::phase_of(local.hour()));
+        let phase = crate::world::timeworld::phase_label(crate::world::timeworld::phase_of(local.hour()));
 
         let mut st = crate::world::self_state::load(&db).unwrap();
         st.today_date = Some(local.date_naive().to_string());
@@ -160,7 +160,7 @@ mod tests {
 
         let mut st = crate::world::self_state::load(&db).unwrap();
         st.today_date = Some(yesterday);
-        st.last_phase = Some(crate::timeworld::phase_label(crate::timeworld::phase_of(
+        st.last_phase = Some(crate::world::timeworld::phase_label(crate::world::timeworld::phase_of(
             local.hour(),
         ))
         .to_string());

@@ -25,22 +25,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(m) = message {
         // 单发模式
-        match assistant.chat_stream(
-            &ChatInput {
-                message: m,
-                session_id: None,
-                history: vec![],
-                history_count: None,
-                user_time: None,
-            },
-            |delta| {
-                print!("{delta}");
-                io::stdout().flush().ok();
-            },
-        ) {
+        let input = ChatInput {
+            message: m,
+            session_id: None,
+            history: vec![],
+            history_count: None,
+            user_time: None,
+        };
+        match assistant.chat_stream(&input, |delta| {
+            print!("{delta}");
+            io::stdout().flush().ok();
+        }) {
             Ok(out) => {
                 println!();
                 println!("[会话 {}]", out.session_id);
+                // 回复已输出，再补记忆沉淀（CLI 无并发压力，同步即可）。
+                if let Some(mem) = assistant.settle_memory(
+                    &out.session_id,
+                    &out.user_message_id,
+                    &input.message,
+                ) {
+                    println!("[已记住] {}", mem.content);
+                }
             }
             Err(e) => {
                 eprintln!("error: {e}");
@@ -73,22 +79,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        match assistant.chat_stream(
-            &ChatInput {
-                message: text,
-                session_id: session_id.clone(),
-                history: vec![],
-                history_count: None,
-                user_time: None,
-            },
-            |delta| {
-                print!("{delta}");
-                io::stdout().flush().ok();
-            },
-        ) {
+        let input = ChatInput {
+            message: text,
+            session_id: session_id.clone(),
+            history: vec![],
+            history_count: None,
+            user_time: None,
+        };
+        match assistant.chat_stream(&input, |delta| {
+            print!("{delta}");
+            io::stdout().flush().ok();
+        }) {
             Ok(out) => {
                 println!();
                 session_id = Some(out.session_id.clone());
+                // 回复已输出，再补记忆沉淀（CLI 无并发压力，同步即可）。
+                if let Some(mem) = assistant.settle_memory(
+                    &out.session_id,
+                    &out.user_message_id,
+                    &input.message,
+                ) {
+                    println!("[已记住] {}", mem.content);
+                }
                 println!("[会话 {}]\n", out.session_id);
             }
             Err(e) => {

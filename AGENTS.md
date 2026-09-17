@@ -21,11 +21,11 @@
 
 本地优先的对话式记忆/知识助手。Rust 内核 `backend/` + Web 前端 `frontend/` + Android 占位 `android/`。
 
-- `backend/src/lib.rs`：应用外壳（`Assistant` 薄委托）+ 输入输出类型 + UniFFI 导出
-- `backend/src/agent.rs`：编排层（单轮对话 / 记忆提取沉淀的业务流水线，不感知 FFI/HTTP）
-- `backend/src/services/`：服务层（会话/消息/记忆管理 + FFI 可序列化视图记录）
+- `backend/src/lib.rs`：应用外壳（`Assistant` 薄委托 + 持有 db 句柄装配能力层）+ 输入输出类型 + UniFFI 导出
+- `backend/src/core/`：编排内核（`agent.rs` 单轮对话/记忆提取沉淀流水线；`ports.rs` 能力端口契约；`prompt.rs` 时间线提示词组装；`types.rs` 可移植值类型）。内核不依赖 db，只面向端口编程，由宿主注入适配器，可独立单测
+- `backend/src/services/`：服务层（会话/消息/记忆管理 + `Conversation` 适配器实现 `ConversationStore` 端口 + FFI 可序列化视图记录）
 - `backend/src/db/`：SQLite 层（rusqlite + sqlite-vec 向量检索）
-- `backend/src/llm/` + `embedding/` + `genai_client.rs`：模型调用（genai 阻塞 API）
+- `backend/src/llm/`：模型调用层（`chat.rs` 对话 + `embedding.rs` 文本向量化 + `genai_client.rs` 共享 Client/全局 runtime，genai 阻塞 API）
 - `backend/src/memory/`：记忆业务层（提取 / 存储 / 召回）
 - `backend/src/proactive/`：主动陪伴（调度 / 开口决策 / 推送 / 每轮延续判断）
 - `backend/src/channels/`：Telegram / iLink 接入（`PushChannels` 注册表）
@@ -53,6 +53,8 @@ cargo run --bin smart-assistant-memory -- rebuild [--force]  # 重建向量表
 - **数据库访问**：经 `std::sync::Mutex<db::Database>` 同步。
 - **LLM 调用**：genai 是阻塞 API，在 async 通道里调用必须 `tokio::task::spawn_blocking`。
 - **消息 vs 记忆**：`messages` 是记录；`memories` 只沉淀事实，来源用 `message_id` 关联。
+- **记忆沉淀后置**：`Agent::chat_stream` 只做"消息入库 → 向量召回 → 流式回复 → 回复入库"，**不碰**记忆判定/事实化/落库；这些由宿主在回复交付之后调用 `Agent::settle_memory` 完成（telegram / iLink 放 `spawn_blocking`，SSE / FFI / CLI 同步补并回填 `ChatOutput.memory`）。理由：判定与事实化都要调 LLM，挂在对话路径上会拉长首字延迟，失败还会吞掉回复。**记忆链路（召回 / 判定 / 事实化 / 落库）任何失败都只记 warn 并降级，绝不冒泡成对话失败。**
+- **记忆提取分两步**：先一次极窄调用只出标签（`is_memory` / `memory_type` / `tier` / `relation`，schema 用 `enum` 收窄），判定为"值得记住"才第二次调用做事实化（输出纯文本，不是 JSON）。解析端把模型输出当**不可信输入**：缺失 / `null` / 类型不符 / 空白一律回退默认。
 - **记忆分层**：`tier` = short（短期易过期）/ intent（意向计划）/ core（长期强事实）。short/intent 有 `expires_at`，过期不参与召回；召回按 `MEMORY_RECALL_THRESHOLD`（欧氏距离 ≤ 阈值）过滤；新事实与库中条目距离 ≤ `MEMORY_DEDUP_THRESHOLD` 时去重，只刷新 updated_at 不新增。
 - **schema 版本**：版本号在 `db/mod.rs` 的 `SCHEMA_VERSION`。迁移**只做增量**（只增表/列，绝不 DROP 业务表）。旧库补列用 `add_column_if_missing`（以 PRAGMA table_info 判断，且须容忍表不存在——`init_schema` 里 `migrate()` 在业务表 CREATE 之前执行）。
 - **sqlite-vec 坑**：vec0 的 kNN 查询必须写 `k = ?` 约束，把 LIMIT 写在外层查询会报 "A LIMIT or 'k = ?' constraint is required"。

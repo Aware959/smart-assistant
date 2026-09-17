@@ -23,11 +23,10 @@ make test     # 后端测试
 backend/
 ├── src/
 │   ├── lib.rs          应用外壳：Assistant（薄委托）+ 输入输出类型 + UniFFI 导出
-│   ├── agent.rs        编排层 Agent：单轮对话 / 记忆提取沉淀的业务流水线
+│   ├── agent.rs        编排层 Agent：单轮对话 / 记忆沉淀的业务流水线（沉淀后置于回复交付之后）
 │   ├── services/       服务层：会话/消息/记忆管理 + FFI 视图记录
 │   ├── db/             SQLite 层（rusqlite + sqlite-vec 向量检索）
-│   ├── llm/            远程 LLM 调用（对话 + 一次性提取/记忆判定）
-│   ├── embedding/      文本向量化
+│   ├── llm/            模型调用层：对话 + 文本向量化（genai 阻塞 API）
 │   ├── memory/         记忆业务层：提取 / 存储 / 召回
 │   ├── proactive/      主动陪伴：调度 / 开口决策 / 推送 / 延续判断
 │   ├── channels/       Telegram / WeChat iLink 接入

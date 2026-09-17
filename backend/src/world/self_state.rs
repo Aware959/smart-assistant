@@ -6,9 +6,10 @@
 //! - 自我档案是稳定基线，不随事件漂移，保证 AI 始终是"同一个人"。
 
 use chrono::{DateTime, Utc};
-use rusqlite::params;
 
 use super::emotion::Mood;
+use crate::db::world_state as db_world_state;
+use crate::db::world_state::WorldStateRow;
 use crate::db::Database;
 use crate::error::Result;
 
@@ -27,7 +28,7 @@ pub struct SelfState {
     /// 叙事所属的本地日期（yyyy-mm-dd）；跨天时叙事重新起笔。
     pub today_date: Option<String>,
     pub today_narrative: String,
-    /// 上次叙事的时段标签（见 [`crate::timeworld::phase_label`]）。
+    /// 上次叙事的时段标签（见 [`crate::world::timeworld::phase_label`]）。
     pub last_phase: Option<String>,
     pub updated_at: Option<DateTime<Utc>>,
 }
@@ -45,69 +46,52 @@ impl Default for SelfState {
     }
 }
 
+/// 行数据 → 业务自我状态（把两条情绪轴还原为 [`Mood`]）。
+impl From<WorldStateRow> for SelfState {
+    fn from(row: WorldStateRow) -> Self {
+        Self {
+            self_base: row.self_base,
+            mood: Mood {
+                valence: row.valence,
+                energy: row.energy,
+            },
+            today_date: row.today_date,
+            today_narrative: row.today_narrative,
+            last_phase: row.last_phase,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// 业务自我状态 → 行数据。
+impl From<&SelfState> for WorldStateRow {
+    fn from(st: &SelfState) -> Self {
+        Self {
+            self_base: st.self_base.clone(),
+            valence: st.mood.valence,
+            energy: st.mood.energy,
+            today_date: st.today_date.clone(),
+            today_narrative: st.today_narrative.clone(),
+            last_phase: st.last_phase.clone(),
+            updated_at: st.updated_at,
+        }
+    }
+}
+
 /// 读取世界状态；首次访问时种子化（默认自我档案 + 中性情绪）。
 pub fn load(db: &Database) -> Result<SelfState> {
-    let mut stmt = db.conn().prepare(
-        "SELECT self_base, valence, energy, today_date, today_narrative, last_phase, updated_at
-         FROM world_state WHERE id = 1",
-    )?;
-    let mut rows = stmt.query_map([], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, f32>(1)?,
-            r.get::<_, f32>(2)?,
-            r.get::<_, Option<String>>(3)?,
-            r.get::<_, String>(4)?,
-            r.get::<_, Option<String>>(5)?,
-            r.get::<_, Option<String>>(6)?,
-        ))
-    })?;
-    match rows.next() {
-        Some(Ok((base, val, eng, date, narr, phase, upd))) => Ok(SelfState {
-            self_base: base,
-            mood: Mood {
-                valence: val,
-                energy: eng,
-            },
-            today_date: date,
-            today_narrative: narr,
-            last_phase: phase,
-            updated_at: parse_ts(upd),
-        }),
-        Some(Err(e)) => Err(e.into()),
+    match db_world_state::load(db)? {
+        Some(row) => Ok(SelfState::from(row)),
         None => {
-            // 首次访问：种子化并落库。
             let st = SelfState::default();
-            save(db, &st)?;
+            db_world_state::save(db, &(&st).into())?;
             Ok(st)
         }
     }
 }
 
 pub fn save(db: &Database, st: &SelfState) -> Result<()> {
-    db.conn().execute(
-        "INSERT INTO world_state
-         (id, self_base, valence, energy, today_date, today_narrative, last_phase, updated_at)
-         VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO UPDATE SET
-           self_base       = excluded.self_base,
-           valence         = excluded.valence,
-           energy          = excluded.energy,
-           today_date      = excluded.today_date,
-           today_narrative = excluded.today_narrative,
-           last_phase      = excluded.last_phase,
-           updated_at      = excluded.updated_at",
-        params![
-            st.self_base.as_str(),
-            st.mood.valence,
-            st.mood.energy,
-            st.today_date,
-            st.today_narrative,
-            st.last_phase,
-            fmt(st.updated_at),
-        ],
-    )?;
-    Ok(())
+    db_world_state::save(db, &st.into())
 }
 
 /// 世界心跳：按经过的小时数把情绪朝基线拉回，并刷新 updated_at。
@@ -121,15 +105,6 @@ pub fn tick_mood(db: &Database) -> Result<()> {
     st.mood = st.mood.decayed(hours);
     st.updated_at = Some(now);
     save(db, &st)
-}
-
-fn fmt(t: Option<DateTime<Utc>>) -> String {
-    t.unwrap_or_else(Utc::now).to_rfc3339()
-}
-
-fn parse_ts(s: Option<String>) -> Option<DateTime<Utc>> {
-    s.and_then(|v| DateTime::parse_from_rfc3339(&v).ok())
-        .map(|d| d.with_timezone(&Utc))
 }
 
 #[cfg(test)]

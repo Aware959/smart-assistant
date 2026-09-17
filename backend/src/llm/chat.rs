@@ -3,17 +3,15 @@ use genai::chat::{
     ChatMessage as GenaiChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ChatStreamEvent,
     JsonSpec,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::genai_client;
+use crate::core::ports::ChatLlm;
 use crate::error::{Result, SqlError};
+use crate::llm::genai_client;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatMessage {
-    pub role: String,
-    pub content: String,
-}
+/// 一条发给 LLM 的对话消息（作用域本体默认 system / user / assistant）。
+/// 定义在 [`crate::core::types`]，此处 re-export 保持 `llm::chat::ChatMessage` 兼容。
+pub use crate::core::types::ChatMessage;
 
 fn build_chat_request(messages: &[ChatMessage]) -> ChatRequest {
     let mut chat_req = ChatRequest::default();
@@ -127,4 +125,31 @@ where
         }
         Ok(full)
     })
+}
+
+/// 无状态的 LLM 适配器：把 [`ChatLlm`] 端口接到本模块的实现函数上。
+pub struct Llm;
+
+impl ChatLlm for Llm {
+    fn complete(&self, messages: &[ChatMessage]) -> Result<String> {
+        crate::llm::chat::complete(messages)
+    }
+
+    fn complete_structured(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        name: &str,
+        schema: serde_json::Value,
+    ) -> Result<String> {
+        crate::llm::chat::complete_structured(messages, model, name, schema)
+    }
+
+    fn complete_stream(
+        &self,
+        messages: &[ChatMessage],
+        on_delta: &mut (dyn FnMut(&str) + Send),
+    ) -> Result<String> {
+        crate::llm::chat::complete_stream(messages, on_delta)
+    }
 }

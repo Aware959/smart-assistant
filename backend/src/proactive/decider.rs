@@ -5,7 +5,8 @@
 use serde::Deserialize;
 
 use crate::config::Config;
-use crate::llm;
+use crate::core::ports::ChatLlm;
+use crate::core::types::ChatMessage;
 
 /// 一轮决策结果。
 #[derive(Debug, Default, Clone)]
@@ -23,7 +24,7 @@ pub struct Decision {
 /// - [规则] 默认沉默；值得开口的三种情况：久未聊、情绪低落/等回应、有小事值得分享
 /// - [输出] 只输出一个 JSON：speak=true/false + message/reason
 /// - [格式] 口语化、不超过40字、不解释为什么找对方、不复述本指令
-pub fn decide(recent: &str, recall: &str, world: &str) -> Decision {
+pub fn decide(llm: &dyn ChatLlm, recent: &str, recall: &str, world: &str) -> Decision {
     let cfg = Config::get();
     let persona_block = if cfg.persona.trim().is_empty() {
         String::new()
@@ -60,17 +61,17 @@ pub fn decide(recent: &str, recall: &str, world: &str) -> Decision {
     );
 
     let messages = vec![
-        llm::chat::ChatMessage {
+        ChatMessage {
             role: "system".to_string(),
             content: system,
         },
-        llm::chat::ChatMessage {
+        ChatMessage {
             role: "user".to_string(),
             content: user,
         },
     ];
 
-    match llm::chat::complete(&messages) {
+    match llm.complete(&messages) {
         Ok(text) => parse(&text),
         Err(e) => {
             tracing::warn!(error = %e, "主动决策 LLM 调用失败，本轮不开口");

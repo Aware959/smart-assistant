@@ -53,6 +53,22 @@ fn find_session_id(db: &Database, channel: &str, external_id: &str) -> Result<Op
     }
 }
 
+/// 从 session 反查外部渠道映射（无映射则为 None）。
+pub fn channel_of(db: &Database, session_id: &str) -> Result<Option<(String, String)>> {
+    let mut stmt = db.conn().prepare(
+        "SELECT channel, external_id
+         FROM channel_sessions WHERE session_id = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![session_id], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })?;
+    match rows.next() {
+        Some(Ok(v)) => Ok(Some(v)),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(None),
+    }
+}
+
 fn touch(db: &Database, channel: &str, external_id: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     db.conn().execute(

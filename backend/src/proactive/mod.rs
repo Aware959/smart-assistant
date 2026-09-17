@@ -16,6 +16,7 @@ pub mod sender;
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::host::Host;
 use crate::Assistant;
 
 /// 每轮最多尝试决策的候选数（其余留到后续轮次）。
@@ -83,12 +84,13 @@ async fn propose(assistant: &Assistant, cand: &crate::db::proactive::ProactiveCa
         } else {
             context::recall(&db, &query)
         };
-        let world = crate::timeworld::render(&crate::timeworld::snapshot(&db, &cand.session_id));
+        let world = assistant.world_snapshot_text(&cand.session_id);
         (recent, rec, world)
     };
 
     // LLM 调用是同步阻塞的（genai 全局 runtime），挪到阻塞线程池避免卡住异步任务。
-    let decision = tokio::task::spawn_blocking(move || decider::decide(&recent, &rec, &world))
+    let llm = assistant.chat_llm();
+    let decision = tokio::task::spawn_blocking(move || decider::decide(&*llm, &recent, &rec, &world))
         .await
         .unwrap_or_default();
 

@@ -7,8 +7,9 @@
 //! 次 LLM 调用判定（见 [`crate::memory::extraction::MemoryExtraction::relation`]）。
 
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::params;
 
+use crate::db::relations as db_relations;
+use crate::db::relations::RelationRow;
 use crate::db::Database;
 use crate::error::Result;
 
@@ -99,6 +100,30 @@ impl Relation {
     }
 }
 
+impl From<RelationRow> for Relation {
+    fn from(row: RelationRow) -> Self {
+        Relation {
+            channel: row.channel,
+            external_id: row.external_id,
+            closeness: row.closeness,
+            trust: row.trust,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+impl From<&Relation> for RelationRow {
+    fn from(r: &Relation) -> Self {
+        RelationRow {
+            channel: r.channel.clone(),
+            external_id: r.external_id.clone(),
+            closeness: r.closeness,
+            trust: r.trust,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
 /// 单次用户消息后的关系变化（无渠道映射的会话静默跳过）。
 /// 默认按 Neutral（日常闲聊）处理——相当于"对方只是正常说话"的微小升温。
 pub fn observe(db: &Database, session_id: &str) -> Result<()> {
@@ -107,7 +132,7 @@ pub fn observe(db: &Database, session_id: &str) -> Result<()> {
 
 /// 按本条消息的关系事件类型调整关系（无渠道映射的会话静默跳过）。
 pub fn apply_event(db: &Database, session_id: &str, event: RelationEvent) -> Result<()> {
-    let Some((channel, external)) = crate::timeworld::channel_of(db, session_id)? else {
+    let Some((channel, external)) = crate::db::channel::channel_of(db, session_id)? else {
         return Ok(());
     };
     apply_event_channel(db, &channel, &external, event)
@@ -164,88 +189,18 @@ pub fn apply_event_channel(
 }
 
 pub fn load(db: &Database, channel: &str, external_id: &str) -> Result<Option<Relation>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT closeness, trust, updated_at
-         FROM relations WHERE channel = ?1 AND external_id = ?2",
-    )?;
-    let mut rows = stmt.query_map(params![channel, external_id], |r| {
-        Ok((
-            r.get::<_, f32>(0)?,
-            r.get::<_, f32>(1)?,
-            r.get::<_, String>(2)?,
-        ))
-    })?;
-    match rows.next() {
-        Some(Ok((c, t, upd))) => Some(DateTime::parse_from_rfc3339(&upd).ok().map(|d| {
-            d.with_timezone(&Utc)
-        }))
-        .flatten()
-        .map(|upd| {
-            Ok(Relation {
-                channel: channel.to_string(),
-                external_id: external_id.to_string(),
-                closeness: c,
-                trust: t,
-                updated_at: upd,
-            })
-        })
-        .transpose(),
-        Some(Err(e)) => Err(e.into()),
-        None => Ok(None),
-    }
+    Ok(db_relations::load(db, channel, external_id)?.map(Relation::from))
 }
 
 pub fn save(db: &Database, r: &Relation) -> Result<()> {
-    db.conn().execute(
-        "INSERT INTO relations (channel, external_id, closeness, trust, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(channel, external_id) DO UPDATE SET
-           closeness  = excluded.closeness,
-           trust      = excluded.trust,
-           updated_at = excluded.updated_at",
-        params![
-            r.channel,
-            r.external_id,
-            r.closeness.clamp(0.0, 1.0),
-            r.trust.clamp(0.0, 1.0),
-            r.updated_at.to_rfc3339(),
-        ],
-    )?;
-    Ok(())
+    db_relations::save(db, &r.into())
 }
 
 /// 世界心跳：全部关系按距上次更新的时间指数降温。
 pub fn tick_decay(db: &Database) -> Result<()> {
     let now = Utc::now();
-    let list = {
-        let mut stmt = db.conn().prepare(
-            "SELECT channel, external_id, closeness, trust, updated_at FROM relations",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, f32>(2)?,
-                r.get::<_, f32>(3)?,
-                r.get::<_, String>(4)?,
-            ))
-        })?;
-        let x = rows.collect::<rusqlite::Result<Vec<_>>>();
-        x?
-    };
-
-    for (ch, ext, c, t, upd) in list {
-        let Some(prev) = DateTime::parse_from_rfc3339(&upd).ok().map(|d| d.with_timezone(&Utc)) else {
-            continue;
-        };
-        let r = Relation {
-            channel: ch.clone(),
-            external_id: ext.clone(),
-            closeness: c,
-            trust: t,
-            updated_at: prev,
-        };
-        let decayed = r.decayed(now);
+    for row in db_relations::list_all(db)? {
+        let decayed = Relation::from(row).decayed(now);
         save(db, &decayed)?;
     }
     Ok(())
@@ -280,19 +235,12 @@ pub fn trust_label(t: f32) -> &'static str {
 mod tests {
     use super::*;
     use crate::db::Database;
-    use crate::db::session;
 
     /// 建一个带渠道映射的会话（relation 按 channel+external 存取）。
     fn session_with_channel(db: &Database, external_id: &str) -> String {
-        let s = session::create(db, "").unwrap();
-        db.conn()
-            .execute(
-                "INSERT INTO channel_sessions (channel, external_id, session_id, created_at, updated_at)
-                 VALUES ('telegram', ?2, ?1, '2026-09-14T00:00:00Z', '2026-09-14T00:00:00Z')",
-                params![s.id, external_id],
-            )
-            .unwrap();
-        s.id
+        crate::db::channel::get_or_create_session(db, "telegram", external_id)
+            .unwrap()
+            .id
     }
 
     #[test]
@@ -388,12 +336,15 @@ mod tests {
         observe(&db, &s).unwrap();
 
         // 把关系"冻结"在两周前，再跑一轮心跳 → 亲密度减半。
-        db.conn()
-            .execute(
-                "UPDATE relations SET updated_at = ?1 WHERE channel = 'telegram' AND external_id = '42'",
-                params![(Utc::now() - Duration::days(14)).to_rfc3339()],
-            )
-            .unwrap();
+        let frozen = load(&db, "telegram", "42").unwrap().unwrap();
+        save(
+            &db,
+            &Relation {
+                updated_at: Utc::now() - Duration::days(14),
+                ..frozen
+            },
+        )
+        .unwrap();
         let before = load(&db, "telegram", "42").unwrap().unwrap();
         tick_decay(&db).unwrap();
         let after = load(&db, "telegram", "42").unwrap().unwrap();

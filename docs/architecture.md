@@ -2,7 +2,7 @@
 
 > 本文描述后端 Rust 内核的分层结构、核心数据流与各子系统的协作方式。
 > 
-> 上一次更新：2026-09-14
+> 上一次更新：2026-09-16
 
 ---
 
@@ -18,27 +18,37 @@
 │  └────┬─────┘  └──────┬───────┘  └───────┬────────┘  └────┬─────┘ │
 │       │               │                  │                 │       │
 ├───────┴───────────────┴──────────────────┴─────────────────┴───────┤
-│  编排层：agent.rs                                                    │
-│  chat_stream() — 单轮对话流水线（见 §2）                             │
+│  编排内核：core/                                                      │
+│  agent.rs   chat_stream() 单轮流水线（见 §2）                          │
+│  prompt.rs  按天时间线 + system prompt 组装                            │
+│  ports.rs   五端口契约：ChatLlm / Embedder / MemoryStore /             │
+│             WorldState / ConversationStore                             │
+│  types.rs   ChatInput/Output、Extraction、MemoryRecord/Hit、MessageTurn│
+│  内核零依赖：只面向端口契约编程，不 import db / 不感知任何能力实现       │
+│  （db 句柄由宿主 Assistant 持有，经 Arc 注入各能力适配器）                │
 ├───────────────────────────────────────────────────────────────────────┤
 │                        ↙       ↘                                      │
 │  ┌─────────────┐   世界引擎     主动陪伴引擎                           │
 │  │ world/      │   (60s 心跳)   (随机间隔循环)                        │
 │  │ narrative   │   ↘          ↙                                       │
-│  │ emotion     │    均读写 DB   均通过 PushChannels 查通道可推状态       │
-│  │ relation    │                                                         │
-│  └─────────────┘                                                         │
+│  │ emotion     │    均读写 DB   决策/延续复用内核 ChatLlm 端口          │
+│  │ relation    │                                                       │
+│  └─────────────┘                                                       │
 ├────────────────────────────────────────────────────────────────────────┤
 │  服务层：services/mod.rs                                                │
-│  会话 CRUD / 消息 CRUD / 记忆 CRUD（面向 FFI 的序列化视图记录）            │
+│  会话/消息/记忆 CRUD（面向 FFI 视图记录）+ Conversation 适配器            │
+│  （实现内核 ConversationStore 端口，注入 db 句柄）                       │
 ├────────────────────────────────────────────────────────────────────────┤
-│  业务能力层                                                             │
-│  ┌──────────────┐  ┌───────────────┐  ┌──────────────────────────┐   │
-│  │ memory/      │  │ llm/chat.rs   │  │ embedding/mod.rs         │   │
-│  │ extraction   │  │ complete      │  │ embed_text()             │   │
-│  │ store        │  │ complete_stream│  │ → EMBEDDING_API_URL      │   │
-│  └──────────────┘  └───────────────┘  └──────────────────────────┘   │
-│  genai_client.rs — genai 适配（按 LLM_PROVIDER 选 OpenAI / Gemini）     │
+│  能力层（实现 core 的端口契约）                                           │
+│  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐   │
+│  │ memory/ →      │  │ llm/chat.rs →  │  │ llm/embedding.rs → │   │
+│  │ MemoryStore    │  │ ChatLlm      │  │ Embedder                 │   │
+│  │ extraction     │  │ complete     │  │ embed_text()             │   │
+│  │ store          │  │ complete_    │  │ → EMBEDDING_API_URL      │   │
+│  │                │  │ stream       │  │                          │   │
+│  └────────────────┘  └──────────────┘  └──────────────────────────┘   │
+│  world/ + timeworld → WorldState            genai_client.rs —         │
+│  （关系事件调整 / 作息画像 / 世界快照注入）   genai 适配（OpenAI/Gemini）│
 ├────────────────────────────────────────────────────────────────────────┤
 │  存储层：db/mod.rs（rusqlite + sqlite-vec）                              │
 │  messages / memories / memory_vectors / sessions / channel_sessions /  │
@@ -65,29 +75,24 @@ TG 长轮询收到 Update
   │  → 首次自动新建 session，后续复用；同时更新 channel_sessions.updated_at
   │
   ├─ db::message::create_at(db, session_id, "user", text, user_time)
-  │  （路径：agent.rs:88-96，有通道时间戳时用之，否则记接收时刻）
+  │  （路径：core/agent.rs，有通道时间戳时用之，否则记接收时刻）
   │
   ├─ timeworld::observe(db, session_id)   ← 重算用户作息画像（offset_minutes / active_hour）
-  ├─ world::relation::observe(db, session_id) ← 每次对方来消息，关系升温
   │
-  ├─ ① 记忆提取（结构化 JSON，必填字段）
-  │     memory::extraction::extract_from_text(text)
-  │       → LLM_EXTRACT_MODEL（或 llm_model）+ json_schema
-  │       → 返回 MemoryExtraction { is_memory, content, memory_type, tier }
-  │
-  ├─ ② 记忆召回（语义向量检索，≤ threshold 才入选）
-  │     memory::store::search(db, text, MEMORY_RECALL_LIMIT=5)
-  │       → embedding::embed_text(text) → embedding API（本地 1234 端口）
+  ├─ ① 记忆召回（语义向量检索，≤ threshold 才入选，走 MemoryStore 端口）
+  │     core::agent → memory::store::search(db, text, MEMORY_RECALL_LIMIT=5)
+  │       → llm::embedding::embed_text(text) → embedding API（本地 1234 端口）
   │       → db_memory::search_similar() → vec0 kNN（k = ? 约束）
   │       → 按 memory_recall_threshold 过滤，剔除已过期记忆
+  │       → 失败只降级为空召回（记忆是辅助能力，不阻断对话）
   │
-  ├─ ③ 构建提示词
+  ├─ ② 构建提示词（core::prompt）
   │     build_system_prompt(recall, world)
   │       ├─ 角色设定：PERSONA 环境变量（中文原文注入，最高优先级）
   │       ├─ 英文行为指令：对方中心 / 格式禁令 / 长度约束 / 身份边界 / 生活感
-  │       ├─ 世界状态：timeworld::render()（AI本机时间 / 用户当地推断 / 作息 / 关系 / 叙事）
+  │       ├─ 世界状态：WorldState 端口 snapshot_text()（AI本机时间 / 用户当地推断 / 作息 / 关系 / 叙事）
   │       └─ 召回记忆文本（"Below is what you know about the other person..."）
-  │     build_day_history(db, session_id)
+  │     build_day_history(db, session_id, offset_minutes)
   │       ├─ 默认按"今天"取消息（日界 = 用户当地 06:00）
   │       ├─ 每条渲染为 [HH:MM] 用户/AI: 内容
   │       ├─ 同日 >2h 间隔 → 插入 〈沉默 N 小时〉
@@ -95,21 +100,29 @@ TG 长轮询收到 Update
   │       └─ >60 条 → 保留头 8 条 + 尾 + 〈省略中间 N 条〉
   │     （若 history_count 显式指定 → 退化为取最近 N 条纯文本）
   │
-  ├─ ④ 流式生成回复
+  ├─ ③ 流式生成回复（走 ChatLlm 端口）
   │     llm::chat::complete_stream(messages, on_delta)
   │       → genai_client: 按 LLM_PROVIDER 选 OpenAI / Gemini adapter
   │       → genai 0.6.5 流式 API
   │       → delta 逐段回调 on_delta（SSE 逐块推送 / CLI 实时打印）
   │
-  ├─ ⑤ 回复入库，刷新会话时间戳
+  ├─ ④ 回复入库，刷新会话时间戳
   │     db::message::create(db, session_id, "assistant", reply)
   │     db::session::touch(db, session_id)
+  │     → Agent::chat_stream 到此返回（带 session_id / reply / user_message_id）
   │
-  └─ ⑥ 记忆沉淀（仅 LLM 判定为值得记住时）
-        memory::store::store(db, content, memory_type, tier, Some(message_id))
-          → embedding::embed_text(content) → 向量化
-          → 去重：与已有记忆距离 ≤ dedup_threshold → 只刷 updated_at，不新增
-          → 插入 memories + memory_vectors
+  └─ ⑤ 记忆沉淀（**回复交付之后**，宿主调 Agent::settle_memory，走 MemoryStore 端口）
+        ├─ 判定：memory::extraction::judge(text) → 极窄 JSON 标签，走 json_schema / json_object
+        │     { is_memory, memory_type, tier, relation }（schema 用 enum 收窄）
+        │     只做分类、不生成自然语言，输出维度小 → 模型几乎写不歪
+        │     relation → 世界能力按事件调整关系（apply_event，走 WorldState 端口）
+        ├─ 事实化：仅当 is_memory=true 才追加一次调用
+        │     extraction::summarize(text) → 第三人称事实句（纯文本，不是 JSON）
+        └─ 落库：memory::store::store(db, content, memory_type, tier, Some(message_id))
+              → llm::embedding::embed_text(content) → 向量化
+              → 去重：与已有记忆距离 ≤ dedup_threshold → 只刷 updated_at，不新增
+              → 插入 memories + memory_vectors
+        任何环节失败只记 warn 并降级（不写记忆），绝不影响已交付的回复
 ```
 
 ---
@@ -134,7 +147,9 @@ TG 长轮询收到 Update
 
 ### 3.3 世界状态注入对话
 
-`timeworld::render(db, session_id)` 生成快照文本注入 system prompt：
+对话流水线通过内核的 `WorldState` 端口调用 `snapshot_text()`（内部即
+`timeworld::snapshot(db, session_id)` + `timeworld::render(&world)`），
+生成下列快照文本注入 system prompt：
 ```
 【此刻的世界】
 - AI 本机时间：2026-09-14 15:43，下午。
@@ -235,7 +250,7 @@ proactive::run(assistant)
 memory::store::search(query)
   │
   ├─ vec_status()?.search_usable() → 向量签名不匹配时静默降级为空
-  ├─ embedding::embed_text(query) → EMBEDDING_API_URL（本地 1234 端口，同步阻塞）
+  ├─ llm::embedding::embed_text(query) → EMBEDDING_API_URL（本地 1234 端口，同步阻塞）
   └─ db_memory::search_similar(vector, limit)
        SELECT ... FROM memory_vectors
        WHERE embedding MATCH ?1 AND k = ?3    ← vec0 kNN 查询，必须 k = ?
@@ -341,4 +356,5 @@ SPA 静态文件由 `SMART_ASSISTANT_WEB_DIST` 指定目录，同源托管，未
 4. **Schema 迁移**：只做增量（只增列/表，绝不 DROP 业务表）。旧库补列用 `add_column_if_missing`。
 5. **向量签名锁定**：embedding 模型变更不会自动重建，由独立工具 `smart-assistant-memory rebuild` 手动触发，保证旧库不丢数据。
 6. **vec0 kNN 约束**：查询必须写 `k = ?`，把 LIMIT 写在外层查询会报 "A LIMIT or 'k = ?' constraint is required"。
-7. **JSON 结构化输出**：记忆提取 / 开口决策 / 延续判断均走 json_schema（支持的模型自动约束输出格式，不支持时退化为自由 JSON + 容错解析）。
+7. **JSON 结构化输出**：记忆判定 / 开口决策 / 延续判断均走 json_schema（支持的模型自动约束输出格式，不支持时退化为自由 JSON + 容错解析）。模型输出一律当**不可信输入**：字段缺失 / `null` / 类型不符 / 空白都回退默认值，不让一次格式抖动变成业务失败。
+8. **记忆后置 + 全链路降级**：记忆沉淀（判定 / 事实化 / 落库）不挂在对话路径上，由宿主在回复交付之后调用 `Agent::settle_memory`（telegram / iLink 用 `spawn_blocking` 后台跑，SSE / FFI / CLI 同步补再把结果回填 `ChatOutput.memory`）。记忆链路的任何环节失败都只记 warn 并降级，绝不冒泡成"对话失败"。

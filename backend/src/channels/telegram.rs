@@ -12,7 +12,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::{Assistant, ChatInput};
+use crate::host::Host;
+use crate::{Assistant, ChatInput, ChatOutput};
 
 const CHANNEL: &str = "telegram";
 /// Telegram 单条消息文本上限（字符）。
@@ -143,42 +144,53 @@ pub(crate) async fn push_send(chat_id: i64, text: &str) -> Result<(), String> {
 }
 
 /// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
-fn touch_user_reply(assistant: &Assistant, external_id: &str) {
-    let db = assistant.inner_db();
+fn touch_user_reply(assistant: &dyn Host, external_id: &str) {
+    let db = assistant.db();
     if let Ok(session) = crate::db::channel::get_or_create_session(&db, CHANNEL, external_id) {
         let _ = crate::db::proactive::touch_user_reply(&db, CHANNEL, external_id, &session.id);
     }
 }
 
-/// 处理一条 TG 文本消息，返回回复文本（None 表示无需回复）。
+/// 命令类回执：没有后续记忆沉淀需求（`user_message_id` 为空即代表"无需沉淀"）。
+fn plain_reply(reply: &str) -> ChatOutput {
+    ChatOutput {
+        session_id: String::new(),
+        reply: reply.to_string(),
+        user_message_id: String::new(),
+        memory: None,
+    }
+}
+
+/// 处理一条 TG 文本消息，返回本轮对话结果（None 表示无需回复）。
+///
+/// 只负责产出回复；记忆沉淀由调用方在回复送达之后另起后台任务（见 `run_loop`）。
 async fn handle_text(
-    assistant: Arc<Assistant>,
+    assistant: Arc<dyn Host>,
     chat_id: i64,
     text: &str,
     user_time: Option<String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ChatOutput>, String> {
     let external = chat_id.to_string();
     let text = text.to_string();
     match text.trim() {
-        "/start" => Ok(Some(
-            "你好，我是你的记忆助手。直接发消息聊天，我会记住值得记住的事；发送 /new 开始一段新的对话。"
-                .to_string(),
-        )),
+        "/start" => Ok(Some(plain_reply(
+            "你好，我是你的记忆助手。直接发消息聊天，我会记住值得记住的事；发送 /new 开始一段新的对话。",
+        ))),
         "/new" => {
-            let db = assistant.inner_db();
+            let db = assistant.db();
             crate::db::channel::reset_session(&db, CHANNEL, &external)
                 .map_err(|e| e.to_string())?;
-            Ok(Some("已开始新对话，之前的记录保留在记忆库里。".to_string()))
+            Ok(Some(plain_reply("已开始新对话，之前的记录保留在记忆库里。")))
         }
         _ => {
             let session_id = {
-                let db = assistant.inner_db();
+                let db = assistant.db();
                 crate::db::channel::get_or_create_session(&db, CHANNEL, &external)
                     .map(|s| s.id)
                     .map_err(|e| e.to_string())?
             };
             // 同步的对话流水线要在阻塞线程池里跑（api/chat.rs 同理）。
-            let reply = tokio::task::spawn_blocking(move || {
+            let mut out = tokio::task::spawn_blocking(move || {
                 let input = ChatInput {
                     message: text.to_string(),
                     session_id: Some(session_id),
@@ -187,17 +199,15 @@ async fn handle_text(
                     user_time,
                 };
                 assistant
-                    .chat_stream(&input, |_| {})
-                    .map(|out| out.reply)
+                    .chat_stream(&input, &mut |_| {})
                     .map_err(|e| e.to_string())
             })
             .await
             .map_err(|e| format!("对话任务失败: {e}"))??;
-            Ok(Some(if reply.trim().is_empty() {
-                "(空回复)".to_string()
-            } else {
-                reply
-            }))
+            if out.reply.trim().is_empty() {
+                out.reply = "(空回复)".to_string();
+            }
+            Ok(Some(out))
         }
     }
 }
@@ -291,31 +301,46 @@ async fn run_loop(assistant: Arc<Assistant>, token: &str) -> Result<(), String> 
             }
             let user_time = super::ts_to_rfc3339(message.date);
 
-            touch_user_reply(&assistant, &chat_id.to_string());
+            touch_user_reply(assistant.as_ref(), &chat_id.to_string());
 
             send_typing(&client, &base, chat_id).await;
 
-            let (next_reply, is_fallback) =
+            let (next_reply, is_fallback, pending_memory) =
                 match handle_text(assistant.clone(), chat_id, &text, user_time).await
             {
-                Ok(Some(reply)) => (reply, false),
+                Ok(Some(out)) => {
+                    // 有 user_message_id 才需要沉淀（命令类回执没有）。
+                    let pending = (!out.user_message_id.is_empty())
+                        .then(|| (out.session_id.clone(), out.user_message_id.clone()));
+                    (out.reply, false, pending)
+                }
                 Ok(None) => continue,
                 Err(e) => {
                     tracing::error!(error = %e, "对话失败");
-                    ("刚才走神了，再发一次试试。".to_string(), true)
+                    ("刚才走神了，再发一次试试。".to_string(), true, None)
                 }
             };
 
             if let Err(e) = send_text(&client, &base, chat_id, &next_reply).await {
                 tracing::error!(error = %e, chat_id, "回复发送失败");
-            } else if !is_fallback {
-                // 正常回复发送成功：按语境决定是否像真人一样接着补几句。
-                crate::proactive::continuation::after_reply(
-                    assistant.clone(),
-                    CHANNEL,
-                    &chat_id.to_string(),
-                )
-                .await;
+            } else {
+                // 回复已送达，再后台补记忆沉淀：判定/事实化要调 LLM，不能占用户等待时间。
+                if let Some((session_id, user_message_id)) = pending_memory {
+                    let assistant = assistant.clone();
+                    let text = text.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _ = assistant.settle_memory(&session_id, &user_message_id, &text);
+                    });
+                }
+                if !is_fallback {
+                    // 正常回复发送成功：按语境决定是否像真人一样接着补几句。
+                    crate::proactive::continuation::after_reply(
+                        assistant.clone(),
+                        CHANNEL,
+                        &chat_id.to_string(),
+                    )
+                    .await;
+                }
             }
         }
     }

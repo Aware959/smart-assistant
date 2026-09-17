@@ -1,11 +1,87 @@
+use std::sync::{Arc, Mutex};
+
 use chrono::Utc;
 
 use crate::config::Config;
+use crate::core::ports::MemoryStore;
+use crate::core::types::{Extraction, MemoryHit, MemoryRecord};
 use crate::db::memory as db_memory;
 use crate::db::Database;
 use crate::db::memory::Memory;
-use crate::embedding;
+use crate::llm::embedding;
 use crate::error::{Result, SqlError};
+
+/// 记忆适配器：把 [`MemoryStore`] 端口接到本模块实现函数上。
+/// 数据库句柄由宿主持有并以 `Arc<Mutex<Database>>` 注入，自身不拥有连接。
+pub struct Store {
+    db: Arc<Mutex<Database>>,
+}
+
+impl Store {
+    pub fn new(db: Arc<Mutex<Database>>) -> Self {
+        Self { db }
+    }
+
+    fn lock_db(&self) -> std::sync::MutexGuard<'_, Database> {
+        self.db.lock().expect("db mutex poisoned")
+    }
+}
+
+/// 记忆记录 → 可序列化视图记录（FFI / HTTP 用）。
+impl From<&Memory> for MemoryRecord {
+    fn from(m: &Memory) -> Self {
+        MemoryRecord {
+            id: m.id.clone(),
+            content: m.content.clone(),
+            memory_type: m.memory_type.clone(),
+            tier: m.tier.clone(),
+            expires_at: m.expires_at.clone(),
+            message_id: m.message_id.clone(),
+            created_at: m.created_at.clone(),
+            updated_at: m.updated_at.clone(),
+        }
+    }
+}
+
+impl MemoryStore for Store {
+    fn extract(&self, text: &str) -> Result<Extraction> {
+        let e = crate::memory::extraction::extract_from_text(text)?;
+        Ok(Extraction {
+            is_memory: e.is_memory,
+            content: e.memory_content,
+            memory_type: e.memory_type,
+            tier: e.tier,
+            relation: e.relation,
+        })
+    }
+
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<MemoryHit>> {
+        validate_query(query)?;
+        let hits = search(&self.lock_db(), query, limit)?;
+        Ok(hits
+            .into_iter()
+            .map(|(m, score)| MemoryHit {
+                id: m.id,
+                content: m.content,
+                memory_type: m.memory_type,
+                tier: m.tier,
+                created_at: m.created_at,
+                score,
+            })
+            .collect())
+    }
+
+    fn store(
+        &self,
+        content: &str,
+        memory_type: &str,
+        tier: &str,
+        message_id: Option<&str>,
+    ) -> Result<MemoryRecord> {
+        let m = store(&self.lock_db(), content, memory_type, tier, message_id)?;
+        Ok(MemoryRecord::from(&m))
+    }
+}
 
 /// 将一段内容沉淀为记忆：向量化 → 存入 memories 与 memory_vectors。
 ///

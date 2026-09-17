@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, Local, Timelike, Utc};
-use rusqlite::params;
 
 use crate::db::Database;
 use crate::error::Result;
@@ -85,23 +84,23 @@ pub fn snapshot(db: &Database, session_id: &str) -> TimeWorld {
         now: Utc::now(),
         ..Default::default()
     };
-    if let Ok(Some((channel, external))) = channel_of(db, session_id) {
+    if let Ok(Some((channel, external))) = crate::db::channel::channel_of(db, session_id) {
         if let Ok(Some(t)) = crate::db::proactive::last_user_reply_at(db, &channel, &external) {
             w.last_user_at = Some(t);
         }
-        if let Ok(Some(p)) = last_proactive_at(db, &channel, &external) {
+        if let Ok(Some(p)) = crate::db::proactive::last_proactive_at(db, &channel, &external) {
             w.last_proactive_at = Some(p);
         }
-        if let Ok(Some(profile)) = profile_of(db, &channel, &external) {
-            w.user_offset_minutes = Some(profile.0);
-            w.user_active_hour = Some(profile.1);
+        if let Ok(Some(profile)) = crate::db::timeworld::profile(db, &channel, &external) {
+            w.user_offset_minutes = Some(profile.utc_offset_minutes);
+            w.user_active_hour = Some(profile.active_hour);
         }
         if let Ok(Some(r)) = crate::world::relation::load(db, &channel, &external) {
             w.relation = Some(r);
         }
     }
     if w.last_user_at.is_none() {
-        if let Ok(Some(t)) = latest_user_msg_at(db, session_id) {
+        if let Ok(Some(t)) = crate::db::message::latest_user_at(db, session_id) {
             w.last_user_at = Some(t);
         }
     }
@@ -166,69 +165,28 @@ pub fn render(w: &TimeWorld) -> String {
     s
 }
 
-// ---------- 画像落盘 ----------
-
-type Profile = (i32, u32); // (offset_minutes, active_hour_utc)
+// ---------- 画像推断与落盘 ----------
 
 /// 真实时刻的用户消息落库后调用：重算该用户作息画像并 upsert。
 /// 没有渠道映射（CLI/HTTP 会话）时静默跳过。
 pub fn observe(db: &Database, session_id: &str) -> Result<()> {
-    let Some((channel, external)) = channel_of(db, session_id)? else {
+    let Some((channel, external)) = crate::db::channel::channel_of(db, session_id)? else {
         return Ok(());
     };
     let Some((off, active_hour, n)) = infer_profile(db, &channel, &external)? else {
         return Ok(());
     };
-    db.conn().execute(
-        "INSERT INTO time_profiles (channel, external_id, utc_offset_minutes, active_hour, observations, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(channel, external_id) DO UPDATE SET
-           utc_offset_minutes = excluded.utc_offset_minutes,
-           active_hour       = excluded.active_hour,
-           observations      = excluded.observations,
-           updated_at        = excluded.updated_at",
-        params![
-            channel,
-            external,
-            off,
-            active_hour as i64,
-            n,
-            Utc::now().to_rfc3339()
-        ],
-    )?;
-    Ok(())
+    crate::db::timeworld::upsert_profile(db, &channel, &external, off, active_hour, n)
 }
 
 /// 该会话用户已推断的时区偏移（分钟，东正）。无画像或非渠道会话时返回东八区兜底。
 pub fn user_offset_minutes(db: &Database, session_id: &str) -> i32 {
-    match channel_of(db, session_id) {
-        Ok(Some((channel, external))) => match profile_of(db, &channel, &external) {
-            Ok(Some((off, _))) => off,
+    match crate::db::channel::channel_of(db, session_id) {
+        Ok(Some((channel, external))) => match crate::db::timeworld::profile(db, &channel, &external) {
+            Ok(Some(p)) => p.utc_offset_minutes,
             _ => 8 * 60,
         },
         _ => 8 * 60,
-    }
-}
-
-fn profile_of(db: &Database, channel: &str, external: &str) -> Result<Option<Profile>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT utc_offset_minutes, active_hour, observations
-         FROM time_profiles WHERE channel = ?1 AND external_id = ?2",
-    )?;
-    let mut rows = stmt.query_map(params![channel, external], |r| {
-        Ok((
-            r.get::<_, Option<i32>>(0)?,
-            r.get::<_, Option<i64>>(1)?,
-            r.get::<_, i64>(2)?,
-        ))
-    })?;
-    match rows.next() {
-        Some(Ok((off, ah, n))) if n > 0 => {
-            Ok(off.and_then(|o| ah.map(|a| (o, a as u32))))
-        }
-        Some(Ok(_)) => Ok(None),
-        Some(Err(e)) => Err(e.into()),
-        None => Ok(None),
     }
 }
 
@@ -237,18 +195,7 @@ fn profile_of(db: &Database, channel: &str, external: &str) -> Result<Option<Pro
 /// 时区推断假设"对方当地活跃窗口通常是 9:00~23:59"，对每个候选偏移统计该窗口内
 /// 的消息占比，取占比最高的偏移；同分偏好东八区（更稳的默认可协商）。
 fn infer_profile(db: &Database, channel: &str, external: &str) -> Result<Option<(i32, u32, i64)>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT m.created_at
-         FROM messages m
-         JOIN channel_sessions cs ON cs.session_id = m.session_id
-         WHERE cs.channel = ?1 AND cs.external_id = ?2 AND m.role = 'user'",
-    )?;
-    let hours = stmt
-        .query_map(params![channel, external], |r| r.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
-        .filter_map(|ts| DateTime::parse_from_rfc3339(&ts).ok())
-        .map(|dt| dt.with_timezone(&Utc).hour())
-        .collect::<Vec<u32>>();
+    let hours = crate::db::timeworld::user_message_hours(db, channel, external)?;
     if hours.is_empty() {
         return Ok(None);
     }
@@ -291,57 +238,6 @@ fn prefer(a: &i32, b: &i32) -> bool {
     da < db || (da == db && a.unsigned_abs() < b.unsigned_abs())
 }
 
-// ---------- DB 读取 ----------
-
-pub(crate) fn channel_of(db: &Database, session_id: &str) -> Result<Option<(String, String)>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT channel, external_id
-         FROM channel_sessions WHERE session_id = ?1 LIMIT 1",
-    )?;
-    let mut rows = stmt.query_map(params![session_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    match rows.next() {
-        Some(Ok(v)) => Ok(Some(v)),
-        Some(Err(e)) => Err(e.into()),
-        None => Ok(None),
-    }
-}
-
-fn last_proactive_at(
-    db: &Database,
-    channel: &str,
-    external: &str,
-) -> Result<Option<DateTime<Utc>>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT last_proactive_at FROM proactive_state
-         WHERE channel = ?1 AND external_id = ?2",
-    )?;
-    let mut rows = stmt.query_map(params![channel, external], |r| r.get::<_, Option<String>>(0))?;
-    match rows.next() {
-        Some(Ok(v)) => Ok(parse_ts(v)),
-        Some(Err(e)) => Err(e.into()),
-        None => Ok(None),
-    }
-}
-
-fn latest_user_msg_at(db: &Database, session_id: &str) -> Result<Option<DateTime<Utc>>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT created_at FROM messages
-         WHERE session_id = ?1 AND role = 'user'
-         ORDER BY created_at DESC LIMIT 1",
-    )?;
-    let mut rows = stmt.query_map(params![session_id], |r| r.get::<_, String>(0))?;
-    match rows.next() {
-        Some(Ok(v)) => Ok(parse_ts(Some(v))),
-        Some(Err(e)) => Err(e.into()),
-        None => Ok(None),
-    }
-}
-
-fn parse_ts(s: Option<String>) -> Option<DateTime<Utc>> {
-    s.and_then(|v| DateTime::parse_from_rfc3339(&v).ok())
-        .map(|d| d.with_timezone(&Utc))
-}
-
 // ---------- 格式化 ----------
 
 const WEEKDAYS: [&str; 7] = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
@@ -381,26 +277,14 @@ mod tests {
     use crate::db::Database;
 
     fn add_user(db: &Database, channel: &str, external: &str) -> String {
-        let s = session::create(db, "").unwrap();
-        let now = Utc::now().to_rfc3339();
-        db.conn()
-            .execute(
-                "INSERT INTO channel_sessions (channel, external_id, session_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![channel, external, s.id, now, now],
-            )
-            .unwrap();
-        s.id
+        crate::db::channel::get_or_create_session(db, channel, external)
+            .unwrap()
+            .id
     }
 
     fn push_user_msg(db: &Database, session: &str, ts: &str) {
-        db.conn()
-            .execute(
-                "INSERT INTO messages (id, session_id, role, content, created_at)
-                 VALUES (?1, ?2, 'user', 'x', ?3)",
-                params![uuid::Uuid::new_v4().to_string(), session, ts],
-            )
-            .unwrap();
+        let at = DateTime::parse_from_rfc3339(ts).unwrap().with_timezone(&Utc);
+        crate::db::message::create_at(db, session, "user", "x", at).unwrap();
     }
 
     #[test]
@@ -439,13 +323,17 @@ mod tests {
         push_user_msg(&db, &sid, "2026-09-14T03:47:00+00:00");
         observe(&db, &sid).unwrap();
 
-        let got = profile_of(&db, "telegram", "100").unwrap().unwrap();
-        assert_eq!(got.0, 8 * 60);
+        let got = crate::db::timeworld::profile(&db, "telegram", "100")
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.utc_offset_minutes, 8 * 60);
 
         push_user_msg(&db, &sid, "2026-09-14T13:00:00+00:00");
         observe(&db, &sid).unwrap();
-        let prof2 = profile_of(&db, "telegram", "100").unwrap().unwrap();
-        assert_eq!(prof2.0, 8 * 60, "画像应保持推断的时区");
+        let prof2 = crate::db::timeworld::profile(&db, "telegram", "100")
+            .unwrap()
+            .unwrap();
+        assert_eq!(prof2.utc_offset_minutes, 8 * 60, "画像应保持推断的时区");
     }
 
     #[test]

@@ -99,6 +99,26 @@ fn parse_ts(s: Option<String>) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
+/// 读取某用户最近一次主动外发时间（从未主动发过则为 None）。
+pub fn last_proactive_at(
+    db: &Database,
+    channel: &str,
+    external_id: &str,
+) -> Result<Option<DateTime<Utc>>> {
+    let mut stmt = db.conn().prepare(
+        "SELECT last_proactive_at FROM proactive_state
+         WHERE channel = ?1 AND external_id = ?2",
+    )?;
+    let mut rows = stmt.query_map(params![channel, external_id], |row| {
+        row.get::<_, Option<String>>(0)
+    })?;
+    match rows.next() {
+        Some(Ok(v)) => Ok(parse_ts(v)),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(None),
+    }
+}
+
 /// 列出全部候选用户（有会话映射即候选），未建状态的行以默认统计出现。
 pub fn list_candidates(db: &Database) -> Result<Vec<ProactiveCandidate>> {
     let mut stmt = db

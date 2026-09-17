@@ -12,20 +12,58 @@ pub mod emotion;
 pub mod narrative;
 pub mod relation;
 pub mod self_state;
+pub mod timeworld;
 
-#[cfg(any(feature = "telegram", feature = "ilink"))]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-#[cfg(any(feature = "telegram", feature = "ilink"))]
-use crate::Assistant;
+use crate::core::ports::WorldState;
+use crate::db::Database;
+use crate::error::Result;
+
+/// 世界状态适配器：把 [`WorldState`] 端口接到 timeworld / relation 实现上。
+/// 数据库句柄由宿主持有并以 `Arc<Mutex<Database>>` 注入，自身不拥有连接。
+pub struct World {
+    db: Arc<Mutex<Database>>,
+}
+
+impl World {
+    pub fn new(db: Arc<Mutex<Database>>) -> Self {
+        Self { db }
+    }
+
+    fn lock_db(&self) -> std::sync::MutexGuard<'_, Database> {
+        self.db.lock().expect("db mutex poisoned")
+    }
+}
+
+impl WorldState for World {
+    fn observe(&self, session_id: &str) -> Result<()> {
+        timeworld::observe(&self.lock_db(), session_id)
+    }
+
+    fn apply_event(&self, session_id: &str, relation: &str) -> Result<()> {
+        let event = relation::RelationEvent::from_label(relation);
+        relation::apply_event(&self.lock_db(), session_id, event)
+    }
+
+    fn snapshot_text(&self, session_id: &str) -> String {
+        timeworld::render(&timeworld::snapshot(&self.lock_db(), session_id))
+    }
+
+    fn user_offset_minutes(&self, session_id: &str) -> i64 {
+        timeworld::user_offset_minutes(&self.lock_db(), session_id) as i64
+    }
+}
+
+// ---------- 世界引擎心跳（宿主层启动） ----------
 
 /// 世界心跳间隔（秒）。
 #[cfg(any(feature = "telegram", feature = "ilink"))]
 const TICK_SECS: u64 = 60;
 
-/// 世界引擎入口：常驻循环直到进程退出。
+/// 世界引擎入口：常驻循环直到进程退出。由宿主进程（server）调用并持有 [`crate::Assistant`]。
 #[cfg(any(feature = "telegram", feature = "ilink"))]
-pub async fn run(assistant: Arc<Assistant>) {
+pub async fn run(assistant: std::sync::Arc<crate::Assistant>) {
     tracing::info!("世界引擎已启动（AI 内部状态持续推进）");
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -37,7 +75,7 @@ pub async fn run(assistant: Arc<Assistant>) {
 
 /// 单跳推进：快速的状态衰减在前台做，叙事续写交给阻塞线程池。
 #[cfg(any(feature = "telegram", feature = "ilink"))]
-async fn tick(assistant: Arc<Assistant>) {
+async fn tick(assistant: std::sync::Arc<crate::Assistant>) {
     // 1. 情绪：按距上次的经过时间向基线回归。
     {
         let db = assistant.inner_db();

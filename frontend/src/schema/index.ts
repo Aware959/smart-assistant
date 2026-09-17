@@ -37,6 +37,10 @@ export type MemoryHit = z.infer<typeof memoryHitSchema>
 export const chatOutputSchema = z.object({
   session_id: z.string(),
   reply: z.string(),
+  // 本条用户消息 id（后端用它关联记忆来源；沉淀在回复交付后异步完成）。
+  // 前端暂不使用，给默认值以免前后端版本短暂不一致时解析失败。
+  user_message_id: z.string().default(''),
+  // 本轮沉淀出的记忆：后端在回复交付后补齐，没有值得记住的事实时为 null。
   memory: memorySchema.nullable(),
 })
 export type ChatOutput = z.infer<typeof chatOutputSchema>

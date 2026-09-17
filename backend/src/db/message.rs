@@ -101,9 +101,26 @@ pub fn list_since(
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
-/// 按会话取最近的 `limit` 条消息，返回时仍按时间正序。
+/// 按会话取最近 `limit` 条消息，返回时仍按时间正序。
 pub fn list_recent(db: &Database, session_id: &str, limit: usize) -> Result<Vec<Message>> {
     list_range(db, session_id, limit, true)
+}
+
+/// 该会话最近一条用户消息的时刻（无用户消息返回 None），用于时间世界模型。
+pub fn latest_user_at(db: &Database, session_id: &str) -> Result<Option<DateTime<Utc>>> {
+    let mut stmt = db.conn().prepare(
+        "SELECT created_at FROM messages
+         WHERE session_id = ?1 AND role = 'user'
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![session_id], |r| r.get::<_, String>(0))?;
+    match rows.next() {
+        Some(Ok(ts)) => Ok(DateTime::parse_from_rfc3339(&ts)
+            .ok()
+            .map(|d| d.with_timezone(&Utc))),
+        Some(Err(e)) => Err(e.into()),
+        None => Ok(None),
+    }
 }
 
 fn list_range(db: &Database, session_id: &str, limit: usize, recent: bool) -> Result<Vec<Message>> {

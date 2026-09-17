@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use crate::channels::shared_push;
 use crate::db::proactive::ProactiveCandidate;
-use crate::Assistant;
+use crate::host::Host;
 
 /// 通道当前是否可能把消息送出去（telegram 已连接 / iLink 仍有新鲜 token）。
 /// 用于在触发 LLM 决策之前先剔除不可推的用户，省下无谓的模型调用。
@@ -26,7 +26,7 @@ pub fn pushable(cand: &ProactiveCandidate) -> bool {
 
 /// 主动推送（由延迟等待引擎触发）：发送并计入每日主动配额与历史。
 /// 等价于 [`send_message`] 的 `count_as_proactive = true` 版本。
-pub async fn dispatch(assistant: &Assistant, cand: &ProactiveCandidate, text: &str) -> bool {
+pub async fn dispatch(assistant: &dyn Host, cand: &ProactiveCandidate, text: &str) -> bool {
     send_message(assistant, cand, text, true).await
 }
 
@@ -35,7 +35,7 @@ pub async fn dispatch(assistant: &Assistant, cand: &ProactiveCandidate, text: &s
 /// - 延续会话中的追加句是"对话"，不计入主动配额；
 /// - 延迟等待引擎的主动发起才计入配额。
 pub async fn send_message(
-    assistant: &Assistant,
+    assistant: &dyn Host,
     cand: &ProactiveCandidate,
     text: &str,
     count_as_proactive: bool,
@@ -91,12 +91,12 @@ fn ilink_has_fresh_token(external_id: &str) -> bool {
 
 /// 成功后把主动消息写进该用户的历史（避免上下文断裂），并按需刷新主动状态。
 fn record_sent(
-    assistant: &Assistant,
+    assistant: &dyn Host,
     cand: &ProactiveCandidate,
     text: &str,
     count_as_proactive: bool,
 ) {
-    let db = assistant.inner_db();
+    let db = assistant.db();
     if let Err(e) = crate::db::message::create(&db, &cand.session_id, "assistant", text) {
         tracing::warn!(error = %e, "消息写回历史失败");
     }
