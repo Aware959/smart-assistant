@@ -195,15 +195,18 @@ async fn run_loop(
 
             // 后置沉淀要用原文做兜底，而 handle_text 会接管 text，先留一份。
             let settle_text = text.clone();
-            let (reply, is_fallback, pending_memory) = match handle_text(
-                assistant.clone(),
-                msg.from_user_id.clone(),
-                text,
-                user_time,
+            let (reply, is_fallback, pending_memory) = match tokio::time::timeout(
+                Duration::from_secs(super::AI_DEADLINE_SECS),
+                handle_text(
+                    assistant.clone(),
+                    msg.from_user_id.clone(),
+                    text,
+                    user_time,
+                ),
             )
             .await
             {
-                Ok(out) => {
+                Ok(Ok(out)) => {
                     // 有 user_message_id 才需要沉淀（命令类回执没有）。
                     let pending = (!out.user_message_id.is_empty()).then(|| {
                         (
@@ -214,8 +217,16 @@ async fn run_loop(
                     });
                     (out.reply, false, pending)
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::error!(error = %e, "对话失败");
+                    ("刚才走神了，再发一次试试。".to_string(), true, None)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        from = %msg.from_user_id,
+                        deadline_secs = super::AI_DEADLINE_SECS,
+                        "单轮对话超时，放弃本轮，继续轮询"
+                    );
                     ("刚才走神了，再发一次试试。".to_string(), true, None)
                 }
             };
@@ -241,10 +252,14 @@ async fn run_loop(
                 }
                 if !is_fallback {
                     // 正常回复发送成功：按语境决定是否像机器人一样接着补几句。
-                    crate::proactive::continuation::after_reply(
-                        assistant.clone(),
-                        CHANNEL,
-                        &msg.from_user_id,
+                    // 延续判断同样要调 LLM，套同一个看门狗，避免拖死轮询。
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(super::AI_DEADLINE_SECS),
+                        crate::proactive::continuation::after_reply(
+                            assistant.clone(),
+                            CHANNEL,
+                            &msg.from_user_id,
+                        ),
                     )
                     .await;
                 }

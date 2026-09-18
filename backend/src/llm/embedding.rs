@@ -18,11 +18,16 @@ impl Embedder for Embed {
 /// 对一段文本进行向量化。
 pub fn embed_text(text: &str) -> Result<Vec<f32>> {
     let model = Config::get().embedding_model.clone();
+    let closure_model = model.clone();
+    let started = std::time::Instant::now();
 
     let res = genai_client::block_on(async move {
         let client = genai_client::embed_client();
-        client.embed(&model, text, None).await
+        client.embed(&closure_model, text, None).await
     })?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    tracing::info!(model = %model, elapsed_ms, "embedding 完成");
 
     res.first_embedding()
         .map(|e| e.vector().clone())

@@ -287,7 +287,14 @@ async fn run_loop(assistant: Arc<Assistant>, token: &str) -> Result<(), String> 
             continue;
         }
 
-        for update in updates.result.unwrap_or_default() {
+        let batch = updates.result.unwrap_or_default();
+        tracing::info!(updates = batch.len(), "getUpdates 轮询返回");
+        if batch.is_empty() {
+            // 长轮询正常空转：周期性地确认循环仍在呼吸（可作为心跳检查）。
+            continue;
+        }
+
+        for update in batch {
             offset = offset.max(update.update_id + 1);
             let Some(message) = update.message else { continue };
             let chat_id = message.chat.id;
@@ -300,23 +307,41 @@ async fn run_loop(assistant: Arc<Assistant>, token: &str) -> Result<(), String> 
                 continue;
             }
             let user_time = super::ts_to_rfc3339(message.date);
+            tracing::info!(chat_id, "收到消息，开始处理（进入 AI 流水线前）");
 
             touch_user_reply(assistant.as_ref(), &chat_id.to_string());
 
             send_typing(&client, &base, chat_id).await;
+            let handle_started = std::time::Instant::now();
 
-            let (next_reply, is_fallback, pending_memory) =
-                match handle_text(assistant.clone(), chat_id, &text, user_time).await
+            let (next_reply, is_fallback, pending_memory) = match tokio::time::timeout(
+                Duration::from_secs(super::AI_DEADLINE_SECS),
+                handle_text(assistant.clone(), chat_id, &text, user_time),
+            )
+            .await
             {
-                Ok(Some(out)) => {
+                Ok(Ok(Some(out))) => {
+                    tracing::info!(
+                        chat_id,
+                        elapsed_ms = handle_started.elapsed().as_millis() as u64,
+                        "handle_text 返回（回复生产阶段完成）"
+                    );
                     // 有 user_message_id 才需要沉淀（命令类回执没有）。
                     let pending = (!out.user_message_id.is_empty())
                         .then(|| (out.session_id.clone(), out.user_message_id.clone()));
                     (out.reply, false, pending)
                 }
-                Ok(None) => continue,
-                Err(e) => {
+                Ok(Ok(None)) => continue,
+                Ok(Err(e)) => {
                     tracing::error!(error = %e, "对话失败");
+                    ("刚才走神了，再发一次试试。".to_string(), true, None)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        chat_id,
+                        deadline_secs = super::AI_DEADLINE_SECS,
+                        "单轮对话超时，放弃本轮，继续轮询"
+                    );
                     ("刚才走神了，再发一次试试。".to_string(), true, None)
                 }
             };
@@ -324,22 +349,35 @@ async fn run_loop(assistant: Arc<Assistant>, token: &str) -> Result<(), String> 
             if let Err(e) = send_text(&client, &base, chat_id, &next_reply).await {
                 tracing::error!(error = %e, chat_id, "回复发送失败");
             } else {
+                tracing::info!(chat_id, is_fallback, "回复已发送，进入后置处理");
                 // 回复已送达，再后台补记忆沉淀：判定/事实化要调 LLM，不能占用户等待时间。
                 if let Some((session_id, user_message_id)) = pending_memory {
                     let assistant = assistant.clone();
                     let text = text.clone();
                     tokio::task::spawn_blocking(move || {
+                        tracing::debug!(session_id = %session_id, "记忆沉淀(settle_memory)开始");
                         let _ = assistant.settle_memory(&session_id, &user_message_id, &text);
+                        tracing::debug!(session_id = %session_id, "记忆沉淀(settle_memory)结束");
                     });
                 }
                 if !is_fallback {
                     // 正常回复发送成功：按语境决定是否像真人一样接着补几句。
-                    crate::proactive::continuation::after_reply(
-                        assistant.clone(),
-                        CHANNEL,
-                        &chat_id.to_string(),
+                    // 延续判断同样要调 LLM，套同一个看门狗，避免拖死轮询。
+                    let cont_started = std::time::Instant::now();
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(super::AI_DEADLINE_SECS),
+                        crate::proactive::continuation::after_reply(
+                            assistant.clone(),
+                            CHANNEL,
+                            &chat_id.to_string(),
+                        ),
                     )
                     .await;
+                    tracing::info!(
+                        chat_id,
+                        elapsed_ms = cont_started.elapsed().as_millis() as u64,
+                        "延续判断(after_reply)结束"
+                    );
                 }
             }
         }

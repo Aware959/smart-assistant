@@ -81,3 +81,26 @@ impl Database {
         rebuild_vector_table(&self.conn, dim, model)
     }
 }
+
+/// 带诊断的数据库锁获取：记录等待耗时，中毒时回收内部状态而非 panic。
+///
+/// 全进程共享同一把 `Mutex<Database>`，任何组件持锁时间过长都会让其余组件
+/// （telegram 长轮询 / 世界心跳 / 主动引擎）排队——等待超过 1s 就记 warn，
+/// 用于暴露"持锁跨 LLM/embedding 阻塞调用"这类隐性卡顿。
+pub fn lock_db(
+    db: &std::sync::Mutex<Database>,
+) -> std::sync::MutexGuard<'_, Database> {
+    let start = std::time::Instant::now();
+    let guard = db.lock().unwrap_or_else(|p| {
+        tracing::error!("db 互斥锁中毒：回收内部状态，继续运行");
+        p.into_inner()
+    });
+    let waited = start.elapsed();
+    if waited >= std::time::Duration::from_secs(1) {
+        tracing::warn!(
+            wait_ms = waited.as_millis(),
+            "db 锁等待过久（可能有长任务持锁），疑似持锁跨阻塞调用"
+        );
+    }
+    guard
+}

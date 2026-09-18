@@ -39,6 +39,7 @@ pub async fn run(assistant: Arc<Assistant>) {
 
 /// 单轮评估：筛出可推送的候选，逐个询问 LLM 是否开口，至多发出一条。
 async fn run_once(assistant: &Assistant) {
+    let round_start = std::time::Instant::now();
     // 竞态兜底：等待期间可能恰好跨入安静时段。
     if scheduler::in_quiet_hours(chrono::Local::now()) {
         tracing::info!("当前处于安静时段，跳过本轮评估");
@@ -57,9 +58,10 @@ async fn run_once(assistant: &Assistant) {
         }
     };
     if candidates.is_empty() {
-        tracing::debug!("本轮无可用候选");
+        tracing::debug!(elapsed_ms = round_start.elapsed().as_millis() as u64, "本轮无可用候选");
         return;
     }
+    tracing::info!(n = candidates.len(), elapsed_ms = round_start.elapsed().as_millis() as u64, "主动评估：候选已筛出");
 
     for cand in candidates.iter().take(MAX_CANDIDATES_PER_CYCLE) {
         if !sender::pushable(cand) {
@@ -68,25 +70,39 @@ async fn run_once(assistant: &Assistant) {
         let Some(text) = propose(assistant, cand).await else {
             continue;
         };
+        tracing::info!(user = %cand.external_id, elapsed_ms = round_start.elapsed().as_millis() as u64, "主动评估：决策开口，准备派发");
         sender::dispatch(assistant, cand, &text).await;
+        tracing::info!(user = %cand.external_id, elapsed_ms = round_start.elapsed().as_millis() as u64, "主动评估：派发完成");
         return;
     }
 }
 
 /// 先组装上下文，再问 LLM 要不要开口；返回待发送的内容（不开口则为 None）。
 async fn propose(assistant: &Assistant, cand: &crate::db::proactive::ProactiveCandidate) -> Option<String> {
-    let (recent, rec, world) = {
+    let step_start = std::time::Instant::now();
+    // 每个 DB 读取独立短作用域，守卫用完即释放。
+    // 切勿在持 `inner_db()` 守卫期间再调 `world_snapshot_text`（它内部会再次
+    // 锁同一把非重入的 std Mutex，Proactive 引擎整个挂死，进而拖垮全进程）。
+    let recent = {
         let db = assistant.inner_db();
-        let recent = context::recent_history(&db, &cand.session_id, 8);
+        context::recent_history(&db, &cand.session_id, 8)
+    };
+    let rec = {
         let query = recent.chars().take(200).collect::<String>();
-        let rec = if query.trim().is_empty() {
+        if query.trim().is_empty() {
             String::new()
         } else {
+            let db = assistant.inner_db();
             context::recall(&db, &query)
-        };
-        let world = assistant.world_snapshot_text(&cand.session_id);
-        (recent, rec, world)
+        }
     };
+    let world = assistant.world_snapshot_text(&cand.session_id);
+    tracing::info!(
+        user = %cand.external_id,
+        elapsed_ms = step_start.elapsed().as_millis() as u64,
+        rec_chars = rec.chars().count(),
+        "主动评估：上下文组装完成（recent/recall/world）"
+    );
 
     // LLM 调用是同步阻塞的（genai 全局 runtime），挪到阻塞线程池避免卡住异步任务。
     let llm = assistant.chat_llm();
@@ -98,7 +114,9 @@ async fn propose(assistant: &Assistant, cand: &crate::db::proactive::ProactiveCa
         if let Some(reason) = &decision.reason {
             tracing::debug!(user = %cand.external_id, reason, "LLM 判断本轮不开口");
         }
+        tracing::info!(user = %cand.external_id, elapsed_ms = step_start.elapsed().as_millis() as u64, "主动评估：决策完成（不开口）");
         return None;
     }
+    tracing::info!(user = %cand.external_id, elapsed_ms = step_start.elapsed().as_millis() as u64, "主动评估：决策完成（开口）");
     decision.message
 }

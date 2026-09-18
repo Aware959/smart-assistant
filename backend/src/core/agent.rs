@@ -122,6 +122,7 @@ impl Agent {
         //
         // 注意"判定 + 沉淀 + 关系演化"都不在这条路径上：它们被后置到回复交付之后
         // （见 [`Self::settle_memory`]），既不占首字延迟，失败也不会连累这一轮回复。
+        let memory_phase = std::time::Instant::now();
         let memory_hits = match self
             .memory
             .search(&input.message, prompt::MEMORY_RECALL_LIMIT)
@@ -132,9 +133,16 @@ impl Agent {
                 Vec::new()
             }
         };
+        let memory_ms = memory_phase.elapsed().as_millis() as u64;
+        tracing::info!(
+            hits = memory_hits.len(),
+            memory_ms,
+            "对话阶段：记忆向量召回完成"
+        );
 
         // 2'. 世界状态 + 原始文本 + 检索上下文拼成提示词。
         let world_text = self.world.snapshot_text(&session.id);
+        tracing::info!(session = %session.id, "对话阶段：提示词组装完成");
         let recall = build_recall_context(&memory_hits);
         let mut messages = vec![crate::core::types::ChatMessage {
             role: "system".to_string(),
@@ -151,7 +159,10 @@ impl Agent {
             content: input.message.clone(),
         });
 
+        let llm_phase = std::time::Instant::now();
         let reply = self.llm.complete_stream(&messages, &mut on_delta)?;
+        let llm_ms = llm_phase.elapsed().as_millis() as u64;
+        tracing::info!(session = %session.id, llm_ms, "对话阶段：LLM 回复完成");
 
         // 3. AI 回复入库，刷新会话时间戳。
         self.conversation.add_message(&session.id, "assistant", &reply)?;
@@ -180,6 +191,7 @@ impl Agent {
         user_message_id: &str,
         text: &str,
     ) -> Option<MemoryRecord> {
+        tracing::info!(session_id, "记忆沉淀：判定阶段开始");
         let extraction = match self.memory.extract(text) {
             Ok(extraction) => extraction,
             Err(e) => {
@@ -187,6 +199,13 @@ impl Agent {
                 return None;
             }
         };
+        tracing::info!(
+            session_id,
+            is_memory = extraction.is_memory,
+            memory_type = %extraction.memory_type,
+            tier = %extraction.tier,
+            "记忆沉淀：判定完成"
+        );
 
         // 世界能力：按关系事件调整关系——日常闲聊影响很小，关心/暧昧大幅升温，
         // 矛盾/吵架乘法折损，和解专门修复信任。
@@ -199,11 +218,19 @@ impl Agent {
         // 事实化失败时回退原文（content_or 的兜底）。
         let content = extraction.content_or(text);
         let message_id = (!user_message_id.is_empty()).then_some(user_message_id);
+        let store_started = std::time::Instant::now();
         match self
             .memory
             .store(content, &extraction.memory_type, &extraction.tier, message_id)
         {
-            Ok(record) => Some(record),
+            Ok(record) => {
+                tracing::info!(
+                    session_id,
+                    store_ms = store_started.elapsed().as_millis() as u64,
+                    "记忆沉淀：落库完成"
+                );
+                Some(record)
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "记忆沉淀失败，本轮回复不受影响");
                 None

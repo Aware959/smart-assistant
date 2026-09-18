@@ -19,6 +19,12 @@ pub mod ilink;
 #[cfg(feature = "ilink")]
 pub(crate) const ILINK_MAX_SENDS_PER_REFRESH: usize = 10;
 
+/// 单条入站消息的 AI 处理看门狗上限（秒）：超过即放弃本轮、回兜底话术并继续轮询。
+///
+/// 阻塞线程池里的 LLM/embedding 调用即便有客户端超时，串行等待侧仍可能被一次
+/// 停滞拖住整条长轮询；这里的 deadline 保证任何情况下轮询都能在有限时间内恢复。
+pub(crate) const AI_DEADLINE_SECS: u64 = 240;
+
 /// 全局推送状态注册表：由各通道 relay 维护，proactive 引擎只读。
 #[derive(Default)]
 pub struct PushChannels {

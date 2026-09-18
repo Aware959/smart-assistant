@@ -70,11 +70,15 @@ fn complete_impl(
     options: Option<&ChatOptions>,
 ) -> Result<String> {
     let chat_req = build_chat_request(messages);
+    let started = std::time::Instant::now();
 
     let chat_res = genai_client::block_on(async move {
         let client = genai_client::chat_client();
         client.exec_chat(model, chat_req, options).await
     })?;
+
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    tracing::info!(model, elapsed_ms, "LLM 非流式：完成");
 
     chat_res
         .first_text()
@@ -100,12 +104,19 @@ where
         let chat_res = genai_client::chat_client()
             .exec_chat_stream(&model, chat_req, Some(&options))
             .await?;
-
         let mut stream = chat_res.stream;
+
+        // 首字节之前的等待集中了几个最典型的卡点：LLM 服务端重新加载模型、
+        // TCP 半开连接、上游排队。记到 info，任何反常都能在日志时间轴上看出。
+        let started = std::time::Instant::now();
         let mut full = String::new();
         while let Some(event) = stream.next().await {
             match event? {
                 ChatStreamEvent::Chunk(chunk) => {
+                    if full.is_empty() {
+                        let first_ms = started.elapsed().as_millis() as u64;
+                        tracing::info!(model = %model, first_ms, "LLM 流式：首字节到达");
+                    }
                     full.push_str(&chunk.content);
                     on_delta(&chunk.content);
                 }
@@ -119,6 +130,8 @@ where
                 _ => {}
             }
         }
+        let total_ms = started.elapsed().as_millis() as u64;
+        tracing::info!(model = %model, total_ms, "LLM 流式：结束");
 
         if full.is_empty() {
             return Err(SqlError::Config("LLM 流式返回内容为空".to_string()));

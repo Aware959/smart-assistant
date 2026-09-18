@@ -44,8 +44,9 @@ impl Assistant {
     }
 
     /// 数据库锁守卫。仅限同层服务门面 / Host 实现内部使用，勿跨 `.await` 持锁。
+    /// 带等待耗时诊断与毒锁自愈（见 [`crate::db::lock_db`]）。
     fn lock_db(&self) -> MutexGuard<'_, crate::db::Database> {
-        self.db.lock().expect("db mutex poisoned")
+        crate::db::lock_db(&self.db)
     }
 
     /// 兼容旧调用点的(crate 内)数据库访问入口，供 channels / proactive / world

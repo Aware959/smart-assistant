@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -6,6 +7,34 @@ use axum::Router;
 use smart_assistant::api;
 use smart_assistant::config::Config;
 use smart_assistant::Assistant;
+
+/// 双写日志 writer：stdout（控制台）+ 可选文件（`SMART_ASSISTANT_LOG_FILE`）。
+/// 只被 tracing 的 writer 线程使用，写失败一律忽略，绝不让日志影响业务。
+struct TeeWriter {
+    file: Option<std::sync::Mutex<std::fs::File>>,
+}
+
+impl std::io::Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stdout().write_all(buf);
+        if let Some(f) = &self.file {
+            if let Ok(mut f) = f.lock() {
+                let _ = f.write_all(buf);
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stdout().flush();
+        if let Some(f) = &self.file {
+            if let Ok(mut f) = f.lock() {
+                let _ = f.flush();
+            }
+        }
+        Ok(())
+    }
+}
 
 /// 脱敏 API key：只保留首尾四位，空值显示为 <not set>。
 fn mask_key(key: &str) -> String {
@@ -59,10 +88,41 @@ fn attach_spa(app: Router, dist: &str) -> Router {
 
 #[tokio::main]
 async fn main() {
+    // 全局 panic hook：把 panic 位置（含线程名）通过 tracing 记录，便于与各阶段日志
+    // 对照时间轴定位崩溃环节。默认 hook 同时保留，panic 信息也会打到 stderr。
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>");
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        tracing::error!(thread = %thread_name, location = %location, "PANIC: {info}");
+        default_hook(info);
+    }));
+
     // 加载运行目录下的 .env 文件（不存在则静默跳过，环境变量优先）。
     dotenvy::dotenv().ok();
 
+    // 日志写入走独立 writer 线程（非阻塞通道）：
+    // tracing_subscriber 全局写锁 + 一次卡住的 stdout/管道 syscall 曾把 accept
+    // 中间件、轮询、世界心跳等所有打日志的线程串行堵死，进程全网冻结。
+    // 现在通道写满时只是丢弃日志，任何业务路径都不会再被日志写阻塞。
+    // 指定 SMART_ASSISTANT_LOG_FILE 时额外镜像到文件（stdout 仍保留）。
+    let file_mirror =
+        std::env::var("SMART_ASSISTANT_LOG_FILE").ok().filter(|f| !f.is_empty());
+    let mut tee = TeeWriter { file: None };
+    if let Some(path) = file_mirror {
+        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => tee.file = Some(std::sync::Mutex::new(f)),
+            Err(_) => {}
+        }
+    }
+    let (non_blocking, _guard) = tracing_appender::non_blocking(tee);
+
     tracing_subscriber::fmt()
+        .with_writer(non_blocking)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 // qwen3 等思考型模型流式时先吐 reasoning 空增量，genai 会逐个打 WARN：
@@ -70,6 +130,59 @@ async fn main() {
                 .unwrap_or_else(|_| "info,genai::adapter::adapters::openai::streamer=error".into()),
         )
         .init();
+
+    // 诊断心跳：SMART_ASSISTANT_WATCHDOG_FILE 指定时，用一个独立 OS 线程每 5 秒
+    // 直接落一行（绕开 tracing）。同时一个 tokio 任务每秒更新计数器；探针据此
+    // 区分「tokio 调度器已停摆」与「OS 线程也停了」——冻结类问题的关键观测。
+    if let Some(hb_path) =
+        std::env::var("SMART_ASSISTANT_WATCHDOG_FILE").ok().filter(|f| !f.is_empty())
+    {
+        let last_tokio = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        {
+            let last_tokio = Arc::clone(&last_tokio);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    last_tokio.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        std::thread::spawn(move || {
+            let mut file = match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&hb_path)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("watchdog: cannot open {hb_path}: {e}");
+                    return;
+                }
+            };
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let last = last_tokio.load(std::sync::atomic::Ordering::Relaxed);
+                let stale_ms = if last == 0 {
+                    u64::MAX
+                } else {
+                    now_ms.saturating_sub(last)
+                };
+                let line = format!(
+                    "hb ts={now_ms} tokio_last_ms={last} stale_ms={stale_ms} os_thread_alive=1\n"
+                );
+                let _ = file.write_all(line.as_bytes());
+                let _ = file.flush();
+            }
+        });
+    }
 
     // 启动初始化：加载配置（key 脱敏输出）
     let cfg = Config::get();

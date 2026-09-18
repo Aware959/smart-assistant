@@ -32,7 +32,7 @@ impl World {
     }
 
     fn lock_db(&self) -> std::sync::MutexGuard<'_, Database> {
-        self.db.lock().expect("db mutex poisoned")
+        crate::db::lock_db(&self.db)
     }
 }
 
@@ -69,7 +69,14 @@ pub async fn run(assistant: std::sync::Arc<crate::Assistant>) {
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
+        let tick_started = std::time::Instant::now();
         tick(assistant.clone()).await;
+        let tick_ms = tick_started.elapsed().as_millis() as u64;
+        if tick_ms > 30_000 {
+            tracing::warn!(tick_ms, "世界引擎单跳耗时过长");
+        } else {
+            tracing::debug!(tick_ms, "世界引擎单跳完成");
+        }
     }
 }
 

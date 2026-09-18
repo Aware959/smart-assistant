@@ -60,6 +60,7 @@ anyhow = "1"
 # 日志
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tracing-appender = { version = "0.2", optional = true }
 
 # 时间
 chrono = { version = "0.4", features = ["serde"] }
@@ -84,7 +85,7 @@ uniffi = { version = "0.28", features = ["build"] }
 
 [features]
 default = ["desktop", "telegram", "ilink"]
-desktop = ["axum", "axum-server", "tower-http", "tracing-subscriber"]
+desktop = ["axum", "axum-server", "tower-http", "tracing-subscriber", "dep:tracing-appender"]
 telegram = ["dep:reqwest"]
 ilink = ["dep:reqwest", "dep:base64", "dep:qrcode"]
 

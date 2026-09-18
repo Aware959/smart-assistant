@@ -3,11 +3,12 @@
 
 use std::future::Future;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use genai::adapter::AdapterKind;
 use genai::chat::ChatOptions;
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
-use genai::{Client, ModelIden, ServiceTarget};
+use genai::{Client, ModelIden, ServiceTarget, WebConfig};
 use tokio::runtime::Runtime;
 
 use crate::config::{Config, LlmProvider};
@@ -42,6 +43,21 @@ fn runtime() -> &'static Runtime {
     })
 }
 
+/// 建立连接的硬上限：连不上就尽快失败，让上层降级，
+/// 避免 Telegram 长轮询被半开的 TCP 连接永久挂起。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 单次 chat 调用的总超时（流式长回复需要留足余量）。
+const CHAT_TIMEOUT: Duration = Duration::from_secs(300);
+/// 单次 embedding 调用的总超时。
+const EMBED_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 带超时的 WebConfig：`total` 到期即报错返回，而不是无限阻塞。
+fn web_config(total: Duration) -> WebConfig {
+    WebConfig::default()
+        .with_connect_timeout(CONNECT_TIMEOUT)
+        .with_timeout(total)
+}
+
 /// LLM chat 专用的 genai Client。
 ///
 /// 客户端默认开启 `normalize_reasoning_content`：本地模型常把推理过程写进
@@ -58,20 +74,32 @@ pub(crate) fn chat_client() -> &'static Client {
     CHAT_CLIENT.get_or_init(|| {
         let cfg = Config::get();
         match cfg.llm_provider {
-            LlmProvider::OpenAI => {
-                build_client(&cfg.llm_api_url, &cfg.llm_api_key, Some(&chat_options))
-            }
-            LlmProvider::Gemini => {
-                build_gemini_client(&cfg.llm_api_url, &cfg.llm_api_key, Some(&chat_options))
-            }
+            LlmProvider::OpenAI => build_client(
+                &cfg.llm_api_url,
+                &cfg.llm_api_key,
+                Some(&chat_options),
+                CHAT_TIMEOUT,
+            ),
+            LlmProvider::Gemini => build_gemini_client(
+                &cfg.llm_api_url,
+                &cfg.llm_api_key,
+                Some(&chat_options),
+                CHAT_TIMEOUT,
+            ),
         }
     })
 }
 
 /// embedding 专用的 genai Client（genez 的嵌入与 LLM 通道独立，仍按 OpenAI 兼容端点）。
 pub(crate) fn embed_client() -> &'static Client {
-    EMBED_CLIENT
-        .get_or_init(|| build_client(&Config::get().embedding_api_url, &Config::get().embedding_api_key, None))
+    EMBED_CLIENT.get_or_init(|| {
+        build_client(
+            &Config::get().embedding_api_url,
+            &Config::get().embedding_api_key,
+            None,
+            EMBED_TIMEOUT,
+        )
+    })
 }
 
 /// 构建绑定到 Gemini（Google AI Studio）原生协议的 Client。
@@ -80,7 +108,12 @@ pub(crate) fn embed_client() -> &'static Client {
 ///   `https://generativelanguage.googleapis.com/v1beta/`。
 /// - `api_key`  非空时直接使用；为空回退环境变量 `GEMINI_API_KEY`。
 /// - 鉴权头为 `x-goog-api-key`（GeminiAdapter 约定），不走 `Authorization: Bearer`。
-fn build_gemini_client(api_url: &str, api_key: &str, chat_options: Option<&ChatOptions>) -> Client {
+fn build_gemini_client(
+    api_url: &str,
+    api_key: &str,
+    chat_options: Option<&ChatOptions>,
+    total: Duration,
+) -> Client {
     let url = resolve_url(api_url).map(ToOwned::to_owned);
     let auth = if api_key.is_empty() {
         AuthData::from_env("GEMINI_API_KEY")
@@ -104,7 +137,9 @@ fn build_gemini_client(api_url: &str, api_key: &str, chat_options: Option<&ChatO
         },
     );
 
-    let mut builder = Client::builder().with_service_target_resolver(service_target_resolver);
+    let mut builder = Client::builder()
+        .with_service_target_resolver(service_target_resolver)
+        .with_web_config(web_config(total));
     if let Some(options) = chat_options {
         builder = builder.with_chat_options(options.clone());
     }
@@ -117,7 +152,12 @@ fn build_gemini_client(api_url: &str, api_key: &str, chat_options: Option<&ChatO
 /// - `api_key`  非空时直接使用；为空时：自定义端点 → `AuthData::None`（本地无鉴权），
 ///   官方端点 → 回退读取环境变量 `OPENAI_API_KEY`。
 /// - `chat_options` 非空时设为客户端默认行为（作用于该 client 的全部 chat 请求）。
-fn build_client(api_url: &str, api_key: &str, chat_options: Option<&ChatOptions>) -> Client {
+fn build_client(
+    api_url: &str,
+    api_key: &str,
+    chat_options: Option<&ChatOptions>,
+    total: Duration,
+) -> Client {
     let url = resolve_url(api_url).map(ToOwned::to_owned);
     let auth = if api_key.is_empty() {
         if url.is_some() {
@@ -148,7 +188,9 @@ fn build_client(api_url: &str, api_key: &str, chat_options: Option<&ChatOptions>
         },
     );
 
-    let mut builder = Client::builder().with_service_target_resolver(service_target_resolver);
+    let mut builder = Client::builder()
+        .with_service_target_resolver(service_target_resolver)
+        .with_web_config(web_config(total));
     if let Some(options) = chat_options {
         builder = builder.with_chat_options(options.clone());
     }

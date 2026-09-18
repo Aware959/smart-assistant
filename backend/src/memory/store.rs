@@ -23,7 +23,7 @@ impl Store {
     }
 
     fn lock_db(&self) -> std::sync::MutexGuard<'_, Database> {
-        self.db.lock().expect("db mutex poisoned")
+        crate::db::lock_db(&self.db)
     }
 }
 
