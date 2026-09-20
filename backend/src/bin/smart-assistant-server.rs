@@ -6,6 +6,7 @@ use std::sync::Arc;
 use axum::Router;
 use smart_assistant::api;
 use smart_assistant::config::Config;
+use smart_assistant::host::Host;
 use smart_assistant::Assistant;
 
 /// 双写日志 writer：stdout（控制台）+ 可选文件（`SMART_ASSISTANT_LOG_FILE`）。
@@ -114,9 +115,8 @@ async fn main() {
         std::env::var("SMART_ASSISTANT_LOG_FILE").ok().filter(|f| !f.is_empty());
     let mut tee = TeeWriter { file: None };
     if let Some(path) = file_mirror {
-        match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            Ok(f) => tee.file = Some(std::sync::Mutex::new(f)),
-            Err(_) => {}
+        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            tee.file = Some(std::sync::Mutex::new(f));
         }
     }
     let (non_blocking, _guard) = tracing_appender::non_blocking(tee);
@@ -218,31 +218,35 @@ async fn main() {
         "database ready"
     );
 
+    // 组件层（telegram / ilink / proactive / world）只认窄端口 `Arc<dyn Host>`；
+    // 完整能力对象 `Arc<Assistant>` 仅保留给 web API 路由。
+    let host: Arc<dyn Host> = assistant.clone();
+
     // 配置了 TELEGRAM_BOT_TOKEN 且 TELEGRAM_ENABLED != 0 时，后台启动 Telegram 长轮询。
     #[cfg(feature = "telegram")]
     if cfg.telegram_enabled && !cfg.telegram_bot_token.trim().is_empty() {
         tracing::info!("TELEGRAM_ENABLED + TELEGRAM_BOT_TOKEN 已配置，启动 Telegram 长轮询");
-        tokio::spawn(smart_assistant::channels::telegram::run(assistant.clone()));
+        tokio::spawn(smart_assistant::channels::telegram::run(host.clone()));
     }
 
     // 微信 iLink 通道：无 token 且未启用时内部静默跳过；启用后首次启动需扫码。
     #[cfg(feature = "ilink")]
     {
-        tokio::spawn(smart_assistant::channels::ilink::run(assistant.clone()));
+        tokio::spawn(smart_assistant::channels::ilink::run(host.clone()));
     }
 
     // 主动陪伴引擎：PROACTIVE_ENABLED=1 时开启（依赖通道状态做频率/窗口控制）。
     #[cfg(any(feature = "telegram", feature = "ilink"))]
     if cfg.proactive_enabled {
         tracing::info!("PROACTIVE_ENABLED 已开启，启动主动陪伴引擎");
-        tokio::spawn(smart_assistant::proactive::run(assistant.clone()));
+        tokio::spawn(smart_assistant::proactive::run(host.clone()));
     }
 
     // 世界引擎：AI 自身状态持续演进（情绪回落 / 关系降温 / 今日叙事），
     // 与主动推送解耦，始终运行。
     #[cfg(any(feature = "telegram", feature = "ilink"))]
     {
-        tokio::spawn(smart_assistant::world::run(assistant.clone()));
+        tokio::spawn(smart_assistant::world::run(host.clone()));
     }
 
     // 构建路由（若配置了前端产物，则同源托管 SPA 静态文件）

@@ -19,7 +19,6 @@ use crate::core::types::ChatMessage;
 use crate::db::proactive::ProactiveCandidate;
 use crate::host::Host;
 use crate::proactive::{decider, scheduler, sender};
-use crate::Assistant;
 
 /// 追加与追加之间的停顿（毫秒），模拟真人接着打的节奏。
 const TYPING_PAUSE_MS: u64 = 1500;
@@ -28,7 +27,7 @@ const PAUSE_JITTER_MS: u64 = 1500;
 
 /// 在某次正常回复发送完毕、且未走错误兜底时调用：按需追加后续消息。
 pub async fn after_reply(
-    assistant: Arc<Assistant>,
+    assistant: Arc<dyn Host>,
     channel: &str,
     external_id: &str,
 ) {
@@ -37,7 +36,7 @@ pub async fn after_reply(
         return;
     }
     let session_id = {
-        let db = assistant.inner_db();
+        let db = assistant.db();
         match crate::db::channel::get_or_create_session(&db, channel, external_id) {
             Ok(s) => s.id,
             Err(e) => {
@@ -54,12 +53,12 @@ pub async fn after_reply(
         last_proactive_at: None,
         today_count: 0,
     };
-    follow_up(&assistant, &cand, max).await;
+    follow_up(assistant.as_ref(), &cand, max).await;
 }
 
 /// 循环追加：每轮先问 LLM 要不要续，对方中途说话则不再续。
 /// `max` 只是安全上限，模型按最新语境自行决定何时收住，不该为了凑满而多送。
-async fn follow_up(assistant: &Assistant, cand: &ProactiveCandidate, max: u32) {
+async fn follow_up(assistant: &dyn Host, cand: &ProactiveCandidate, max: u32) {
     // 记录对方当前最后发言时刻：期间只要有新入站消息就停（给对方说话的空间）。
     let snapshot = match candle_reply_at(assistant, cand) {
         Ok(v) => v,
@@ -91,10 +90,10 @@ async fn follow_up(assistant: &Assistant, cand: &ProactiveCandidate, max: u32) {
 
 /// 读取当前候选的最近入站回复时刻（None 表示还没记录）。
 fn candle_reply_at(
-    assistant: &Assistant,
+    assistant: &dyn Host,
     cand: &ProactiveCandidate,
 ) -> crate::error::Result<Option<chrono::DateTime<chrono::Utc>>> {
-    let db = assistant.inner_db();
+    let db = assistant.db();
     crate::db::proactive::last_user_reply_at(&db, &cand.channel, &cand.external_id)
 }
 
@@ -103,12 +102,12 @@ fn candle_reply_at(
 /// `appended` 是本回合已经连续追加过的句数（0 开始），用来告诉模型
 /// "你已经连着说几句了"，避免机械凑数。
 async fn propose_follow_up(
-    assistant: &Assistant,
+    assistant: &dyn Host,
     cand: &ProactiveCandidate,
     appended: u32,
 ) -> Option<String> {
     let recent = {
-        let db = assistant.inner_db();
+        let db = assistant.db();
         crate::proactive::context::recent_history(&db, &cand.session_id, 6)
     };
     if recent.trim().is_empty() {

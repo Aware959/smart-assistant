@@ -128,28 +128,28 @@ fn channel_session_mapping_is_stable_and_resettable() {
 }
 
 #[test]
-fn services_layer_roundtrip() {
-    use smart_assistant::services;
+fn db_view_roundtrip() {
+    use smart_assistant::{db, memory::view};
 
     let db = db::Database::in_memory().unwrap();
 
-    let sid = services::create_session(&db, "svc").unwrap();
-    let sessions = services::list_sessions(&db, 10).unwrap();
+    let sid = db::session::create(&db, "svc").unwrap().id;
+    let sessions = db::session::list(&db, 10).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, sid);
-    assert_eq!(services::list_messages(&db, &sid, 10).unwrap().len(), 0);
+    assert_eq!(db::message::list_by_session(&db, &sid, 10).unwrap().len(), 0);
 
     let d = dim();
     let m = db_memory::Memory::new("小明是产品的负责人".into(), "fact".into(), "core".into(), None, None);
     db_memory::create(&db, &m, &vector(d, 10)).unwrap();
 
-    let memories = services::list_memories(&db, 10).unwrap();
+    let memories = view::list_memories(&db, 10).unwrap();
     assert_eq!(memories.len(), 1);
     assert_eq!(memories[0].id, m.id);
 
-    services::delete_memory(&db, &m.id).unwrap();
-    assert!(services::list_memories(&db, 10).unwrap().is_empty());
+    view::delete_memory(&db, &m.id).unwrap();
+    assert!(view::list_memories(&db, 10).unwrap().is_empty());
 
-    services::delete_session(&db, &sid).unwrap();
-    assert!(services::list_sessions(&db, 10).unwrap().is_empty());
+    db::session::delete(&db, &sid).unwrap();
+    assert!(db::session::list(&db, 10).unwrap().is_empty());
 }

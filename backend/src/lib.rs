@@ -4,9 +4,10 @@
 //!   实现宿主窄端口 [`crate::host::Host`] 供组件注入；
 //! - [`host`]：宿主窄端口（object-safe trait）——组件层只依赖这张"能力契约"；
 //! - [`ffi`]：UniFFI 导出（Android 绑定）；
-//! - 其余模块：`config` 环境配置、`core` 编排内核、`db` SQLite 层、`services`
-//!   服务门面、`memory` 记忆业务、`world` 世界引擎、`proactive` 主动陪伴、
-//!   `channels` 渠道、`llm` 模型调用、`api` HTTP 接口。
+//! - 其余模块：`config` 环境配置、`core` 编排内核、`db` SQLite 层（含
+//!   `conversation`/`session`/`message` 等直读/写方法与端口适配器）、`memory`
+//!   记忆业务（提取/存储 + `view` 直读门面）、`world` 世界引擎、`proactive`
+//!   主动陪伴、`channels` 渠道、`llm` 模型调用、`api` HTTP 接口。
 //!
 //! ## 依赖方向（硬规则，见 `AGENTS.md`「分层与依赖」）
 //!
@@ -19,7 +20,7 @@
 //!
 //! 组件层（`channels` / `proactive` / `world`）**一律只认 `Arc<dyn Host>`**，
 //! 不 import `crate::app::Assistant`；`core` 为纯净内核，依赖方向单向
-//! （`core ⊥ db / llm / services / memory`）。分层校验见 [`scripts::check_layers`]。
+//! （`core ⊥ db / llm / memory`）。分层校验见 [`scripts::check_layers`]。
 
 pub mod app;
 pub mod channels;
@@ -32,14 +33,12 @@ pub mod host;
 pub mod llm;
 pub mod memory;
 pub mod proactive;
-pub mod services;
 pub mod world;
 
 #[cfg(feature = "desktop")]
 pub mod api;
 
 pub use app::Assistant;
-pub use services::{MessageRecord, SessionRecord};
 
 pub use crate::core::types::{ChatInput, ChatOutput, ChatTurn, MemoryHit, MemoryRecord};
 

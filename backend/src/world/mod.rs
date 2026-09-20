@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use crate::core::ports::WorldState;
 use crate::db::Database;
 use crate::error::Result;
+use crate::host::Host;
 
 /// 世界状态适配器：把 [`WorldState`] 端口接到 timeworld / relation 实现上。
 /// 数据库句柄由宿主持有并以 `Arc<Mutex<Database>>` 注入，自身不拥有连接。
@@ -61,9 +62,9 @@ impl WorldState for World {
 #[cfg(any(feature = "telegram", feature = "ilink"))]
 const TICK_SECS: u64 = 60;
 
-/// 世界引擎入口：常驻循环直到进程退出。由宿主进程（server）调用并持有 [`crate::Assistant`]。
+/// 世界引擎入口：常驻循环直到进程退出。由宿主进程（server）调用并持有 `Arc<dyn Host>`。
 #[cfg(any(feature = "telegram", feature = "ilink"))]
-pub async fn run(assistant: std::sync::Arc<crate::Assistant>) {
+pub async fn run(assistant: std::sync::Arc<dyn Host>) {
     tracing::info!("世界引擎已启动（AI 内部状态持续推进）");
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -82,10 +83,10 @@ pub async fn run(assistant: std::sync::Arc<crate::Assistant>) {
 
 /// 单跳推进：快速的状态衰减在前台做，叙事续写交给阻塞线程池。
 #[cfg(any(feature = "telegram", feature = "ilink"))]
-async fn tick(assistant: std::sync::Arc<crate::Assistant>) {
+async fn tick(assistant: std::sync::Arc<dyn Host>) {
     // 1. 情绪：按距上次的经过时间向基线回归。
     {
-        let db = assistant.inner_db();
+        let db = assistant.db();
         if let Err(e) = self_state::tick_mood(&db) {
             tracing::debug!(error = %e, "情绪推进失败");
         }
@@ -93,7 +94,7 @@ async fn tick(assistant: std::sync::Arc<crate::Assistant>) {
 
     // 2. 关系：全部按距上次的经过时间降温。
     {
-        let db = assistant.inner_db();
+        let db = assistant.db();
         if let Err(e) = relation::tick_decay(&db) {
             tracing::debug!(error = %e, "关系降温失败");
         }
@@ -101,13 +102,13 @@ async fn tick(assistant: std::sync::Arc<crate::Assistant>) {
 
     // 3. 叙事：需要时才触发（LLM 阻塞 → spawn_blocking）。
     let go = {
-        let db = assistant.inner_db();
+        let db = assistant.db();
         narrative::should_advance(&db).unwrap_or(false)
     };
     if !go {
         return;
     }
-    match tokio::task::spawn_blocking(move || narrative::advance(&assistant)).await {
+    match tokio::task::spawn_blocking(move || narrative::advance(assistant.as_ref())).await {
         Ok(inner) => {
             if let Err(e) = inner {
                 tracing::warn!(error = %e, "今日叙事推进失败");

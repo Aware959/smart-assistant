@@ -13,8 +13,7 @@ use crate::core::ports::ChatLlm;
 use crate::core::types::{ChatInput, MemoryHit, MemoryRecord};
 use crate::error::Result;
 use crate::host::Host;
-use crate::services;
-use crate::services::{MessageRecord, SessionRecord};
+use crate::memory::view as memory_view;
 
 #[derive(uniffi::Object)]
 pub struct Assistant {
@@ -35,7 +34,7 @@ impl Assistant {
     /// 由宿主持有的数据库句柄装配默认适配器，注入内核。
     fn with_db_arc(db: Arc<Mutex<crate::db::Database>>) -> Result<Self> {
         let inner = crate::core::agent::Agent::with_ports(
-            Arc::new(crate::services::Conversation::new(db.clone())),
+            Arc::new(crate::db::conversation::Conversation::new(db.clone())),
             Arc::new(crate::llm::chat::Llm),
             Arc::new(crate::memory::store::Store::new(db.clone())),
             Arc::new(crate::world::World::new(db.clone())),
@@ -47,12 +46,6 @@ impl Assistant {
     /// 带等待耗时诊断与毒锁自愈（见 [`crate::db::lock_db`]）。
     fn lock_db(&self) -> MutexGuard<'_, crate::db::Database> {
         crate::db::lock_db(&self.db)
-    }
-
-    /// 兼容旧调用点的(crate 内)数据库访问入口，供 channels / proactive / world
-    /// 在完全迁移到 `Host` 窄端口前复用内部连接。与 [`Host::db`] 同一能力。
-    pub(crate) fn inner_db(&self) -> MutexGuard<'_, crate::db::Database> {
-        self.lock_db()
     }
 
     /// 对话主入口（流式）：完整流水线见 [`crate::core::agent::Agent::chat_stream`]。
@@ -82,7 +75,7 @@ impl Assistant {
     /// 语义检索记忆。
     pub fn search_memory(&self, query: &str, limit: u32) -> Result<Vec<MemoryHit>> {
         let db = self.lock_db();
-        services::search_memory(&db, query, limit)
+        memory_view::search_memory(&db, query, limit)
     }
 
     /// 手动添加一条记忆，返回记忆 id。
@@ -93,43 +86,43 @@ impl Assistant {
         message_id: Option<&str>,
     ) -> Result<String> {
         let db = self.lock_db();
-        services::add_memory(&db, content, memory_type, message_id)
+        memory_view::add_memory(&db, content, memory_type, message_id)
     }
 
     /// 列出全部记忆。
     pub fn list_memories(&self, limit: u32) -> Result<Vec<MemoryRecord>> {
         let db = self.lock_db();
-        services::list_memories(&db, limit)
+        memory_view::list_memories(&db, limit)
     }
 
     /// 新建会话，返回会话 id。
     pub fn create_session(&self, title: &str) -> Result<String> {
         let db = self.lock_db();
-        services::create_session(&db, title)
+        crate::db::session::create(&db, title).map(|s| s.id)
     }
 
     /// 列出会话（按最近更新倒序）。
-    pub fn list_sessions(&self, limit: u32) -> Result<Vec<SessionRecord>> {
+    pub fn list_sessions(&self, limit: u32) -> Result<Vec<crate::db::session::Session>> {
         let db = self.lock_db();
-        services::list_sessions(&db, limit)
+        crate::db::session::list(&db, limit as usize)
     }
 
     /// 列出某会话内的消息（时间正序）。
-    pub fn list_messages(&self, session_id: &str, limit: u32) -> Result<Vec<MessageRecord>> {
+    pub fn list_messages(&self, session_id: &str, limit: u32) -> Result<Vec<crate::db::message::Message>> {
         let db = self.lock_db();
-        services::list_messages(&db, session_id, limit)
+        crate::db::message::list_by_session(&db, session_id, limit as usize)
     }
 
     /// 删除会话及其全部消息（记忆保留，来源 message_id 置空）。
     pub fn delete_session(&self, id: &str) -> Result<()> {
         let db = self.lock_db();
-        services::delete_session(&db, id)
+        crate::db::session::delete(&db, id)
     }
 
     /// 删除一条记忆。
     pub fn delete_memory(&self, id: &str) -> Result<()> {
         let db = self.lock_db();
-        services::delete_memory(&db, id)
+        memory_view::delete_memory(&db, id)
     }
 }
 

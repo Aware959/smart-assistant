@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::host::Host;
-use crate::{Assistant, ChatInput, ChatOutput};
+use crate::{ChatInput, ChatOutput};
 
 const CHANNEL: &str = "telegram";
 /// Telegram 单条消息文本上限（字符）。
@@ -214,7 +214,7 @@ async fn handle_text(
 
 /// 长轮询入口。token 为空时直接返回，由 server 入口决定是否调用。
 /// 异常退出后自动重连（启动期网络抖动不再导致永久掉线）。
-pub async fn run(assistant: Arc<Assistant>) {
+pub async fn run(assistant: Arc<dyn Host>) {
     let token = Config::get().telegram_bot_token.trim().to_string();
     if token.is_empty() {
         return;
@@ -230,7 +230,7 @@ pub async fn run(assistant: Arc<Assistant>) {
     }
 }
 
-async fn run_loop(assistant: Arc<Assistant>, token: &str) -> Result<(), String> {
+async fn run_loop(assistant: Arc<dyn Host>, token: &str) -> Result<(), String> {
     let client = build_client()?;
     let base = api_base(token);
 

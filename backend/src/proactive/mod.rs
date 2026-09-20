@@ -17,13 +17,12 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::host::Host;
-use crate::Assistant;
 
 /// 每轮最多尝试决策的候选数（其余留到后续轮次）。
 const MAX_CANDIDATES_PER_CYCLE: usize = 5;
 
 /// 主动引擎入口：随机间隔循环直到进程退出。
-pub async fn run(assistant: Arc<Assistant>) {
+pub async fn run(assistant: Arc<dyn Host>) {
     if !Config::get().proactive_enabled {
         tracing::info!("主动陪伴未启用（设置 PROACTIVE_ENABLED=1 开启）");
         return;
@@ -33,12 +32,12 @@ pub async fn run(assistant: Arc<Assistant>) {
         let idle = scheduler::next_sleep();
         tracing::debug!(next_in_secs = idle.as_secs(), "等待下一轮主动评估");
         tokio::time::sleep(idle).await;
-        run_once(&assistant).await;
+        run_once(assistant.as_ref()).await;
     }
 }
 
 /// 单轮评估：筛出可推送的候选，逐个询问 LLM 是否开口，至多发出一条。
-async fn run_once(assistant: &Assistant) {
+async fn run_once(assistant: &dyn Host) {
     let round_start = std::time::Instant::now();
     // 竞态兜底：等待期间可能恰好跨入安静时段。
     if scheduler::in_quiet_hours(chrono::Local::now()) {
@@ -47,7 +46,7 @@ async fn run_once(assistant: &Assistant) {
     }
 
     let candidates = {
-        let db = assistant.inner_db();
+        let db = assistant.db();
         crate::db::proactive::eligible_candidates(&db, chrono::Utc::now())
     };
     let candidates = match candidates {
@@ -78,13 +77,13 @@ async fn run_once(assistant: &Assistant) {
 }
 
 /// 先组装上下文，再问 LLM 要不要开口；返回待发送的内容（不开口则为 None）。
-async fn propose(assistant: &Assistant, cand: &crate::db::proactive::ProactiveCandidate) -> Option<String> {
+async fn propose(assistant: &dyn Host, cand: &crate::db::proactive::ProactiveCandidate) -> Option<String> {
     let step_start = std::time::Instant::now();
     // 每个 DB 读取独立短作用域，守卫用完即释放。
-    // 切勿在持 `inner_db()` 守卫期间再调 `world_snapshot_text`（它内部会再次
+    // 切勿在持 `Host::db()` 守卫期间再调 `world_snapshot_text`（它内部会再次
     // 锁同一把非重入的 std Mutex，Proactive 引擎整个挂死，进而拖垮全进程）。
     let recent = {
-        let db = assistant.inner_db();
+        let db = assistant.db();
         context::recent_history(&db, &cand.session_id, 8)
     };
     let rec = {
@@ -92,7 +91,7 @@ async fn propose(assistant: &Assistant, cand: &crate::db::proactive::ProactiveCa
         if query.trim().is_empty() {
             String::new()
         } else {
-            let db = assistant.inner_db();
+            let db = assistant.db();
             context::recall(&db, &query)
         }
     };

@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::host::Host;
-use crate::{Assistant, ChatInput, ChatOutput};
+use crate::{ChatInput, ChatOutput};
 
 const CHANNEL: &str = "ilink";
 pub(crate) const DEFAULT_BASE: &str = "https://ilinkai.weixin.qq.com";
@@ -71,7 +71,7 @@ fn plain_reply(reply: &str) -> ChatOutput {
 ///
 /// 只负责产出回复；记忆沉淀由调用方在回复送达之后另起后台任务（见 `run_loop`）。
 async fn handle_text(
-    assistant: Arc<Assistant>,
+    assistant: Arc<dyn Host>,
     from_user_id: String,
     text: String,
     user_time: Option<String>,
@@ -100,7 +100,7 @@ async fn handle_text(
                     user_time,
                 };
                 assistant
-                    .chat_stream(&input, |_| {})
+                    .chat_stream(&input, &mut |_| {})
                     .map_err(|e| e.to_string())
             })
             .await
@@ -119,7 +119,7 @@ enum PollResult {
 }
 
 async fn run_loop(
-    assistant: Arc<Assistant>,
+    assistant: Arc<dyn Host>,
     client: &reqwest::Client,
     sess: &SavedSession,
 ) -> Result<PollResult, String> {
@@ -270,7 +270,7 @@ async fn run_loop(
 
 /// iLink 通道入口：仅在 `ILINK_ENABLED=1` 时启动（有 token 直连，无 token 扫码登录）。
 /// 需外显关闭时设 `ILINK_ENABLED=0`，即使已有会话文件也不会再连接。
-pub async fn run(assistant: Arc<Assistant>) {
+pub async fn run(assistant: Arc<dyn Host>) {
     let cfg = Config::get();
     if !cfg.ilink_enabled {
         tracing::info!("iLink 通道未启用（设置 ILINK_ENABLED=1 开启）");

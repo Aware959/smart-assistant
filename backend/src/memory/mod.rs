@@ -5,3 +5,5 @@
 
 pub mod extraction;
 pub mod store;
+/// 直读/写库门面（web / 管理端等外部入口）。
+pub mod view;

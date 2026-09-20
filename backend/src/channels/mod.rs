@@ -1,6 +1,6 @@
 //! 外部渠道接入：把第三方平台的消息翻译为内部对话流水线调用。
 //!
-//! 每个渠道只做三件事：收消息 → 调 [`crate::Assistant::chat_stream`] → 回消息。
+//! 每个渠道只做三件事：收消息 → 调 [`crate::host::Host::chat_stream`] → 回消息。
 //! 会话隔离由 [`crate::db::channel`] 负责。
 //!
 //! 主动推送：各渠道的 run 循环把"当前可推状态"写入 [`shared_push`]，由

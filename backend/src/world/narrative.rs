@@ -10,6 +10,7 @@ use chrono::{Local, Timelike, Utc};
 
 use crate::db::Database;
 use crate::error::Result;
+use crate::host::Host;
 
 #[cfg(any(feature = "telegram", feature = "ilink"))]
 use crate::llm;
@@ -41,14 +42,14 @@ pub fn should_advance(db: &Database) -> Result<bool> {
 /// LLM 续写今日叙事并落库（阻塞调用，调用方应放入阻塞线程池）。
 /// LLM 失败时仍会推进"已尝试"（更新 last_phase），避免同阶段内反复重试。
 #[cfg(any(feature = "telegram", feature = "ilink"))]
-pub fn advance(assistant: &crate::Assistant) -> Result<()> {
+pub fn advance(assistant: &dyn Host) -> Result<()> {
     let now = Utc::now();
     let local = now.with_timezone(&Local);
     let today = local.date_naive().to_string();
     let phase = crate::world::timeworld::phase_label(crate::world::timeworld::phase_of(local.hour())).to_string();
 
     let (mut st, persona) = {
-        let db = assistant.inner_db();
+        let db = assistant.db();
         (crate::world::self_state::load(&db)?, crate::config::Config::get().persona.clone())
     };
 
@@ -118,7 +119,7 @@ pub fn advance(assistant: &crate::Assistant) -> Result<()> {
     st.last_phase = Some(phase);
     st.updated_at = Some(now);
 
-    let db = assistant.inner_db();
+    let db = assistant.db();
     crate::world::self_state::save(&db, &st)
 }
 

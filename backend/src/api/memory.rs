@@ -45,7 +45,7 @@ pub struct CreateSessionRequest {
 async fn create_session(
     State(state): State<Arc<Assistant>>,
     Json(req): Json<CreateSessionRequest>,
-) -> Result<(StatusCode, Json<crate::SessionRecord>), (StatusCode, String)> {
+) -> Result<(StatusCode, Json<crate::db::session::Session>), (StatusCode, String)> {
     let id = state
         .create_session(&req.title)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -59,7 +59,7 @@ async fn create_session(
 
 async fn list_sessions(
     State(state): State<Arc<Assistant>>,
-) -> Result<Json<Vec<crate::SessionRecord>>, (StatusCode, String)> {
+) -> Result<Json<Vec<crate::db::session::Session>>, (StatusCode, String)> {
     let sessions = state
         .list_sessions(100)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -79,7 +79,7 @@ async fn delete_session(
 async fn list_messages(
     State(state): State<Arc<Assistant>>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<crate::MessageRecord>>, (StatusCode, String)> {
+) -> Result<Json<Vec<crate::db::message::Message>>, (StatusCode, String)> {
     let messages = state
         .list_messages(&id, 500)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

@@ -23,10 +23,9 @@
 
 - `backend/src/lib.rs`：应用外壳（`Assistant` 薄委托 + 持有 db 句柄装配能力层）+ 输入输出类型 + UniFFI 导出
 - `backend/src/core/`：编排内核（`agent.rs` 单轮对话/记忆提取沉淀流水线；`ports.rs` 能力端口契约；`prompt.rs` 时间线提示词组装；`types.rs` 可移植值类型）。内核不依赖 db，只面向端口编程，由宿主注入适配器，可独立单测
-- `backend/src/services/`：服务层（会话/消息/记忆管理 + `Conversation` 适配器实现 `ConversationStore` 端口 + FFI 可序列化视图记录）
-- `backend/src/db/`：SQLite 层（rusqlite + sqlite-vec 向量检索）
+- `backend/src/db/`：SQLite 层（rusqlite + sqlite-vec 向量检索 + 会话/消息直接读写 + `conversation.rs` 实现 `ConversationStore` 端口适配器）。会话/消息等"直读库方法"就地实现，不再有中心化 services 层
 - `backend/src/llm/`：模型调用层（`chat.rs` 对话 + `embedding.rs` 文本向量化 + `genai_client.rs` 共享 Client/全局 runtime，genai 阻塞 API）
-- `backend/src/memory/`：记忆业务层（提取 / 存储 / 召回）
+- `backend/src/memory/`：记忆业务层（提取 / 存储 / 召回 + `view.rs` 直读/写门面供 web/管理端入口调用）
 - `backend/src/proactive/`：主动陪伴（调度 / 开口决策 / 推送 / 每轮延续判断）
 - `backend/src/channels/`：Telegram / iLink 接入（`PushChannels` 注册表）
 - `frontend/`：Vite + React（SSE 流式对话，构建后由后端同源托管）
