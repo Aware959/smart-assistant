@@ -112,6 +112,7 @@ async fn run_once(
 
 /// 先组装上下文，再问 LLM 要不要开口；返回待发送的内容（不开口则为 None）。
 async fn propose(chat: &Agent, cand: &IntentCandidate) -> Option<String> {
+    let trace_id = crate::utils::trace::new_id();
     let step_start = std::time::Instant::now();
     // 上下文片段统一经主线 Agent 方法获取（组装逻辑在 core::context，内部各自持锁、用完即释放）。
     // 切勿在持锁守卫期间调用这些方法——它们会再锁同一把非重入的
@@ -132,6 +133,16 @@ async fn propose(chat: &Agent, cand: &IntentCandidate) -> Option<String> {
         rec_chars = rec.chars().count(),
         "意图判定：上下文组装完成（recent/recall）"
     );
+    tracing::info!(
+        target: "trace",
+        stage = "intent_context",
+        trace_id = %trace_id,
+        user = %cand.external_id,
+        session_id = %cand.session_id,
+        recent = %crate::utils::trace::Text(&recent),
+        recalled = %crate::utils::trace::Text(&rec),
+        "意图判定：上下文组装完成"
+    );
 
     // LLM 调用是同步阻塞的（genai 全局 runtime），挪到阻塞线程池避免卡住异步任务。
     let llm = chat.chat_llm();
@@ -139,6 +150,17 @@ async fn propose(chat: &Agent, cand: &IntentCandidate) -> Option<String> {
         tokio::task::spawn_blocking(move || speak::decide(&llm, &recent, &rec))
             .await
             .unwrap_or_default();
+
+    tracing::info!(
+        target: "trace",
+        stage = "intent_decision",
+        trace_id = %trace_id,
+        user = %cand.external_id,
+        speak = decision.speak,
+        reason = decision.reason.as_deref().unwrap_or(""),
+        message = %crate::utils::trace::Text(decision.message.as_deref().unwrap_or("")),
+        "意图判定：决策完成"
+    );
 
     if !decision.speak {
         if let Some(reason) = &decision.reason {

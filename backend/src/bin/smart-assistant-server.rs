@@ -7,6 +7,9 @@ use axum::Router;
 use smart_assistant::api;
 use smart_assistant::config::Config;
 use smart_assistant::App;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 /// 双写日志 writer：stdout（控制台）+ 可选文件（`SMART_ASSISTANT_LOG_FILE`）。
 /// 只被 tracing 的 writer 线程使用，写失败一律忽略，绝不让日志影响业务。
@@ -34,6 +37,16 @@ impl std::io::Write for TeeWriter {
         }
         Ok(())
     }
+}
+
+/// 以追加方式打开日志文件，必要时先创建父目录（如 `logs/trace.jsonl` 的 `logs/`）。
+fn open_append(path: &str) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(path)
 }
 
 /// 脱敏 API key：只保留首尾四位，空值显示为 <not set>。
@@ -114,21 +127,55 @@ async fn main() {
         std::env::var("SMART_ASSISTANT_LOG_FILE").ok().filter(|f| !f.is_empty());
     let mut tee = TeeWriter { file: None };
     if let Some(path) = file_mirror {
-        if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            tee.file = Some(std::sync::Mutex::new(f));
+        match open_append(&path) {
+            Ok(f) => tee.file = Some(std::sync::Mutex::new(f)),
+            Err(e) => eprintln!("[log] 打开日志文件失败，仅输出 stdout: {path} ({e})"),
         }
     }
     let (non_blocking, _guard) = tracing_appender::non_blocking(tee);
 
-    tracing_subscriber::fmt()
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        // qwen3 等思考型模型流式时先吐 reasoning 空增量，genai 会逐个打 WARN：
+        // 压到 error 级，避免噪音（RUST_LOG 手动设置时仍由环境变量说了算）。
+        .unwrap_or_else(|_| "info,genai::adapter::adapters::openai::streamer=error".into());
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // qwen3 等思考型模型流式时先吐 reasoning 空增量，genai 会逐个打 WARN：
-                // 压到 error 级，避免噪音（RUST_LOG 手动设置时仍由环境变量说了算）。
-                .unwrap_or_else(|_| "info,genai::adapter::adapters::openai::streamer=error".into()),
-        )
+        .with_filter(env_filter);
+
+    // 可选：链路追踪 JSON 落盘（`SMART_ASSISTANT_TRACE_FILE`）。只收 `target="trace"`
+    // 的事件，一行一 JSON，按 trace_id / session_id 过滤即可回放一次请求的全过程。
+    let trace_sink = std::env::var("SMART_ASSISTANT_TRACE_FILE")
+        .ok()
+        .filter(|f| !f.is_empty())
+        .and_then(|path| match open_append(&path) {
+            Ok(f) => {
+                let (writer, guard) = tracing_appender::non_blocking(f);
+                Some((writer, guard, path))
+            }
+            Err(e) => {
+                eprintln!("[trace] 打开追踪日志文件失败，仅输出常规日志: {path} ({e})");
+                None
+            }
+        });
+    let trace_layer = trace_sink.as_ref().map(|(writer, _, _)| {
+        tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(writer.clone())
+            .with_filter(
+                tracing_subscriber::filter::Targets::new()
+                    .with_target("trace", tracing::Level::TRACE),
+            )
+    });
+
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(trace_layer)
         .init();
+    // 追踪 writer 的 WorkerGuard：必须在整个进程存活期间持有，否则缓冲日志会丢失。
+    let _trace_guard = trace_sink.map(|(_, guard, path)| {
+        tracing::info!(path = %path, "链路追踪日志已启用（target=trace，JSON 行）");
+        guard
+    });
 
     // 诊断心跳：SMART_ASSISTANT_WATCHDOG_FILE 指定时，用一个独立 OS 线程每 5 秒
     // 直接落一行（绕开 tracing）。同时一个 tokio 任务每秒更新计数器；探针据此

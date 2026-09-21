@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::core::context::{self, AgentContext};
-use crate::core::memory::{MemoryRecord, Store};
+use crate::core::memory::{MemoryHit, MemoryRecord, Store};
 use crate::core::message::ChatMessage;
 use crate::core::session::Sessions;
 use crate::error::Result;
@@ -95,6 +95,12 @@ impl Agent {
     where
         F: FnMut(&str) + Send,
     {
+        // 追踪：一次调用 = 一个 trace_id span，本函数内所有 target="trace" 的事件
+        // 都会带上 trace_id / session_id，便于把"一次请求的各环节"归成一组。
+        let span = crate::utils::trace::turn_span();
+        let _enter = span.enter();
+        let turn_started = std::time::Instant::now();
+
         // 空消息不入库、不检索，直接返回。
         if input.message.trim().is_empty() {
             return Ok(ChatOutput {
@@ -113,6 +119,15 @@ impl Agent {
             let title: String = input.message.chars().take(24).collect();
             self.conversation.set_session_title(&session.id, &title)?;
         }
+        span.record("session_id", session.id.as_str());
+        tracing::info!(
+            target: "trace",
+            stage = "start",
+            history_count = input.history_count,
+            user_time = input.user_time.as_deref().unwrap_or(""),
+            message = %crate::utils::trace::Text(&input.message),
+            "对话开始"
+        );
 
         // 2. 上下文（一）：历史消息。**必须在"本条用户消息入库"之前取**，否则本轮消息
         // 会被算进历史重复出现。默认按"今天"取对话（日界=用户当地 06:00，今日过少自动
@@ -123,6 +138,13 @@ impl Agent {
             &session.id,
             input.history_count,
         )?;
+        tracing::info!(
+            target: "trace",
+            stage = "history",
+            turns = history_turns.len(),
+            history = %crate::utils::trace::Lazy(|| render_messages(&history_turns)),
+            "历史消息已取"
+        );
 
         // 用户消息入库（记录）。带通道报文时间戳时用之（消息记录精确时间线），否则记接收时刻。
         let user_message = match input.user_time.as_deref().and_then(parse_rfc3339) {
@@ -155,6 +177,13 @@ impl Agent {
             memory_ms,
             "对话阶段：记忆向量召回完成"
         );
+        tracing::info!(
+            target: "trace",
+            stage = "recall",
+            hits = memory_hits.len(),
+            recalled = %crate::utils::trace::Lazy(|| render_hits(&memory_hits)),
+            "记忆召回完成"
+        );
 
         // 4. 上下文（二）：召回记忆拼入提示词。本条消息连同历史一起入 messages。
         let ctx = AgentContext {
@@ -177,15 +206,39 @@ impl Agent {
             role: "user".to_string(),
             content: input.message.clone(),
         });
+        tracing::info!(
+            target: "trace",
+            stage = "prompt",
+            n = messages.len(),
+            system = %crate::utils::trace::Text(&messages[0].content),
+            messages = %crate::utils::trace::Lazy(|| render_messages(&messages)),
+            "提示词与消息已组装"
+        );
 
         let llm_phase = std::time::Instant::now();
         let reply = self.llm.complete_stream(&messages, &mut on_delta)?;
         let llm_ms = llm_phase.elapsed().as_millis() as u64;
         tracing::info!(session = %session.id, llm_ms, "对话阶段：LLM 回复完成");
+        tracing::info!(
+            target: "trace",
+            stage = "reply",
+            llm_ms,
+            reply = %crate::utils::trace::Text(&reply),
+            "模型回复完成"
+        );
 
         // 3. AI 回复入库，刷新会话时间戳。
         self.conversation.add_message(&session.id, "assistant", &reply)?;
         self.conversation.touch_session(&session.id)?;
+
+        span.record("user_message_id", user_message.id.as_str());
+        tracing::info!(
+            target: "trace",
+            stage = "done",
+            user_message_id = %user_message.id,
+            total_ms = turn_started.elapsed().as_millis() as u64,
+            "对话完成"
+        );
 
         Ok(ChatOutput {
             session_id: session.id,
@@ -210,7 +263,15 @@ impl Agent {
         user_message_id: &str,
         text: &str,
     ) -> Option<MemoryRecord> {
+        let span = crate::utils::trace::settle_span(session_id, user_message_id);
+        let _enter = span.enter();
         tracing::info!(session_id, "记忆沉淀：判定阶段开始");
+        tracing::info!(
+            target: "trace",
+            stage = "extract_start",
+            text = %crate::utils::trace::Text(text),
+            "记忆沉淀：判定开始"
+        );
         let extraction = match self.memory.extract(text) {
             Ok(extraction) => extraction,
             Err(e) => {
@@ -224,6 +285,16 @@ impl Agent {
             memory_type = %extraction.memory_type,
             tier = %extraction.tier,
             "记忆沉淀：判定完成"
+        );
+        tracing::info!(
+            target: "trace",
+            stage = "extract_done",
+            is_memory = extraction.is_memory,
+            memory_type = %extraction.memory_type,
+            tier = %extraction.tier,
+            relation = %extraction.relation,
+            content = %crate::utils::trace::Text(extraction.content.as_deref().unwrap_or("")),
+            "记忆判定完成"
         );
 
         if !extraction.is_memory {
@@ -244,6 +315,13 @@ impl Agent {
                     store_ms = store_started.elapsed().as_millis() as u64,
                     "记忆沉淀：落库完成"
                 );
+                tracing::info!(
+                    target: "trace",
+                    stage = "store_done",
+                    memory_id = %record.id,
+                    content = %crate::utils::trace::Text(&record.content),
+                    "记忆落库完成"
+                );
                 Some(record)
             }
             Err(e) => {
@@ -259,4 +337,21 @@ fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.with_timezone(&chrono::Utc))
+}
+
+/// 把消息列表渲染成 `role: content` 多行文本（追踪日志用，仅在开启全文时构建）。
+fn render_messages(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .map(|m| format!("{}: {}", m.role, m.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 把召回记忆渲染成 `[score] id | content` 多行文本（追踪日志用）。
+fn render_hits(hits: &[MemoryHit]) -> String {
+    hits.iter()
+        .map(|h| format!("[{:.3}] {} | {}", h.score, h.id, h.content))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

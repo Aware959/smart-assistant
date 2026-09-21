@@ -56,7 +56,7 @@ anyhow = "1"
 
 # 日志
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
 tracing-appender = { version = "0.2", optional = true }
 
 # 时间

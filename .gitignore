@@ -17,6 +17,7 @@
 
 # 微信 iLink 扫码凭证（ Bearer token，密钥）
 /backend/ilink_session.json
+/backend/logs
 
 # 编辑器
 .vscode/

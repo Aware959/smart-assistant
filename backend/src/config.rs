@@ -96,6 +96,9 @@ pub struct Config {
     /// 每轮回复后最多连续追加的语句数：话题有延展性时 AI 会像真人一样接着说
     /// （倾诉/吐槽/讨论进行中）；设为 0 关闭该能力。
     pub intent_max_followups: u32,
+    /// 追踪日志是否记录内容全文（召回记忆 / 提示词 / 回复 / 判定原文）。
+    /// 缺省只记摘要（条数 / 字符数），避免默认把内容大量落盘。
+    pub trace_content: bool,
 }
 
 impl Default for Config {
@@ -137,6 +140,7 @@ impl Default for Config {
             intent_min_silence_hours: 2,
             intent_max_idle_days: 7,
             intent_max_followups: 3,
+            trace_content: false,
         }
     }
 }
@@ -250,6 +254,9 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),
+            trace_content: std::env::var("TRACE_CONTENT")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         }
     }
 
