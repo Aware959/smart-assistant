@@ -1,10 +1,10 @@
 //! 外部渠道接入：把第三方平台的消息翻译为内部对话流水线调用。
 //!
-//! 每个渠道只做三件事：收消息 → 调 [`crate::host::Host::chat_stream`] → 回消息。
-//! 会话隔离由 [`crate::db::channel`] 负责。
+//! 每个渠道只做三件事：收消息 → 调主线聊天服务（[`crate::core::agent::Agent::chat_stream`]）→ 回消息。
+//! 会话隔离由会话服务（[`crate::core::session::Sessions`]）的 `resolve` / `reset` 负责。
 //!
-//! 主动推送：各渠道的 run 循环把"当前可推状态"写入 [`shared_push`]，由
-//! [`crate::proactive`] 引擎只读查询后调用对应通道的 `push_send`。
+//! 主动推送：各渠道的 run 循环把"当前可推状态"写入 [`shared_push`]，主动引擎
+//! 经 [`ChannelsPusher`]（主动外发的具体实现）只读查询后派发文本。
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -25,7 +25,7 @@ pub(crate) const ILINK_MAX_SENDS_PER_REFRESH: usize = 10;
 /// 停滞拖住整条长轮询；这里的 deadline 保证任何情况下轮询都能在有限时间内恢复。
 pub(crate) const AI_DEADLINE_SECS: u64 = 240;
 
-/// 全局推送状态注册表：由各通道 relay 维护，proactive 引擎只读。
+/// 全局推送状态注册表：由各通道 relay 维护，intent 引擎只读。
 #[derive(Default)]
 pub struct PushChannels {
     /// Telegram 长轮询已连通（token 有效）时置位，之后即可随时主动推。
@@ -81,6 +81,83 @@ pub(crate) fn ts_to_rfc3339(ts: Option<i64>) -> Option<String> {
     let ts = ts?;
     let secs = if ts > 1_000_000_000_000 { ts / 1000 } else { ts };
     chrono::DateTime::from_timestamp(secs, 0).map(|t| t.to_rfc3339())
+}
+
+/// 主动外发的具体实现：转译到具体通道派发。
+///
+/// 无状态、只读 [`shared_push`] 全局注册表与配置；由 bin 接线时注入主动引擎，
+/// 延续会话则直接由各 relay 构造零成本实例传入。
+#[derive(Default)]
+pub struct ChannelsPusher;
+
+impl ChannelsPusher {
+    /// 该通道当前是否具备外发条件（电报已连通 / iLink token 仍在新鲜窗口）。
+    pub fn pushable(&self, channel: &str, external_id: &str) -> bool {
+        match channel {
+            "telegram" => {
+                if crate::config::Config::get()
+                    .telegram_bot_token
+                    .trim()
+                    .is_empty()
+                {
+                    return false;
+                }
+                shared_push()
+                    .telegram_ready
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            }
+            #[cfg(feature = "ilink")]
+            "ilink" => ilink_has_fresh_token(external_id),
+            #[cfg(not(feature = "ilink"))]
+            "ilink" => false,
+            other => {
+                tracing::warn!(channel = other, "未知通道，无法主动推送");
+                false
+            }
+        }
+    }
+
+    /// 外发一条文本消息（异步派发，内部处理各通道协议）。
+    pub async fn push(
+        &self,
+        channel: String,
+        external_id: String,
+        text: String,
+    ) -> std::result::Result<(), String> {
+        #[cfg(feature = "telegram")]
+        if channel == "telegram" {
+            let chat_id = external_id
+                .parse::<i64>()
+                .map_err(|_| "telegram 外部 id 非数字".to_string())?;
+            return telegram::push_send(chat_id, &text).await;
+        }
+        #[cfg(not(feature = "telegram"))]
+        if channel == "telegram" {
+            tracing::warn!("telegram 通道未启用");
+            return Err("telegram 通道未启用".to_string());
+        }
+        #[cfg(feature = "ilink")]
+        if channel == "ilink" {
+            return ilink::push_send(&external_id, &text).await;
+        }
+        #[cfg(not(feature = "ilink"))]
+        if channel == "ilink" {
+            tracing::warn!("ilink 通道未启用");
+            return Err("ilink 通道未启用".to_string());
+        }
+        tracing::warn!(channel = channel, "暂不支持主动推送的通道");
+        Err(format!("未知通道 {channel}"))
+    }
+}
+
+#[cfg(feature = "ilink")]
+fn ilink_has_fresh_token(external_id: &str) -> bool {
+    let cfg = crate::config::Config::get();
+    let reg = shared_push().ilink.lock().unwrap_or_else(|p| p.into_inner());
+    reg.as_ref()
+        .and_then(|r| r.contacts.get(external_id))
+        .map(|c| c.is_fresh(chrono::Utc::now(), cfg.ilink_context_max_age_hours))
+        .unwrap_or(false)
 }
 
 /// 把长文本按字符上限切分为多段（优先在换行处断开，中文按字符计数）。

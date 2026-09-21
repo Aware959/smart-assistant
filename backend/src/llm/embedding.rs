@@ -1,19 +1,9 @@
-//! 文本向量化适配器：把 [`Embedder`] 端口接到 genai 的 embedding Client 上。
+//! 文本向量化：经 genai embedding Client 调用外部能力，供 `core::memory` 使用。
 
 use crate::config::Config;
-use crate::core::ports::Embedder;
 use crate::error::{Result, SqlError};
 
 use super::genai_client;
-
-/// 无状态的向量化适配器：把 [`Embedder`] 端口接到本模块实现函数上。
-pub struct Embed;
-
-impl Embedder for Embed {
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        embed_text(text)
-    }
-}
 
 /// 对一段文本进行向量化。
 pub fn embed_text(text: &str) -> Result<Vec<f32>> {

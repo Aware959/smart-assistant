@@ -1,6 +1,6 @@
 //! `relations` 表（按用户的亲密度 × 信任度）的持久化。
 //!
-//! 事件升温 / 衰减等业务逻辑在 [`crate::world::relation`]，本模块只负责行存取。
+//! 事件升温 / 衰减等业务逻辑在 [`crate::core::memory::current_relation`]，本模块只负责行存取。
 
 use chrono::{DateTime, Utc};
 use rusqlite::params;

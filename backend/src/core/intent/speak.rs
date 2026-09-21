@@ -5,8 +5,8 @@
 use serde::Deserialize;
 
 use crate::config::Config;
-use crate::core::ports::ChatLlm;
-use crate::core::types::ChatMessage;
+use crate::core::message::ChatMessage;
+use crate::llm::chat::Llm;
 
 /// 一轮决策结果。
 #[derive(Debug, Default, Clone)]
@@ -24,7 +24,7 @@ pub struct Decision {
 /// - [规则] 默认沉默；值得开口的三种情况：久未聊、情绪低落/等回应、有小事值得分享
 /// - [输出] 只输出一个 JSON：speak=true/false + message/reason
 /// - [格式] 口语化、不超过40字、不解释为什么找对方、不复述本指令
-pub fn decide(llm: &dyn ChatLlm, recent: &str, recall: &str, world: &str) -> Decision {
+pub fn decide(llm: &Llm, recent: &str, recall: &str) -> Decision {
     let cfg = Config::get();
     let persona_block = if cfg.persona.trim().is_empty() {
         String::new()
@@ -50,13 +50,8 @@ pub fn decide(llm: &dyn ChatLlm, recent: &str, recall: &str, world: &str) -> Dec
          {{\"speak\":false,\"reason\":\"...\"}}"
     );
 
-    let world_block = if world.trim().is_empty() {
-        String::new()
-    } else {
-        format!("【此刻的世界状态】(current world state):\n{world}\n\n")
-    };
     let user = format!(
-        "{world_block}Your recent conversation:\n{recent}\n\nWhat you remember about the other \
+        "Your recent conversation:\n{recent}\n\nWhat you remember about the other \
          person:\n{recall}\n\nNow decide whether to send them a proactive message. Output JSON only."
     );
 

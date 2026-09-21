@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use smart_assistant::config::Config;
 use smart_assistant::db;
-use smart_assistant::memory;
+use smart_assistant::core::memory;
 
 fn banner(title: &str) {
     println!("\n===== smart-assistant-memory: {title} =====");
@@ -64,7 +64,7 @@ fn cmd_rebuild(cfg: &Config, force: bool) -> Result<(), String> {
     }
 
     println!("  开始按 memories.content 重新向量化...\n");
-    let done = memory::store::rebuild_all(&db).map_err(|e| e.to_string())?;
+    let done = memory::rebuild_all(&db).map_err(|e| e.to_string())?;
 
     let after = db.vec_status().map_err(|e| e.to_string())?;
     println!("  重建完成：成功写入 {done} 条向量。");
@@ -80,7 +80,7 @@ fn main() -> ExitCode {
     let cfg = Config::get();
 
     match args.first().map(String::as_str) {
-        Some("check") => match cmd_check(&cfg) {
+        Some("check") => match cmd_check(cfg) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("错误: {e}");
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
         },
         Some("rebuild") => {
             let force = args.iter().any(|a| a == "--force");
-            match cmd_rebuild(&cfg, force) {
+            match cmd_rebuild(cfg, force) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("错误: {e}");

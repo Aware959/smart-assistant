@@ -10,9 +10,10 @@
 //! 对外只暴露 [`MemoryExtraction`] 一种类型；模型输出一律当作**不可信输入**宽容解析。
 
 use crate::config::Config;
+use crate::core::memory::current_relation::RelationEvent;
+use crate::core::message::ChatMessage;
 use crate::error::{Result, SqlError};
-use crate::llm::chat::{self, ChatMessage};
-use crate::world::relation::RelationEvent;
+use crate::llm::chat;
 
 /// LLM 对单条用户消息的记忆判定结果（判定标签 + 事实化内容）。
 #[derive(Debug, Clone)]

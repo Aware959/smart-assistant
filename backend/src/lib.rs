@@ -1,51 +1,33 @@
 //! Smart Assistant 应用外壳 crate 根。
 //!
-//! - [`app::Assistant`]：组合根（持有 `Arc<Mutex<Database>>` + 编排内核），
-//!   实现宿主窄端口 [`crate::host::Host`] 供组件注入；
-//! - [`host`]：宿主窄端口（object-safe trait）——组件层只依赖这张"能力契约"；
-//! - [`ffi`]：UniFFI 导出（Android 绑定）；
-//! - 其余模块：`config` 环境配置、`core` 编排内核、`db` SQLite 层（含
-//!   `conversation`/`session`/`message` 等直读/写方法与端口适配器）、`memory`
-//!   记忆业务（提取/存储 + `view` 直读门面）、`world` 世界引擎、`proactive`
-//!   主动陪伴、`channels` 渠道、`llm` 模型调用、`api` HTTP 接口。
+//! - [`core`]：**应用本体**——判断、编排与领域逻辑都收在这里（对话流水线 /
+//!   会话 / 记忆 / 意图判定 / 意图状态追踪 / [`core::app::App`] 组装层）；
+//! - 留在 core 之外的**外部适配层**：`db` SQLite（纯 SQL，表所有权归 core 内
+//!   对应模块）、`llm` 模型调用（对话 / 向量化）、`channels` / `api` 传输层，
+//!   `config` 环境配置、`error` 共享错误类型。
 //!
-//! ## 依赖方向（硬规则，见 `AGENTS.md`「分层与依赖」）
+//! 依赖方向（硬规则，见 `AGENTS.md`「分层与依赖」）：core 不反向依赖传输层
+//! （`channels` / `api`），唯一例外是主动外发的具体能力 [`channels::ChannelsPusher`]；
+//! 传输层直接持主线聊天服务（[`core::agent::Agent`]）与必要的服务引用走方法调用，
+//! 不碰 db，数据一律经各服务方法读写，db 不出壳。
 //!
-//! ```text
-//!           组合根 Assistant ----实现----> host::Host (窄端口 trait)
-//!                  ▲                              ▲
-//!                  │ 依赖                        │ 依赖
-//!              api / ffi / bin              channels / proactive / world
-//! ```
+//! ## 分层守卫
 //!
-//! 组件层（`channels` / `proactive` / `world`）**一律只认 `Arc<dyn Host>`**，
-//! 不 import `crate::app::Assistant`；`core` 为纯净内核，依赖方向单向
-//! （`core ⊥ db / llm / memory`）。分层校验见 [`scripts::check_layers`]。
+//! `tests/layer_guard.rs` 把上述规则固化成可执行的测试。
 
-pub mod app;
 pub mod channels;
 pub mod config;
 pub mod core;
 pub mod db;
 pub mod error;
-pub mod ffi;
-pub mod host;
 pub mod llm;
-pub mod memory;
-pub mod proactive;
-pub mod world;
+pub mod utils;
 
 #[cfg(feature = "desktop")]
 pub mod api;
 
-pub use app::Assistant;
-
-pub use crate::core::types::{ChatInput, ChatOutput, ChatTurn, MemoryHit, MemoryRecord};
-
-pub use crate::core::types::{
-    ChatMessage as CoreChatMessage, ChatTurn as CoreChatTurn, MemoryRecord as CoreMemoryRecord,
-};
-
-// UniFFI 脚手架：必须在 crate 根展开（定义 crate::UniFfiTag），
-// 具体导出见 [`ffi`]。
-uniffi::setup_scaffolding!();
+pub use crate::core::agent::{Agent, ChatInput, ChatOutput};
+pub use crate::core::app::App;
+pub use crate::core::intent::IntentCandidate;
+pub use crate::core::memory::{MemoryHit, MemoryRecord};
+pub use crate::core::message::ChatMessage;

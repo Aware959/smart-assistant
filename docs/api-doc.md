@@ -7,17 +7,14 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | /chat/stream | 对话 `{message, session_id?, history_count?}`；`session_id` 缺省自动新建；上下文自动取该会话最近 `history_count` 条历史消息（缺省 6）；回复以 **SSE** 实时推送，格式与 OpenAI `chat.completion.chunk` 兼容 |
-| POST | /sessions | 手动新建会话 |
-| GET  | /sessions | 列出会话（按最近更新倒序） |
-| GET  | /sessions/{id}/messages | 某会话的消息记录 |
-| DELETE | /sessions/{id} | 删除会话及消息（记忆保留） |
-| POST | /memory | 手动添加记忆 `{content, memory_type?, message_id?}`（缺省 fact） |
-| GET  | /memories | 列出记忆 |
-| DELETE | /memory/{id} | 删除记忆 |
-| POST | /search | 语义检索 `{query, limit?}` |
 | GET  | /ws | WebSocket 对话：回复文本逐段实时下发，结束时报完整 `ChatOutput` JSON |
 
-（实体/关系图谱为早期版本遗留，接口已下线或弃用，不再列示。）
+> 会话 / 消息 / 记忆的**管理端点已整体移除**（`/sessions`、`/sessions/{id}/messages`、`/memories`、
+> `/memory`、`/search`）。理由：记忆 / 情景状态是 core 端口的实现，单独对 Web 暴露管理面会让
+> "存储实现"变成公共 API，破坏分层。会话由 `/chat/stream` 首轮自动创建（`session_id` 缺省），
+> 数据只经对话路径读写。
+>
+> （实体/关系图谱为早期版本遗留，接口已下线或弃用，不再列示。）
 
 ## 数据模型
 
@@ -36,7 +33,7 @@
 - 每轮对话自动从数据库取出该会话**最近的历史消息**拼入提示词（含历史的 assistant 回复）；
 - 数量由请求参数 `history_count` 控制，`0` 表示不带历史，缺省 `6`；
 - 请求里也可显式传 `history`（`[{role, content}]`）作为补充上下文，会拼在自动历史之后；
-- 与当前输入语义相关的记忆（`POST /search` 同一套召回，按 `MEMORY_RECALL_THRESHOLD` 过滤）注入 system 提示词。
+- 与当前输入语义相关的记忆（同一套向量召回，按 `MEMORY_RECALL_THRESHOLD` 过滤）注入 system 提示词。
 
 ## SSE 实时输出（/chat/stream，OpenAI 兼容）
 

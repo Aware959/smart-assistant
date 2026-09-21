@@ -106,6 +106,17 @@ pub fn list_recent(db: &Database, session_id: &str, limit: usize) -> Result<Vec<
     list_range(db, session_id, limit, true)
 }
 
+/// 一次性读出某会话全部消息（按时间正序），供内存运行时启动/首碰水合。
+pub fn list_all(db: &Database, session_id: &str) -> Result<Vec<Message>> {
+    let mut stmt = db.conn().prepare(
+        "SELECT id, session_id, role, content, created_at
+         FROM messages WHERE session_id = ?1
+         ORDER BY created_at ASC, rowid ASC",
+    )?;
+    let rows = stmt.query_map([session_id], map_message_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
 /// 该会话最近一条用户消息的时刻（无用户消息返回 None），用于时间世界模型。
 pub fn latest_user_at(db: &Database, session_id: &str) -> Result<Option<DateTime<Utc>>> {
     let mut stmt = db.conn().prepare(

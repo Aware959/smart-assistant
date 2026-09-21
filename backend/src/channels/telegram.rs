@@ -1,7 +1,7 @@
 //! Telegram Bot 接入（长轮询）。
 //!
 //! - 启动时用 `getMe` 校验 token，并丢弃历史积压 update；
-//! - 每个 chat 映射独立 session（[`crate::db::channel`]），多轮上下文互不串扰；
+//! - 每个 chat 映射独立 session（经 [`crate::core::session::Sessions`] 的会话映射解析），多轮上下文互不串扰；
 //! - 文本超长时按 4096 字符分片发送；
 //! - 代理优先级：`TELEGRAM_PROXY` → `HTTPS_PROXY` → `ALL_PROXY`
 //!   （api.telegram.org 在部分地区不可直连）。
@@ -12,7 +12,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
-use crate::host::Host;
+use crate::core::agent::Agent;
+use crate::core::intent::IntentTracker;
+use crate::core::session::Sessions;
 use crate::{ChatInput, ChatOutput};
 
 const CHANNEL: &str = "telegram";
@@ -144,10 +146,13 @@ pub(crate) async fn push_send(chat_id: i64, text: &str) -> Result<(), String> {
 }
 
 /// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
-fn touch_user_reply(assistant: &dyn Host, external_id: &str) {
-    let db = assistant.db();
-    if let Ok(session) = crate::db::channel::get_or_create_session(&db, CHANNEL, external_id) {
-        let _ = crate::db::proactive::touch_user_reply(&db, CHANNEL, external_id, &session.id);
+/// 先解析会话映射，再写主动状态追踪。
+fn touch_user_reply(session: &Sessions, tracker: &IntentTracker, external_id: &str) {
+    if let Err(e) = (|| {
+        let sid = session.resolve(CHANNEL, external_id)?;
+        tracker.touch_user_reply(CHANNEL, external_id, &sid)
+    })() {
+        tracing::warn!(error = %e, "记录入站状态失败");
     }
 }
 
@@ -165,7 +170,8 @@ fn plain_reply(reply: &str) -> ChatOutput {
 ///
 /// 只负责产出回复；记忆沉淀由调用方在回复送达之后另起后台任务（见 `run_loop`）。
 async fn handle_text(
-    assistant: Arc<dyn Host>,
+    chat: Arc<Agent>,
+    session: Arc<Sessions>,
     chat_id: i64,
     text: &str,
     user_time: Option<String>,
@@ -177,18 +183,15 @@ async fn handle_text(
             "你好，我是你的记忆助手。直接发消息聊天，我会记住值得记住的事；发送 /new 开始一段新的对话。",
         ))),
         "/new" => {
-            let db = assistant.db();
-            crate::db::channel::reset_session(&db, CHANNEL, &external)
+            session
+                .reset(CHANNEL, &external)
                 .map_err(|e| e.to_string())?;
             Ok(Some(plain_reply("已开始新对话，之前的记录保留在记忆库里。")))
         }
         _ => {
-            let session_id = {
-                let db = assistant.db();
-                crate::db::channel::get_or_create_session(&db, CHANNEL, &external)
-                    .map(|s| s.id)
-                    .map_err(|e| e.to_string())?
-            };
+            let session_id = session
+                .resolve(CHANNEL, &external)
+                .map_err(|e| e.to_string())?;
             // 同步的对话流水线要在阻塞线程池里跑（api/chat.rs 同理）。
             let mut out = tokio::task::spawn_blocking(move || {
                 let input = ChatInput {
@@ -198,8 +201,8 @@ async fn handle_text(
                     history_count: None,
                     user_time,
                 };
-                assistant
-                    .chat_stream(&input, &mut |_| {})
+                chat
+                    .chat_stream(&input, |_| {})
                     .map_err(|e| e.to_string())
             })
             .await
@@ -214,13 +217,13 @@ async fn handle_text(
 
 /// 长轮询入口。token 为空时直接返回，由 server 入口决定是否调用。
 /// 异常退出后自动重连（启动期网络抖动不再导致永久掉线）。
-pub async fn run(assistant: Arc<dyn Host>) {
+pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, tracker: Arc<IntentTracker>) {
     let token = Config::get().telegram_bot_token.trim().to_string();
     if token.is_empty() {
         return;
     }
     loop {
-        match run_loop(assistant.clone(), &token).await {
+        match run_loop(chat.clone(), session.clone(), tracker.clone(), &token).await {
             Ok(()) => break, // run_loop 正常情况下永不返回
             Err(e) => {
                 tracing::error!(error = %e, "telegram 轮询异常退出，60s 后重连");
@@ -230,7 +233,12 @@ pub async fn run(assistant: Arc<dyn Host>) {
     }
 }
 
-async fn run_loop(assistant: Arc<dyn Host>, token: &str) -> Result<(), String> {
+async fn run_loop(
+    chat: Arc<Agent>,
+    session: Arc<Sessions>,
+    tracker: Arc<IntentTracker>,
+    token: &str,
+) -> Result<(), String> {
     let client = build_client()?;
     let base = api_base(token);
 
@@ -309,14 +317,14 @@ async fn run_loop(assistant: Arc<dyn Host>, token: &str) -> Result<(), String> {
             let user_time = super::ts_to_rfc3339(message.date);
             tracing::info!(chat_id, "收到消息，开始处理（进入 AI 流水线前）");
 
-            touch_user_reply(assistant.as_ref(), &chat_id.to_string());
+            touch_user_reply(&session, &tracker, &chat_id.to_string());
 
             send_typing(&client, &base, chat_id).await;
             let handle_started = std::time::Instant::now();
 
             let (next_reply, is_fallback, pending_memory) = match tokio::time::timeout(
                 Duration::from_secs(super::AI_DEADLINE_SECS),
-                handle_text(assistant.clone(), chat_id, &text, user_time),
+                handle_text(chat.clone(), session.clone(), chat_id, &text, user_time),
             )
             .await
             {
@@ -352,11 +360,11 @@ async fn run_loop(assistant: Arc<dyn Host>, token: &str) -> Result<(), String> {
                 tracing::info!(chat_id, is_fallback, "回复已发送，进入后置处理");
                 // 回复已送达，再后台补记忆沉淀：判定/事实化要调 LLM，不能占用户等待时间。
                 if let Some((session_id, user_message_id)) = pending_memory {
-                    let assistant = assistant.clone();
+                    let chat = chat.clone();
                     let text = text.clone();
                     tokio::task::spawn_blocking(move || {
                         tracing::debug!(session_id = %session_id, "记忆沉淀(settle_memory)开始");
-                        let _ = assistant.settle_memory(&session_id, &user_message_id, &text);
+                        let _ = chat.settle_memory(&session_id, &user_message_id, &text);
                         tracing::debug!(session_id = %session_id, "记忆沉淀(settle_memory)结束");
                     });
                 }
@@ -366,8 +374,11 @@ async fn run_loop(assistant: Arc<dyn Host>, token: &str) -> Result<(), String> {
                     let cont_started = std::time::Instant::now();
                     let _ = tokio::time::timeout(
                         Duration::from_secs(super::AI_DEADLINE_SECS),
-                        crate::proactive::continuation::after_reply(
-                            assistant.clone(),
+                        crate::core::intent::continuation::after_reply(
+                            chat.clone(),
+                            session.clone(),
+                            tracker.clone(),
+                            &super::ChannelsPusher,
                             CHANNEL,
                             &chat_id.to_string(),
                         ),

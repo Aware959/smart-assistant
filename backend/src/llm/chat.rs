@@ -5,13 +5,12 @@ use genai::chat::{
 };
 
 use crate::config::Config;
-use crate::core::ports::ChatLlm;
 use crate::error::{Result, SqlError};
 use crate::llm::genai_client;
 
 /// 一条发给 LLM 的对话消息（作用域本体默认 system / user / assistant）。
-/// 定义在 [`crate::core::types`]，此处 re-export 保持 `llm::chat::ChatMessage` 兼容。
-pub use crate::core::types::ChatMessage;
+/// 定义在 [`crate::core::message`]，此处 re-export 保持 `llm::chat::ChatMessage` 兼容。
+pub use crate::core::message::ChatMessage;
 
 fn build_chat_request(messages: &[ChatMessage]) -> ChatRequest {
     let mut chat_req = ChatRequest::default();
@@ -140,15 +139,18 @@ where
     })
 }
 
-/// 无状态的 LLM 适配器：把 [`ChatLlm`] 端口接到本模块的实现函数上。
+/// 无状态的 LLM 适配器：把对话 / 结构化输出 / 流式回复接到本模块的实现函数上。
+#[derive(Default)]
 pub struct Llm;
 
-impl ChatLlm for Llm {
-    fn complete(&self, messages: &[ChatMessage]) -> Result<String> {
+impl Llm {
+    /// 非流式对话，返回回复文本。
+    pub fn complete(&self, messages: &[ChatMessage]) -> Result<String> {
         crate::llm::chat::complete(messages)
     }
 
-    fn complete_structured(
+    /// 强制结构化输出（`json_schema` 或 `json_object`，由配置决定）。
+    pub fn complete_structured(
         &self,
         messages: &[ChatMessage],
         model: &str,
@@ -158,7 +160,8 @@ impl ChatLlm for Llm {
         crate::llm::chat::complete_structured(messages, model, name, schema)
     }
 
-    fn complete_stream(
+    /// 流式对话：每个文本增量在生成时同步回调 `on_delta`，返回完整文本。
+    pub fn complete_stream(
         &self,
         messages: &[ChatMessage],
         on_delta: &mut (dyn FnMut(&str) + Send),

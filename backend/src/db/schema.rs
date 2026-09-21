@@ -9,7 +9,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 8;
+pub(crate) const SCHEMA_VERSION: i64 = 9;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -57,12 +57,12 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (channel, external_id)
         );
 
-        CREATE TABLE IF NOT EXISTS proactive_state (
+        CREATE TABLE IF NOT EXISTS intent_state (
             channel            TEXT NOT NULL,
             external_id        TEXT NOT NULL,
             session_id         TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             last_user_reply_at TEXT,
-            last_proactive_at  TEXT,
+            last_intent_at     TEXT,
             today_count        INTEGER NOT NULL DEFAULT 0,
             today_date         TEXT,
             PRIMARY KEY (channel, external_id)
@@ -181,6 +181,21 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if version < 9 {
+        // v9：命名统一 proactive → intent（表名 + 列名）。旧表有数据则整体改名
+        // （SQLite RENAME 保留数据与外键），新库由 init_schema 的 CREATE TABLE 建好。
+        if table_exists(conn, "proactive_state")? {
+            conn.execute_batch(
+                "ALTER TABLE proactive_state RENAME TO intent_state;",
+            )?;
+            if !column_exists(conn, "intent_state", "last_intent_at")? {
+                conn.execute_batch(
+                    "ALTER TABLE intent_state RENAME COLUMN last_proactive_at TO last_intent_at;",
+                )?;
+            }
+        }
+    }
+
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
@@ -193,12 +208,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 /// 给旧表补列（表不存在或列已存在则跳过）。SQLite 的 ALTER 无法加带约束列到
 /// 尚未创建的表，新库的列由 init_schema 的 CREATE TABLE 负责，这里只服务旧库。
 fn add_column_if_missing(conn: &Connection, table: &str, column: &str, def: &str) -> Result<()> {
-    let table_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-        [table],
-        |row| row.get(0),
-    )?;
-    if !table_exists {
+    if !table_exists(conn, table)? {
         return Ok(());
     }
 
@@ -215,6 +225,29 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, def: &str
     ))?;
     tracing::info!("迁移：memories 补列 {column} {def}");
     Ok(())
+}
+
+/// 表是否已存在（sqlite_master）。
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [table],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+/// 表是否存在指定列（PRAGMA table_info）。
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let table_exists = table_exists(conn, table)?;
+    if !table_exists {
+        return Ok(false);
+    }
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(cols.iter().any(|c| c == column))
 }
 
 #[cfg(test)]
@@ -252,5 +285,42 @@ mod tests {
             .query_row("SELECT content FROM memories WHERE id = 'keep'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(content, "不要丢我");
+    }
+
+    /// v9：旧库的 proactive_state 整体改名为 intent_state、列 last_proactive_at 改名
+    /// last_intent_at，业务数据保留。
+    #[test]
+    fn v9_renames_proactive_table_to_intent() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE proactive_state (
+                channel            TEXT NOT NULL,
+                external_id        TEXT NOT NULL,
+                session_id         TEXT NOT NULL,
+                last_user_reply_at TEXT,
+                last_proactive_at  TEXT,
+                today_count        INTEGER NOT NULL DEFAULT 0,
+                today_date         TEXT,
+                PRIMARY KEY (channel, external_id)
+            );
+            INSERT INTO proactive_state (channel, external_id, session_id, last_proactive_at)
+            VALUES ('telegram', '100', 's1', '2026-01-01T00:00:00Z');
+            INSERT INTO meta (key, value) VALUES ('schema_version', '8');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(!table_exists(&conn, "proactive_state").unwrap());
+        assert!(table_exists(&conn, "intent_state").unwrap());
+        assert!(column_exists(&conn, "intent_state", "last_intent_at").unwrap());
+        let ts: String = conn
+            .query_row(
+                "SELECT last_intent_at FROM intent_state WHERE channel='telegram' AND external_id='100'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ts, "2026-01-01T00:00:00Z");
     }
 }

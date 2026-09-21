@@ -78,24 +78,24 @@ pub struct Config {
     /// iLink 的 context_token 新鲜窗口（小时）：超过该时长的 token 视为过期，
     /// 期间需用户再发消息才能刷新（官方表现为约 24h / 10 次主动外发）。
     pub ilink_context_max_age_hours: i64,
-    /// 主动陪伴总开关。
-    pub proactive_enabled: bool,
-    /// 主动发送的随机间隔最小值（分钟）。
-    pub proactive_min_minutes: i64,
-    /// 主动发送的随机间隔最大值（分钟）。
-    pub proactive_max_minutes: i64,
+    /// 意图判定总开关。
+    pub intent_enabled: bool,
+    /// 主动开口的随机间隔最小值（分钟）。
+    pub intent_min_minutes: i64,
+    /// 主动开口的随机间隔最大值（分钟）。
+    pub intent_max_minutes: i64,
     /// 安静时段（本机时间，HH-HH 半开区间，如 "23-7" 表示 23:00~6:59 不主动；
     /// 起止相同视为全天不安静）。
-    pub proactive_quiet_hours: (u32, u32),
+    pub intent_quiet_hours: (u32, u32),
     /// 每用户每天的主动消息上限。
-    pub proactive_daily_limit: u32,
+    pub intent_daily_limit: u32,
     /// 距用户最后一次说话超过多少小时后才可能被主动联系（避免打断热聊）。
-    pub proactive_min_silence_hours: i64,
+    pub intent_min_silence_hours: i64,
     /// 距用户最后一次说话超过多少天还未回复则不再主动打扰（避免骚扰沉睡用户）。
-    pub proactive_max_idle_days: i64,
+    pub intent_max_idle_days: i64,
     /// 每轮回复后最多连续追加的语句数：话题有延展性时 AI 会像真人一样接着说
     /// （倾诉/吐槽/讨论进行中）；设为 0 关闭该能力。
-    pub proactive_max_followups: u32,
+    pub intent_max_followups: u32,
 }
 
 impl Default for Config {
@@ -129,14 +129,14 @@ impl Default for Config {
             ilink_session_file: "ilink_session.json".to_string(),
             ilink_allowed_ids: Vec::new(),
             ilink_context_max_age_hours: 12,
-            proactive_enabled: false,
-            proactive_min_minutes: 45,
-            proactive_max_minutes: 180,
-            proactive_quiet_hours: (23, 7),
-            proactive_daily_limit: 8,
-            proactive_min_silence_hours: 2,
-            proactive_max_idle_days: 7,
-            proactive_max_followups: 3,
+            intent_enabled: false,
+            intent_min_minutes: 45,
+            intent_max_minutes: 180,
+            intent_quiet_hours: (23, 7),
+            intent_daily_limit: 8,
+            intent_min_silence_hours: 2,
+            intent_max_idle_days: 7,
+            intent_max_followups: 3,
         }
     }
 }
@@ -220,33 +220,33 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(12),
-            proactive_enabled: std::env::var("PROACTIVE_ENABLED")
+            intent_enabled: std::env::var("INTENT_ENABLED")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            proactive_min_minutes: std::env::var("PROACTIVE_MIN_MINUTES")
+            intent_min_minutes: std::env::var("INTENT_MIN_MINUTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(45),
-            proactive_max_minutes: std::env::var("PROACTIVE_MAX_MINUTES")
+            intent_max_minutes: std::env::var("INTENT_MAX_MINUTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(180),
-            proactive_quiet_hours: parse_quiet_hours(
-                std::env::var("PROACTIVE_QUIET_HOURS").unwrap_or_default().as_str(),
+            intent_quiet_hours: parse_quiet_hours(
+                std::env::var("INTENT_QUIET_HOURS").unwrap_or_default().as_str(),
             ),
-            proactive_daily_limit: std::env::var("PROACTIVE_DAILY_LIMIT")
+            intent_daily_limit: std::env::var("INTENT_DAILY_LIMIT")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8),
-            proactive_min_silence_hours: std::env::var("PROACTIVE_MIN_SILENCE_HOURS")
+            intent_min_silence_hours: std::env::var("INTENT_MIN_SILENCE_HOURS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(2),
-            proactive_max_idle_days: std::env::var("PROACTIVE_MAX_IDLE_DAYS")
+            intent_max_idle_days: std::env::var("INTENT_MAX_IDLE_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(7),
-            proactive_max_followups: std::env::var("PROACTIVE_MAX_FOLLOWUPS")
+            intent_max_followups: std::env::var("INTENT_MAX_FOLLOWUPS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),

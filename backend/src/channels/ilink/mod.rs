@@ -27,7 +27,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::host::Host;
+use crate::core::agent::Agent;
+use crate::core::intent::IntentTracker;
+use crate::core::session::Sessions;
 use crate::{ChatInput, ChatOutput};
 
 const CHANNEL: &str = "ilink";
@@ -50,10 +52,13 @@ pub(crate) fn base_info() -> serde_json::Value {
 }
 
 /// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
-fn touch_user_reply(assistant: &dyn Host, external_id: &str) {
-    let db = assistant.db();
-    if let Ok(session) = crate::db::channel::get_or_create_session(&db, CHANNEL, external_id) {
-        let _ = crate::db::proactive::touch_user_reply(&db, CHANNEL, external_id, &session.id);
+/// 先解析会话映射，再写主动状态追踪。
+fn touch_user_reply(session: &Sessions, tracker: &IntentTracker, external_id: &str) {
+    if let Err(e) = (|| {
+        let sid = session.resolve(CHANNEL, external_id)?;
+        tracker.touch_user_reply(CHANNEL, external_id, &sid)
+    })() {
+        tracing::warn!(error = %e, "记录入站状态失败");
     }
 }
 
@@ -71,25 +76,23 @@ fn plain_reply(reply: &str) -> ChatOutput {
 ///
 /// 只负责产出回复；记忆沉淀由调用方在回复送达之后另起后台任务（见 `run_loop`）。
 async fn handle_text(
-    assistant: Arc<dyn Host>,
+    chat: Arc<Agent>,
+    session: Arc<Sessions>,
     from_user_id: String,
     text: String,
     user_time: Option<String>,
 ) -> Result<ChatOutput, String> {
     match text.trim() {
         "/new" => {
-            let db = assistant.db();
-            crate::db::channel::reset_session(&db, CHANNEL, &from_user_id)
+            session
+                .reset(CHANNEL, &from_user_id)
                 .map_err(|e| e.to_string())?;
             Ok(plain_reply("已开始新对话，之前的记录保留在记忆库里。"))
         }
         _ => {
-            let session_id = {
-                let db = assistant.db();
-                crate::db::channel::get_or_create_session(&db, CHANNEL, &from_user_id)
-                    .map(|s| s.id)
-                    .map_err(|e| e.to_string())?
-            };
+            let session_id = session
+                .resolve(CHANNEL, &from_user_id)
+                .map_err(|e| e.to_string())?;
             // 同步的对话流水线要在阻塞线程池里跑（api/chat.rs 同理）。
             let mut out = tokio::task::spawn_blocking(move || {
                 let input = ChatInput {
@@ -99,8 +102,8 @@ async fn handle_text(
                     history_count: None,
                     user_time,
                 };
-                assistant
-                    .chat_stream(&input, &mut |_| {})
+                chat
+                    .chat_stream(&input, |_| {})
                     .map_err(|e| e.to_string())
             })
             .await
@@ -119,7 +122,9 @@ enum PollResult {
 }
 
 async fn run_loop(
-    assistant: Arc<dyn Host>,
+    chat: Arc<Agent>,
+    session: Arc<Sessions>,
+    tracker: Arc<IntentTracker>,
     client: &reqwest::Client,
     sess: &SavedSession,
 ) -> Result<PollResult, String> {
@@ -181,7 +186,7 @@ async fn run_loop(
             }
 
             push::refresh_contact(&msg.from_user_id, &msg.context_token);
-            touch_user_reply(assistant.as_ref(), &msg.from_user_id);
+            touch_user_reply(&session, &tracker, &msg.from_user_id);
 
             let user_time = super::ts_to_rfc3339(msg.create_time_ms);
             if msg.create_time_ms.is_none() {
@@ -198,7 +203,8 @@ async fn run_loop(
             let (reply, is_fallback, pending_memory) = match tokio::time::timeout(
                 Duration::from_secs(super::AI_DEADLINE_SECS),
                 handle_text(
-                    assistant.clone(),
+                    chat.clone(),
+                    session.clone(),
                     msg.from_user_id.clone(),
                     text,
                     user_time,
@@ -245,9 +251,9 @@ async fn run_loop(
             } else {
                 // 回复已送达，再后台补记忆沉淀：判定/事实化要调 LLM，不能占用户等待时间。
                 if let Some((session_id, user_message_id, text)) = pending_memory {
-                    let assistant = assistant.clone();
+                    let chat = chat.clone();
                     tokio::task::spawn_blocking(move || {
-                        let _ = assistant.settle_memory(&session_id, &user_message_id, &text);
+                        let _ = chat.settle_memory(&session_id, &user_message_id, &text);
                     });
                 }
                 if !is_fallback {
@@ -255,8 +261,11 @@ async fn run_loop(
                     // 延续判断同样要调 LLM，套同一个看门狗，避免拖死轮询。
                     let _ = tokio::time::timeout(
                         Duration::from_secs(super::AI_DEADLINE_SECS),
-                        crate::proactive::continuation::after_reply(
-                            assistant.clone(),
+                        crate::core::intent::continuation::after_reply(
+                            chat.clone(),
+                            session.clone(),
+                            tracker.clone(),
+                            &super::ChannelsPusher,
                             CHANNEL,
                             &msg.from_user_id,
                         ),
@@ -270,7 +279,7 @@ async fn run_loop(
 
 /// iLink 通道入口：仅在 `ILINK_ENABLED=1` 时启动（有 token 直连，无 token 扫码登录）。
 /// 需外显关闭时设 `ILINK_ENABLED=0`，即使已有会话文件也不会再连接。
-pub async fn run(assistant: Arc<dyn Host>) {
+pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, tracker: Arc<IntentTracker>) {
     let cfg = Config::get();
     if !cfg.ilink_enabled {
         tracing::info!("iLink 通道未启用（设置 ILINK_ENABLED=1 开启）");
@@ -317,7 +326,7 @@ pub async fn run(assistant: Arc<dyn Host>) {
         }
 
         tracing::info!("iLink 通道已连接，开始长轮询");
-        match run_loop(assistant.clone(), &client, &sess).await {
+        match run_loop(chat.clone(), session.clone(), tracker.clone(), &client, &sess).await {
             Ok(PollResult::Relogin) => {
                 // 会话过期：清掉旧凭证，下一轮重新扫码。
                 sess = SavedSession::default();

@@ -13,27 +13,11 @@ use axum::{
 };
 use futures::channel::mpsc;
 use futures::StreamExt;
-use serde::Deserialize;
 
-use crate::Assistant;
-use crate::ChatInput;
-use crate::ChatTurn;
+use crate::api::dto::{ChatOutputDto, ChatRequest};
+use crate::core::agent::{Agent, ChatInput};
 
-#[derive(Debug, Deserialize)]
-pub struct ChatRequest {
-    pub message: String,
-    /// 会话 id；留空后端自动新建。
-    #[serde(default)]
-    pub session_id: Option<String>,
-    /// 显式携带的历史轮次（可选）；缺省用后端自动构建的会话上下文。
-    #[serde(default)]
-    pub history: Vec<ChatTurn>,
-    /// 自动构建上下文用最近几条历史消息；缺省 6。
-    #[serde(default)]
-    pub history_count: Option<u32>,
-}
-
-pub fn routes(state: Arc<Assistant>) -> Router {
+pub fn routes(state: Arc<Agent>) -> Router {
     Router::new()
         .route("/chat/stream", post(handle_chat_stream))
         .route("/ws", get(handle_ws))
@@ -79,16 +63,10 @@ fn sse_stream_meta() -> (String, u64, String) {
 /// - 普通数据行均为 `chat.completion.chunk`（`data: {...}`），结尾为 `data: [DONE]`；
 /// - 额外的元数据事件 `event: done`：`data: <ChatOutput JSON>`（含 session_id / memory）。
 async fn handle_chat_stream(
-    State(state): State<Arc<Assistant>>,
+    State(state): State<Arc<Agent>>,
     Json(req): Json<ChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let input = ChatInput {
-        message: req.message,
-        session_id: req.session_id,
-        history: req.history,
-        history_count: req.history_count,
-        user_time: None,
-    };
+    let input = ChatInput::from(req);
     let (id, created, model) = sse_stream_meta();
 
     // futures 的 mpsc 是同步发送（无 runtime 上下文检查），可在阻塞线程池里安全使用；
@@ -123,7 +101,8 @@ async fn handle_chat_stream(
             match *outcome {
                 Ok(out) => {
                     events.push(Ok(Event::default().data("[DONE]")));
-                    let meta = serde_json::to_string(&out).unwrap_or_else(|_| "{}".into());
+                    let meta =
+                        serde_json::to_string(&ChatOutputDto::from(out)).unwrap_or_else(|_| "{}".into());
                     events.push(Ok(Event::default().event("done").data(meta)));
                 }
                 Err(message) => {
@@ -151,14 +130,14 @@ async fn handle_chat_stream(
 
 async fn handle_ws(
     ws: WebSocketUpgrade,
-    State(state): State<Arc<Assistant>>,
+    State(state): State<Arc<Agent>>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 /// WS 实时模式：每条文本消息触发一轮对话，回复文本逐段实时下发，
 /// 结束时发送一个 JSON（完整 ChatOutput，含 session_id / memory）。
-async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: Arc<Assistant>) {
+async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: Arc<Agent>) {
     while let Some(Ok(msg)) = socket.recv().await {
         match msg {
             axum::extract::ws::Message::Text(text) => {
@@ -193,8 +172,8 @@ async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: Arc<Assi
                 while let Some(msg) = rx.next().await {
                     let payload = match msg {
                         SseMsg::Delta(text) => text,
-SseMsg::Done(outcome) => match *outcome {
-                            Ok(out) => serde_json::to_string(&out).unwrap_or_default(),
+                        SseMsg::Done(outcome) => match *outcome {
+                            Ok(out) => serde_json::to_string(&ChatOutputDto::from(out)).unwrap_or_default(),
                             Err(message) => format!("error: {message}"),
                         },
                     };

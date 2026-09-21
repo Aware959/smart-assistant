@@ -5,7 +5,7 @@ edition = "2021"
 autobins = false
 
 [lib]
-crate-type = ["cdylib", "lib"]
+crate-type = ["lib"]
 name = "smart_assistant"
 
 [[bin]]
@@ -24,9 +24,6 @@ name = "smart-assistant-memory"
 path = "src/bin/smart-assistant-memory.rs"
 
 [dependencies]
-# UniFFI
-uniffi = { version = "0.28", features = ["cli"] }
-
 # SQLite
 rusqlite = { version = "0.37", features = ["bundled", "vtab", "backup"] }
 
@@ -79,9 +76,6 @@ reqwest = { version = "0.12", optional = true, features = ["json"] }
 # 微信 iLink 通道：base64（X-WECHAT-UIN）+ 终端二维码渲染（扫码登录）
 base64 = { version = "0.22", optional = true }
 qrcode = { version = "0.14", optional = true }
-
-[build-dependencies]
-uniffi = { version = "0.28", features = ["build"] }
 
 [features]
 default = ["desktop", "telegram", "ilink"]

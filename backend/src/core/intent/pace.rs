@@ -1,6 +1,6 @@
 //! 节奏控制：随机间隔 + 安静时段。
 //!
-//! 每轮从 `[PROACTIVE_MIN_MINUTES, PROACTIVE_MAX_MINUTES]` 区间均匀随机抽取一个
+//! 每轮从 `[INTENT_MIN_MINUTES, INTENT_MAX_MINUTES]` 区间均匀随机抽取一个
 //! 时长作为下一轮等待（不规律，像真人）。若恰逢安静时段，则直接睡到时段结束，
 //! 期间不做任何评估。
 
@@ -32,7 +32,7 @@ pub fn in_quiet_hours(now: DateTime<Local>) -> bool {
 /// quiet 窗口为半开区间 `[start, end)`：start < end 为当日窗口，
 /// start > end 表示跨午夜（如 23-7 → 23:00~次日 6:59），start == end 视为禁用。
 pub fn quiet_remainder(hour: u32, minute: u32) -> Option<Duration> {
-    quiet_remainder_for(Config::get().proactive_quiet_hours, hour, minute)
+    quiet_remainder_for(Config::get().intent_quiet_hours, hour, minute)
 }
 
 /// 纯函数版，便于测试。
@@ -62,7 +62,7 @@ pub fn quiet_remainder_for(q: (u32, u32), hour: u32, minute: u32) -> Option<Dura
 /// `[min, max]`（分钟）区间上的均匀随机；min>max 时对调，相等时取该值。
 fn random_interval() -> Duration {
     let cfg = Config::get();
-    let (mut lo, mut hi) = (cfg.proactive_min_minutes, cfg.proactive_max_minutes);
+    let (mut lo, mut hi) = (cfg.intent_min_minutes, cfg.intent_max_minutes);
     if lo > hi {
         std::mem::swap(&mut lo, &mut hi);
     }

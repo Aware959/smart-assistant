@@ -6,8 +6,7 @@ use std::sync::Arc;
 use axum::Router;
 use smart_assistant::api;
 use smart_assistant::config::Config;
-use smart_assistant::host::Host;
-use smart_assistant::Assistant;
+use smart_assistant::App;
 
 /// 双写日志 writer：stdout（控制台）+ 可选文件（`SMART_ASSISTANT_LOG_FILE`）。
 /// 只被 tracing 的 writer 线程使用，写失败一律忽略，绝不让日志影响业务。
@@ -108,7 +107,7 @@ async fn main() {
 
     // 日志写入走独立 writer 线程（非阻塞通道）：
     // tracing_subscriber 全局写锁 + 一次卡住的 stdout/管道 syscall 曾把 accept
-    // 中间件、轮询、世界心跳等所有打日志的线程串行堵死，进程全网冻结。
+    // 中间件、轮询等所有打日志的线程串行堵死，进程全网冻结。
     // 现在通道写满时只是丢弃日志，任何业务路径都不会再被日志写阻塞。
     // 指定 SMART_ASSISTANT_LOG_FILE 时额外镜像到文件（stdout 仍保留）。
     let file_mirror =
@@ -209,8 +208,8 @@ async fn main() {
 
     // 初始化数据库
     let start = std::time::Instant::now();
-    let assistant = Arc::new(
-        Assistant::new(&cfg.db_path).expect("failed to open database"),
+    let app = Arc::new(
+        App::new(&cfg.db_path).expect("failed to open database"),
     );
     tracing::info!(
         db = %cfg.db_path,
@@ -218,42 +217,47 @@ async fn main() {
         "database ready"
     );
 
-    // 组件层（telegram / ilink / proactive / world）只认窄端口 `Arc<dyn Host>`；
-    // 完整能力对象 `Arc<Assistant>` 仅保留给 web API 路由。
-    let host: Arc<dyn Host> = assistant.clone();
+    // 组件层（telegram / ilink / intent）直接持服务引用走方法调用，
+    // web API 路由只拿到主线聊天服务（chat），同实例共用同一 Agent。
 
     // 配置了 TELEGRAM_BOT_TOKEN 且 TELEGRAM_ENABLED != 0 时，后台启动 Telegram 长轮询。
     #[cfg(feature = "telegram")]
     if cfg.telegram_enabled && !cfg.telegram_bot_token.trim().is_empty() {
         tracing::info!("TELEGRAM_ENABLED + TELEGRAM_BOT_TOKEN 已配置，启动 Telegram 长轮询");
-        tokio::spawn(smart_assistant::channels::telegram::run(host.clone()));
+        tokio::spawn(smart_assistant::channels::telegram::run(
+            app.chat.clone(),
+            app.session.clone(),
+            app.tracker.clone(),
+        ));
     }
 
     // 微信 iLink 通道：无 token 且未启用时内部静默跳过；启用后首次启动需扫码。
     #[cfg(feature = "ilink")]
     {
-        tokio::spawn(smart_assistant::channels::ilink::run(host.clone()));
+        tokio::spawn(smart_assistant::channels::ilink::run(
+            app.chat.clone(),
+            app.session.clone(),
+            app.tracker.clone(),
+        ));
     }
 
-    // 主动陪伴引擎：PROACTIVE_ENABLED=1 时开启（依赖通道状态做频率/窗口控制）。
+    // 意图判定引擎：INTENT_ENABLED=1 时开启（依赖通道状态做频率/窗口控制）。
     #[cfg(any(feature = "telegram", feature = "ilink"))]
-    if cfg.proactive_enabled {
-        tracing::info!("PROACTIVE_ENABLED 已开启，启动主动陪伴引擎");
-        tokio::spawn(smart_assistant::proactive::run(host.clone()));
-    }
-
-    // 世界引擎：AI 自身状态持续演进（情绪回落 / 关系降温 / 今日叙事），
-    // 与主动推送解耦，始终运行。
-    #[cfg(any(feature = "telegram", feature = "ilink"))]
-    {
-        tokio::spawn(smart_assistant::world::run(host.clone()));
+    if cfg.intent_enabled {
+        tracing::info!("INTENT_ENABLED 已开启，启动意图判定引擎");
+        tokio::spawn(smart_assistant::core::intent::run(
+            app.chat.clone(),
+            app.session.clone(),
+            app.tracker.clone(),
+            std::sync::Arc::new(smart_assistant::channels::ChannelsPusher),
+        ));
     }
 
     // 构建路由（若配置了前端产物，则同源托管 SPA 静态文件）
-    let app = api::build_router(assistant);
-    let app = match cfg.web_dist.as_deref() {
-        Some(dist) => attach_spa(app, dist),
-        None => app,
+    let http_app = api::build_router(app.chat.clone());
+    let http_app = match cfg.web_dist.as_deref() {
+        Some(dist) => attach_spa(http_app, dist),
+        None => http_app,
     };
 
     let addr: SocketAddr = std::env::var("SMART_ASSISTANT_ADDR")
@@ -275,7 +279,7 @@ async fn main() {
                 "SMART Assistant HTTPS server started"
             );
             axum_server::bind_rustls(addr, rustls)
-                .serve(app.into_make_service())
+                .serve(http_app.into_make_service())
                 .await
                 .expect("server error");
         }
@@ -284,7 +288,7 @@ async fn main() {
                 .await
                 .expect("failed to bind address");
             tracing::info!(addr = %addr, "SMART Assistant HTTP server started（未启用 TLS）");
-            axum::serve(listener, app).await.expect("server error");
+            axum::serve(listener, http_app).await.expect("server error");
         }
     }
 }

@@ -1,12 +1,9 @@
 pub mod channel;
-pub mod conversation;
+pub mod intent;
 pub mod memory;
 pub mod message;
-pub mod proactive;
 pub mod relations;
 pub mod session;
-pub mod timeworld;
-pub mod world_state;
 
 mod meta;
 mod schema;

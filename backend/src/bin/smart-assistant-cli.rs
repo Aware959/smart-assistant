@@ -1,7 +1,7 @@
 use std::io::{self, Write};
 
 use smart_assistant::config::Config;
-use smart_assistant::{Assistant, ChatInput};
+use smart_assistant::{App, ChatInput};
 
 /// SMART Assistant 命令行入口。
 ///
@@ -18,7 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     let cfg = Config::get();
-    let assistant = Assistant::new(&cfg.db_path)?;
+    let app = App::new(&cfg.db_path)?;
+    let chat = app.chat;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let message = args.first().cloned().filter(|m| !m.trim().is_empty());
@@ -32,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             history_count: None,
             user_time: None,
         };
-        match assistant.chat_stream(&input, |delta| {
+        match chat.chat_stream(&input, |delta| {
             print!("{delta}");
             io::stdout().flush().ok();
         }) {
@@ -40,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!();
                 println!("[会话 {}]", out.session_id);
                 // 回复已输出，再补记忆沉淀（CLI 无并发压力，同步即可）。
-                if let Some(mem) = assistant.settle_memory(
+                if let Some(mem) = chat.settle_memory(
                     &out.session_id,
                     &out.user_message_id,
                     &input.message,
@@ -86,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             history_count: None,
             user_time: None,
         };
-        match assistant.chat_stream(&input, |delta| {
+        match chat.chat_stream(&input, |delta| {
             print!("{delta}");
             io::stdout().flush().ok();
         }) {
@@ -94,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!();
                 session_id = Some(out.session_id.clone());
                 // 回复已输出，再补记忆沉淀（CLI 无并发压力，同步即可）。
-                if let Some(mem) = assistant.settle_memory(
+                if let Some(mem) = chat.settle_memory(
                     &out.session_id,
                     &out.user_message_id,
                     &input.message,

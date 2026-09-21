@@ -62,7 +62,7 @@ fn update_and_delete_memory() {
 
 #[test]
 fn memory_extraction_falls_back_to_raw_text() {
-    use smart_assistant::memory::extraction::MemoryExtraction;
+    use smart_assistant::core::memory::user_memory_extraction::MemoryExtraction;
 
     // 事实化内容缺失（未生成或生成失败）时，落库文本应回退到用户原文。
     let extraction = MemoryExtraction {
@@ -128,8 +128,8 @@ fn channel_session_mapping_is_stable_and_resettable() {
 }
 
 #[test]
-fn db_view_roundtrip() {
-    use smart_assistant::{db, memory::view};
+fn db_management_roundtrip() {
+    use smart_assistant::db;
 
     let db = db::Database::in_memory().unwrap();
 
@@ -143,12 +143,8 @@ fn db_view_roundtrip() {
     let m = db_memory::Memory::new("小明是产品的负责人".into(), "fact".into(), "core".into(), None, None);
     db_memory::create(&db, &m, &vector(d, 10)).unwrap();
 
-    let memories = view::list_memories(&db, 10).unwrap();
-    assert_eq!(memories.len(), 1);
-    assert_eq!(memories[0].id, m.id);
-
-    view::delete_memory(&db, &m.id).unwrap();
-    assert!(view::list_memories(&db, 10).unwrap().is_empty());
+    db_memory::delete(&db, &m.id).unwrap();
+    assert!(db_memory::list(&db, 10).unwrap().is_empty());
 
     db::session::delete(&db, &sid).unwrap();
     assert!(db::session::list(&db, 10).unwrap().is_empty());

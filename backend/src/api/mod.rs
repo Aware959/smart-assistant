@@ -1,5 +1,5 @@
 pub mod chat;
-pub mod memory;
+pub mod dto;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,7 +9,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use axum::Router;
 
-use crate::Assistant;
+use crate::core::agent::Agent;
 
 /// HTTP 访问日志中间件：记录 method / uri / status / 耗时。
 /// 注意：SSE/WS 等流式响应的耗时只在首个响应（头）返回时结束。
@@ -42,9 +42,8 @@ async fn access_log(req: Request, next: Next) -> Response {
     resp
 }
 
-pub fn build_router(state: Arc<Assistant>) -> Router {
+pub fn build_router(state: Arc<Agent>) -> Router {
     Router::new()
-        .merge(chat::routes(state.clone()))
-        .merge(memory::routes(state))
+        .merge(chat::routes(state))
         .route_layer(axum::middleware::from_fn(access_log))
 }

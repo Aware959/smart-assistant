@@ -69,6 +69,15 @@ pub fn channel_of(db: &Database, session_id: &str) -> Result<Option<(String, Str
     }
 }
 
+/// 全量列出外部对话映射（channel, external_id, session_id），供内存运行时启动水合。
+pub fn list_mappings(db: &Database) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = db.conn().prepare(
+        "SELECT channel, external_id, session_id FROM channel_sessions",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
 fn touch(db: &Database, channel: &str, external_id: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     db.conn().execute(

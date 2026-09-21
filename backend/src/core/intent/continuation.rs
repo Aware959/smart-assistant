@@ -13,12 +13,13 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::channels::ChannelsPusher;
 use crate::config::Config;
-use crate::core::ports::ChatLlm;
-use crate::core::types::ChatMessage;
-use crate::db::proactive::ProactiveCandidate;
-use crate::host::Host;
-use crate::proactive::{decider, scheduler, sender};
+use crate::core::agent::Agent;
+use crate::core::intent::{pace, sender, speak, IntentCandidate, IntentTracker};
+use crate::core::message::ChatMessage;
+use crate::core::session::Sessions;
+use crate::llm::chat::Llm;
 
 /// 追加与追加之间的停顿（毫秒），模拟真人接着打的节奏。
 const TYPING_PAUSE_MS: u64 = 1500;
@@ -27,49 +28,53 @@ const PAUSE_JITTER_MS: u64 = 1500;
 
 /// 在某次正常回复发送完毕、且未走错误兜底时调用：按需追加后续消息。
 pub async fn after_reply(
-    assistant: Arc<dyn Host>,
+    chat: Arc<Agent>,
+    session: Arc<Sessions>,
+    tracker: Arc<IntentTracker>,
+    pusher: &ChannelsPusher,
     channel: &str,
     external_id: &str,
 ) {
-    let max = Config::get().proactive_max_followups;
+    let max = Config::get().intent_max_followups;
     if max == 0 {
         return;
     }
-    let session_id = {
-        let db = assistant.db();
-        match crate::db::channel::get_or_create_session(&db, channel, external_id) {
-            Ok(s) => s.id,
-            Err(e) => {
-                tracing::warn!(error = %e, "延续会话：无法解析会话映射");
-                return;
-            }
+    let session_id = match session.resolve(channel, external_id) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(error = %e, "延续会话：无法解析会话映射");
+            return;
         }
     };
-    let cand = ProactiveCandidate {
+    let cand = IntentCandidate {
         channel: channel.to_string(),
         external_id: external_id.to_string(),
         session_id,
         last_user_reply_at: None,
-        last_proactive_at: None,
+        last_intent_at: None,
         today_count: 0,
     };
-    follow_up(assistant.as_ref(), &cand, max).await;
+    follow_up(chat.as_ref(), session.as_ref(), tracker.as_ref(), pusher, &cand, max).await;
 }
 
 /// 循环追加：每轮先问 LLM 要不要续，对方中途说话则不再续。
 /// `max` 只是安全上限，模型按最新语境自行决定何时收住，不该为了凑满而多送。
-async fn follow_up(assistant: &dyn Host, cand: &ProactiveCandidate, max: u32) {
+async fn follow_up(
+    chat: &Agent,
+    session: &Sessions,
+    tracker: &IntentTracker,
+    pusher: &ChannelsPusher,
+    cand: &IntentCandidate,
+    max: u32,
+) {
     // 记录对方当前最后发言时刻：期间只要有新入站消息就停（给对方说话的空间）。
-    let snapshot = match candle_reply_at(assistant, cand) {
-        Ok(v) => v,
-        Err(_) => None,
-    };
+    let snapshot = candle_reply_at(tracker, cand).unwrap_or_default();
 
     for appended in 0..max {
-        let Some(text) = propose_follow_up(assistant, cand, appended).await else {
+        let Some(text) = propose_follow_up(chat, cand, appended).await else {
             return;
         };
-        if candle_reply_at(assistant, cand)
+        if candle_reply_at(tracker, cand)
             .ok()
             .flatten()
             != snapshot
@@ -77,12 +82,12 @@ async fn follow_up(assistant: &dyn Host, cand: &ProactiveCandidate, max: u32) {
             tracing::info!(user = %cand.external_id, "对方已插话，停止追加");
             return;
         }
-        if !sender::send_message(assistant, cand, &text, false).await {
+        if !sender::send_message(session, tracker, pusher, cand, &text, false).await {
             return;
         }
         // 短暂停顿模拟真人连续打字。
         tokio::time::sleep(Duration::from_millis(
-            TYPING_PAUSE_MS + scheduler::prand() % PAUSE_JITTER_MS,
+            TYPING_PAUSE_MS + pace::prand() % PAUSE_JITTER_MS,
         ))
         .await;
     }
@@ -90,11 +95,10 @@ async fn follow_up(assistant: &dyn Host, cand: &ProactiveCandidate, max: u32) {
 
 /// 读取当前候选的最近入站回复时刻（None 表示还没记录）。
 fn candle_reply_at(
-    assistant: &dyn Host,
-    cand: &ProactiveCandidate,
+    tracker: &IntentTracker,
+    cand: &IntentCandidate,
 ) -> crate::error::Result<Option<chrono::DateTime<chrono::Utc>>> {
-    let db = assistant.db();
-    crate::db::proactive::last_user_reply_at(&db, &cand.channel, &cand.external_id)
+    tracker.last_user_reply_at(&cand.channel, &cand.external_id)
 }
 
 /// 依据"最近的对话（含我方最后一句）"判断是否追加一条，返回待发送内容。
@@ -102,21 +106,18 @@ fn candle_reply_at(
 /// `appended` 是本回合已经连续追加过的句数（0 开始），用来告诉模型
 /// "你已经连着说几句了"，避免机械凑数。
 async fn propose_follow_up(
-    assistant: &dyn Host,
-    cand: &ProactiveCandidate,
+    chat: &Agent,
+    cand: &IntentCandidate,
     appended: u32,
 ) -> Option<String> {
-    let recent = {
-        let db = assistant.db();
-        crate::proactive::context::recent_history(&db, &cand.session_id, 6)
-    };
+    let recent = chat.recent_history_text(&cand.session_id, 6);
     if recent.trim().is_empty() {
         return None;
     }
 
-    let llm = assistant.chat_llm();
+    let llm = chat.chat_llm();
     let decision =
-        tokio::task::spawn_blocking(move || decide_continue(&*llm, &recent, appended))
+        tokio::task::spawn_blocking(move || decide_continue(&llm, &recent, appended))
             .await
             .unwrap_or_default();
     if decision.continue_ {
@@ -142,7 +143,7 @@ struct ContinueDecision {
 /// - [格式] 只准一句、口语化、像微信补一句、不超过40字、不重复不复述
 /// - [已追加限制] appended>0 时提醒模型已连发几句，避免变复读机
 /// - [输出] 只输出 JSON：continue=true/false + message
-fn decide_continue(llm: &dyn ChatLlm, recent: &str, appended: u32) -> ContinueDecision {
+fn decide_continue(llm: &Llm, recent: &str, appended: u32) -> ContinueDecision {
     let cfg = Config::get();
     let persona_block = if cfg.persona.trim().is_empty() {
         String::new()
@@ -210,7 +211,7 @@ fn decide_continue(llm: &dyn ChatLlm, recent: &str, appended: u32) -> ContinueDe
 }
 
 fn parse(text: &str) -> ContinueDecision {
-    let payload = decider::extract_json(text).unwrap_or(text);
+    let payload = speak::extract_json(text).unwrap_or(text);
     #[derive(Deserialize)]
     struct Raw {
         #[serde(rename = "continue", default)]

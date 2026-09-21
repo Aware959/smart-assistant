@@ -2,6 +2,9 @@
 
 给 AI 编码助手与本仓库开发者的协作约定。这是最高优先级的协作规则，任何时候都要遵守。
 
+> 本文件只写**长期稳定的硬约束**。架构规则不在这里冻结——它们随代码演进，
+> 写进约定只会让文档在每次重构后失真。
+
 ## Git 提交规则（最高优先级）
 
 - **必须由用户主动发起「提交 git」才执行 commit**：只有用户明确说出「提交」「提交 git」「commit」时才允许 `git add` + `git commit`。
@@ -12,24 +15,11 @@
 
 ## 文档布局
 
-- `README.md`：只保留项目介绍（简介 / 组成 / 快速启动 / Roadmap）。
-- `docs/api-doc.md`：后端 HTTP/WS/SSE 接口、数据模型、环境变量配置。
-- `AGENTS.md`（本文件）：给 agent/开发者的仓库约定与工作流。
+- `README.md`：只保留项目介绍（简介 / 组成 / 快速启动）。
+- `docs/api-doc.md`：后端 HTTP/WS/SSE 接口、数据模型、环境变量配置。**只有用户明确要求同步时才更新**，不随代码实现变动自动跟进。
+- `docs/architecture.md`：架构设计文档。**只有用户明确要求"同步架构文档"时才更新**，不随代码实现变动自动跟进。
+- `AGENTS.md`（本文件）：给 agent/开发者的仓库约定与工作流。只写稳定硬约束。
 - `backend/.env.example`：环境变量模板。**新增任何环境变量必须同步到这里**。
-
-## 仓库概览
-
-本地优先的对话式记忆/知识助手。Rust 内核 `backend/` + Web 前端 `frontend/` + Android 占位 `android/`。
-
-- `backend/src/lib.rs`：应用外壳（`Assistant` 薄委托 + 持有 db 句柄装配能力层）+ 输入输出类型 + UniFFI 导出
-- `backend/src/core/`：编排内核（`agent.rs` 单轮对话/记忆提取沉淀流水线；`ports.rs` 能力端口契约；`prompt.rs` 时间线提示词组装；`types.rs` 可移植值类型）。内核不依赖 db，只面向端口编程，由宿主注入适配器，可独立单测
-- `backend/src/db/`：SQLite 层（rusqlite + sqlite-vec 向量检索 + 会话/消息直接读写 + `conversation.rs` 实现 `ConversationStore` 端口适配器）。会话/消息等"直读库方法"就地实现，不再有中心化 services 层
-- `backend/src/llm/`：模型调用层（`chat.rs` 对话 + `embedding.rs` 文本向量化 + `genai_client.rs` 共享 Client/全局 runtime，genai 阻塞 API）
-- `backend/src/memory/`：记忆业务层（提取 / 存储 / 召回 + `view.rs` 直读/写门面供 web/管理端入口调用）
-- `backend/src/proactive/`：主动陪伴（调度 / 开口决策 / 推送 / 每轮延续判断）
-- `backend/src/channels/`：Telegram / iLink 接入（`PushChannels` 注册表）
-- `frontend/`：Vite + React（SSE 流式对话，构建后由后端同源托管）
-- `android/`：Android 端（占位，UniFFI Kotlin 绑定）
 
 ## 常用命令
 
@@ -46,19 +36,6 @@ cargo run --bin smart-assistant-memory -- rebuild [--force]  # 重建向量表
 ```
 
 根目录 `make dev / stop / build / test` 与 `scripts/dev.ps1` 等价（无 make 用 `powershell -File scripts/dev.ps1`）。
-
-## 关键约定
-
-- **数据库访问**：经 `std::sync::Mutex<db::Database>` 同步。
-- **LLM 调用**：genai 是阻塞 API，在 async 通道里调用必须 `tokio::task::spawn_blocking`。
-- **消息 vs 记忆**：`messages` 是记录；`memories` 只沉淀事实，来源用 `message_id` 关联。
-- **记忆沉淀后置**：`Agent::chat_stream` 只做"消息入库 → 向量召回 → 流式回复 → 回复入库"，**不碰**记忆判定/事实化/落库；这些由宿主在回复交付之后调用 `Agent::settle_memory` 完成（telegram / iLink 放 `spawn_blocking`，SSE / FFI / CLI 同步补并回填 `ChatOutput.memory`）。理由：判定与事实化都要调 LLM，挂在对话路径上会拉长首字延迟，失败还会吞掉回复。**记忆链路（召回 / 判定 / 事实化 / 落库）任何失败都只记 warn 并降级，绝不冒泡成对话失败。**
-- **记忆提取分两步**：先一次极窄调用只出标签（`is_memory` / `memory_type` / `tier` / `relation`，schema 用 `enum` 收窄），判定为"值得记住"才第二次调用做事实化（输出纯文本，不是 JSON）。解析端把模型输出当**不可信输入**：缺失 / `null` / 类型不符 / 空白一律回退默认。
-- **记忆分层**：`tier` = short（短期易过期）/ intent（意向计划）/ core（长期强事实）。short/intent 有 `expires_at`，过期不参与召回；召回按 `MEMORY_RECALL_THRESHOLD`（欧氏距离 ≤ 阈值）过滤；新事实与库中条目距离 ≤ `MEMORY_DEDUP_THRESHOLD` 时去重，只刷新 updated_at 不新增。
-- **schema 版本**：版本号在 `db/mod.rs` 的 `SCHEMA_VERSION`。迁移**只做增量**（只增表/列，绝不 DROP 业务表）。旧库补列用 `add_column_if_missing`（以 PRAGMA table_info 判断，且须容忍表不存在——`init_schema` 里 `migrate()` 在业务表 CREATE 之前执行）。
-- **sqlite-vec 坑**：vec0 的 kNN 查询必须写 `k = ?` 约束，把 LIMIT 写在外层查询会报 "A LIMIT or 'k = ?' constraint is required"。
-- **主动陪伴**：延迟引擎发出的主动消息计入每日配额（sender 的 `count_as_proactive=true`）；延续追加句不算配额。iLink 是窗口式推送：token 新鲜窗口内最多 10 次外发/每次刷新。
-- **配置**：全部走环境变量（`config.rs` 读 `backend/.env`，从 `.env.example` 拷贝），不引入配置文件。
 
 ## 验证基线
 
