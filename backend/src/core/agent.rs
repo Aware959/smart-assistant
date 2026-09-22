@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use crate::core::context::{self, AgentContext};
 use crate::core::memory::{MemoryHit, MemoryRecord, Store};
-use crate::core::message::ChatMessage;
+use crate::core::schema::message::ChatMessage;
+use crate::core::self_profile::Profile;
 use crate::core::session::Sessions;
 use crate::error::Result;
 use crate::llm::chat::Llm;
@@ -47,21 +48,33 @@ pub struct Agent {
     conversation: Arc<Sessions>,
     llm: Arc<Llm>,
     memory: Arc<Store>,
+    profile: Arc<Profile>,
 }
 
 impl Agent {
     /// 用具体会话适配器与两个能力组件构造内核。
-    pub fn new(conversation: Arc<Sessions>, llm: Arc<Llm>, memory: Arc<Store>) -> Self {
+    pub fn new(
+        conversation: Arc<Sessions>,
+        llm: Arc<Llm>,
+        memory: Arc<Store>,
+        profile: Arc<Profile>,
+    ) -> Self {
         Self {
             conversation,
             llm,
             memory,
+            profile,
         }
     }
 
     /// 暴露 LLM 能力（主动陪伴等周边编排复用同一具体实现）。
     pub(crate) fn chat_llm(&self) -> Arc<Llm> {
         self.llm.clone()
+    }
+
+    /// 自我属性人设区块文本（主动决策 / 延续判断复用同一人设数据源）。
+    pub(crate) fn profile_block(&self) -> String {
+        self.profile.block()
     }
 
     /// 最近 `limit` 条对话的渲染文本（延续判断等只需历史的场景，避免白跑一次召回）。
@@ -191,10 +204,11 @@ impl Agent {
             memories: memory_hits,
         };
         tracing::info!(session = %session.id, "对话阶段：提示词组装完成");
+        let profile = self.profile_block();
         let recall = context::build_recall_context(&ctx.memories);
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
-            content: context::system_prompt(&recall),
+            content: context::system_prompt(&profile, &recall),
         }];
         for turn in ctx.history.iter().chain(input.history.iter()) {
             messages.push(ChatMessage {
@@ -210,7 +224,6 @@ impl Agent {
             target: "trace",
             stage = "prompt",
             n = messages.len(),
-            system = %crate::utils::trace::Text(&messages[0].content),
             messages = %crate::utils::trace::Lazy(|| render_messages(&messages)),
             "提示词与消息已组装"
         );
@@ -340,12 +353,16 @@ fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// 把消息列表渲染成 `role: content` 多行文本（追踪日志用，仅在开启全文时构建）。
+/// 把消息数组渲染成 `[{role, content}, ...]` 的 JSON 数组文本（追踪日志用，
+/// 与真实请求的线协议结构一致）。
 fn render_messages(messages: &[ChatMessage]) -> String {
-    messages
-        .iter()
-        .map(|m| format!("{}: {}", m.role, m.content))
-        .collect::<Vec<_>>()
-        .join("\n")
+    serde_json::to_string(
+        &messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string())
 }
 
 /// 把召回记忆渲染成 `[score] id | content` 多行文本（追踪日志用）。

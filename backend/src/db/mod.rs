@@ -3,6 +3,7 @@ pub mod intent;
 pub mod memory;
 pub mod message;
 pub mod relations;
+pub mod self_profile;
 pub mod session;
 
 mod meta;

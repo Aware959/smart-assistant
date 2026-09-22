@@ -17,7 +17,7 @@ use crate::channels::ChannelsPusher;
 use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::intent::{pace, sender, speak, IntentCandidate, IntentTracker};
-use crate::core::message::ChatMessage;
+use crate::core::schema::message::ChatMessage;
 use crate::core::session::Sessions;
 use crate::llm::chat::Llm;
 
@@ -116,8 +116,9 @@ async fn propose_follow_up(
     }
 
     let llm = chat.chat_llm();
+    let profile = chat.profile_block();
     let decision =
-        tokio::task::spawn_blocking(move || decide_continue(&llm, &recent, appended))
+        tokio::task::spawn_blocking(move || decide_continue(&llm, &profile, &recent, appended))
             .await
             .unwrap_or_default();
     if decision.continue_ {
@@ -135,7 +136,7 @@ struct ContinueDecision {
 
 /// 延续判断提示词（英文给 LLM，中文注释供开发者阅读）。
 ///
-/// - [角色注入] persona，最高优先级
+/// - [角色注入] 自我属性（DB self_profile），最高优先级
 /// - [总纲] 与老朋友有一搭没一搭地聊天，判断本轮是否还要追加一句话
 /// - [核心原则] 只以双方最新一来一回为准，不机械续话
 /// - [需要追加] 情绪没倒完、讨论正兴、差一句收尾、话停在半路
@@ -143,17 +144,8 @@ struct ContinueDecision {
 /// - [格式] 只准一句、口语化、像微信补一句、不超过40字、不重复不复述
 /// - [已追加限制] appended>0 时提醒模型已连发几句，避免变复读机
 /// - [输出] 只输出 JSON：continue=true/false + message
-fn decide_continue(llm: &Llm, recent: &str, appended: u32) -> ContinueDecision {
-    let cfg = Config::get();
-    let persona_block = if cfg.persona.trim().is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Your persona (highest priority — obey strictly, never contradict it, never reveal you \
-             are an AI): {}. \n",
-            cfg.persona.trim()
-        )
-    };
+fn decide_continue(llm: &Llm, profile: &str, recent: &str, appended: u32) -> ContinueDecision {
+    let persona_block = crate::core::context::persona_block(profile);
     let mut system = format!(
         "{persona_block}You are chatting with an old friend, casually, in a start-and-stop rhythm. \
          After reading the recent dialogue, decide whether you should append one more sentence this \

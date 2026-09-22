@@ -11,7 +11,7 @@
 
 use crate::config::Config;
 use crate::core::memory::current_relation::RelationEvent;
-use crate::core::message::ChatMessage;
+use crate::core::schema::message::ChatMessage;
 use crate::error::{Result, SqlError};
 use crate::llm::chat;
 

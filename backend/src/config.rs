@@ -37,8 +37,6 @@ pub struct Config {
     /// 结构化输出的请求模式：json_schema（默认，OpenAI/Gemini/本地 llama.cpp 系）
     /// 或 json_object（DeepSeek 等只支持宽松 JSON 模式的端点）。
     pub llm_structured_output: String,
-    /// 角色设定（人设/性格/喜欢…）。非空时每一轮对话都以硬约束注入 system 提示词。
-    pub persona: String,
     pub embedding_api_url: String,
     pub embedding_api_key: String,
     pub embedding_model: String,
@@ -111,7 +109,6 @@ impl Default for Config {
             llm_model: "qwen3.5-9b-uncensored-hauhaucs-aggressive".to_string(),
             llm_extract_model: String::new(),
             llm_structured_output: "json_schema".to_string(),
-            persona: String::new(),
             embedding_api_url: "http://127.0.0.1:1234/v1/embeddings".to_string(),
             embedding_api_key: String::new(),
             embedding_model: "text-embedding-embeddinggemma-300m".to_string(),
@@ -161,7 +158,6 @@ impl Config {
             llm_extract_model: std::env::var("LLM_EXTRACT_MODEL").unwrap_or_default(),
             llm_structured_output: std::env::var("LLM_STRUCTURED_OUTPUT")
                 .unwrap_or_else(|_| "json_schema".to_string()),
-            persona: std::env::var("PERSONA").unwrap_or_default(),
             embedding_api_url: std::env::var("EMBEDDING_API_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:1234/v1/embeddings".to_string()),
             embedding_api_key: std::env::var("EMBEDDING_API_KEY").unwrap_or_default(),

@@ -9,9 +9,8 @@ use crate::error::{Result, SqlError};
 use crate::llm::genai_client;
 
 /// 一条发给 LLM 的对话消息（作用域本体默认 system / user / assistant）。
-/// 定义在 [`crate::core::message`]，此处 re-export 保持 `llm::chat::ChatMessage` 兼容。
-pub use crate::core::message::ChatMessage;
-
+/// 定义在 [`crate::core::schema::message`]，此处 re-export 保持 `llm::chat::ChatMessage` 兼容。
+pub use crate::core::schema::message::ChatMessage;
 fn build_chat_request(messages: &[ChatMessage]) -> ChatRequest {
     let mut chat_req = ChatRequest::default();
     for msg in messages {

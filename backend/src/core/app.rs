@@ -36,13 +36,19 @@ impl App {
         Self::assemble(Arc::new(Mutex::new(crate::db::Database::in_memory()?)))
     }
 
-    /// 装配主线路：会话 / 意图状态追踪 / 能力（Llm、记忆 Store）→ 注入主线 Agent。
+    /// 装配主线路：会话 / 意图状态追踪 / 能力（Llm、记忆 Store、自我属性 Profile）→ 注入主线 Agent。
     fn assemble(db: Arc<Mutex<crate::db::Database>>) -> Result<Self> {
         let session = Arc::new(crate::core::session::Sessions::new(db.clone())?);
         let tracker = Arc::new(crate::core::intent::IntentTracker::new(db.clone())?);
         let llm = Arc::new(crate::llm::chat::Llm);
-        let memory = Arc::new(crate::core::memory::Store::new(db));
-        let chat = Arc::new(crate::core::agent::Agent::new(session.clone(), llm, memory));
+        let memory = Arc::new(crate::core::memory::Store::new(db.clone()));
+        let profile = Arc::new(crate::core::self_profile::Profile::new(db));
+        let chat = Arc::new(crate::core::agent::Agent::new(
+            session.clone(),
+            llm,
+            memory,
+            profile,
+        ));
         Ok(Self {
             chat,
             session,

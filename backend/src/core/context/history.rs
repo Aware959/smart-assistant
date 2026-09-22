@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::core::message::ChatMessage;
+use crate::core::schema::message::ChatMessage;
 use crate::core::session::Sessions;
 use crate::core::session::MessageTurn;
 use crate::error::Result;

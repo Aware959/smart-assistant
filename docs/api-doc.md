@@ -23,6 +23,7 @@
 | sessions | 会话（id / title / 时间戳） | 标题来自首条消息 |
 | messages | 消息记录（role: user/assistant） | 只作记录，不一定产生记忆 |
 | memories | 记忆/事实（content / memory_type / tier / expires_at / message_id） | LLM 判定 `is_memory` 时才沉淀；`tier`=short（短期）\| intent（意向）\| core（长期），short/intent 有 `expires_at`，过期不参与召回 |
+| self_profile | AI 自我属性 KV（key / value / updated_at） | 人设数据源（性格/人格/三观/爱好…），注入 as 提示词；只读不改 |
 
 对话流程：用户消息 → 消息入库 → 记忆向量检索（失败降级为空召回）→ 重组提示词 → 流式回复 → 回复入库；**回复交付之后**再做记忆沉淀：一次极窄的 LLM 调用判定标签（`is_memory` / `memory_type` / `tier` / `relation`），判定为"值得记住"时再调一次做事实化，最后写入 `memories`。
 
@@ -33,7 +34,11 @@
 - 每轮对话自动从数据库取出该会话**最近的历史消息**拼入提示词（含历史的 assistant 回复）；
 - 数量由请求参数 `history_count` 控制，`0` 表示不带历史，缺省 `6`；
 - 请求里也可显式传 `history`（`[{role, content}]`）作为补充上下文，会拼在自动历史之后；
-- 与当前输入语义相关的记忆（同一套向量召回，按 `MEMORY_RECALL_THRESHOLD` 过滤）注入 system 提示词。
+- 与当前输入语义相关的记忆（同一套向量召回，按 `MEMORY_RECALL_THRESHOLD` 过滤）注入 system 提示词；
+- **人设注入**：system 提示词开头按最高优先级硬约束注入 AI 自我属性
+  （`self_profile` KV 表按插入序渲染，如 `性格：热情、开放；人格：INFP；爱好：…`），
+  表为空则整块省略；主动开口与回复延续判断复用同一份渲染。属性变更直接改表
+  （v1 人工维护，不提供管理入口）。
 
 ## SSE 实时输出（/chat/stream，OpenAI 兼容）
 
@@ -65,7 +70,6 @@ curl -N -X POST http://127.0.0.1:3000/chat/stream \
 | LLM_API_KEY | (空) | Key 留空时回退 `OPENAI_API_KEY` |
 | LLM_MODEL | google/gemma-4-26b-a4b-qat | 对话模型 |
 | LLM_EXTRACT_MODEL | (空) | 记忆提取专用模型；留空则复用 LLM_MODEL |
-| PERSONA | (空) | 角色设定，硬约束注入每轮对话与主动推送 |
 | EMBEDDING_API_URL | http://127.0.0.1:1234/v1/embeddings | 向量模型接口 |
 | EMBEDDING_API_KEY | (空) | 留空时回退 `OPENAI_API_KEY` |
 | EMBEDDING_MODEL | text-embedding-embeddinggemma-300m | 向量模型 |

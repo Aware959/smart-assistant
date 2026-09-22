@@ -9,7 +9,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 9;
+pub(crate) const SCHEMA_VERSION: i64 = 10;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -76,6 +76,12 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             observations       INTEGER NOT NULL DEFAULT 0,
             updated_at         TEXT NOT NULL,
             PRIMARY KEY (channel, external_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS self_profile (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS world_state (
@@ -194,6 +200,19 @@ fn migrate(conn: &Connection) -> Result<()> {
                 )?;
             }
         }
+    }
+
+    if version < 10 {
+        // v10：AI 自我属性 KV 表（性格/三观/爱好…），人设数据源，由 core/self_profile 读写。
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS self_profile (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )?;
     }
 
     if version >= SCHEMA_VERSION {
@@ -322,5 +341,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ts, "2026-01-01T00:00:00Z");
+    }
+
+    /// v10：旧库（v9 无 self_profile 表）增量迁移后建出该表，业务数据不受影响。
+    #[test]
+    fn v10_creates_self_profile_table() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, created_at TEXT);
+             INSERT INTO messages (id, session_id, role, content, created_at)
+             VALUES ('keep', 's1', 'user', '别丢', 't');
+             INSERT INTO meta (key, value) VALUES ('schema_version', '9');",
+        )
+        .unwrap();
+        assert!(!table_exists(&conn, "self_profile").unwrap());
+
+        migrate(&conn).unwrap();
+
+        assert!(table_exists(&conn, "self_profile").unwrap());
+        assert!(
+            meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap()
+                == SCHEMA_VERSION.to_string()
+        );
+        let content: String = conn
+            .query_row("SELECT content FROM messages WHERE id = 'keep'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(content, "别丢");
     }
 }

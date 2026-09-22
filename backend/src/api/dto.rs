@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::agent::{ChatInput, ChatOutput};
 use crate::core::memory::MemoryRecord;
-use crate::core::message::ChatMessage;
+use crate::core::schema::message::ChatMessage;
 
 /// 一条显式历史轮次（HTTP 入参）。
 #[derive(Debug, Clone, Deserialize)]

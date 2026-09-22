@@ -2,7 +2,7 @@
 
 > 本文描述后端 Rust 内核的分层结构、核心数据流与各子系统的协作方式。
 > 
-> 上一次更新：2026-09-21
+> 上一次更新：2026-09-22
 
 ---
 
@@ -42,9 +42,11 @@
 ├──────────────────────────────────────────────────────────────────────┤
 │  存储层：db/mod.rs（rusqlite + sqlite-vec）                            │
 │  messages / memories / memory_vectors / sessions / channel_sessions / │
-│  proactive_state / time_profiles / world_state / relations / meta      │
+│  intent_state / self_profile / time_profiles / world_state / relations│
+│  / meta                                                               │
 │  （time_profiles / world_state / relations 表按 schema 保留、暂无代码   │
-│   接线——aiworld 重设计后由新适配器写）                                │
+│   接线——aiworld 重设计后由新适配器写；self_profile 已由                 │
+│   core/self_profile 读写，为人设数据源）                              │
 │  ↕ Mutex<Database> 同步访问（经 core/session、core/runtime 适配器收敛）│
 ├──────────────────────────────────────────────────────────────────────┤
 │  配置层：config.rs（.env 环境变量 → OnceLock<Config>，全程单例）          │
@@ -85,8 +87,10 @@ TG 长轮询收到 Update
   │       ├─ 内容保持原文，不带时间/角色前缀
   │       ├─ history_count 显式指定 → 退化为取最近 N 条
   │       └─ ⚠ 必须在"本条用户消息入库之前"取，否则本轮消息会被算进历史
-  │     context::system_prompt(recall)
-  │       ├─ 角色设定：PERSONA 环境变量（中文原文注入，最高优先级）
+  │     context::system_prompt(profile, recall)
+  │       ├─ 角色设定：self_profile KV 表（AI 自我属性，中文原文注入，最高优先级；
+  │       │   由 core/self_profile::Profile::block 渲染为「性格：…；人格：…」，
+  │       │   对话/主动开口/延续判断三处共用同一 persona_block，空表整块省略）
   │       ├─ 英文行为指令：对方中心 / 格式禁令 / 长度约束 / 身份边界
   │       └─ 召回记忆文本（"Below is what you know about the other person..."）
   │
@@ -242,7 +246,7 @@ core/memory::search(query)
 
 ---
 
-## 7. 数据库 Schema（v8）
+## 7. 数据库 Schema（v10）
 
 SQLite + WAL 模式 + sqlite-vec 向量扩展。所有业务表仅做增量迁移，绝不 DROP。
 
@@ -254,7 +258,8 @@ SQLite + WAL 模式 + sqlite-vec 向量扩展。所有业务表仅做增量迁�
 | `memories` | 记忆事实（content / tier / expires_at / message_id） |
 | `memory_vectors` | sqlite-vec0 向量表（memory_id / embedding float32[]） |
 | `channel_sessions` | 通道 ↔ 会话映射（channel + external_id → session_id） |
-| `proactive_state` | 主动状态簿（今日计数 / 最后主动 / 最后用户回复时间） |
+| `intent_state` | 意图状态簿（今日计数 / 最后主动 / 最后用户回复时间） |
+| `self_profile` | AI 自我属性 KV（key / value / updated_at），人设数据源 |
 | `time_profiles` | 时间画像（offset_minutes / active_hour / 观测次数）——**保留、暂无线接** |
 | `world_state` | AI 世界状态（单行 id=1：自我档案 / 情绪）——**保留、暂无线接** |
 | `relations` | 关系状态（closeness / trust）——**保留、暂无线接** |

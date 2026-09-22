@@ -146,8 +146,9 @@ async fn propose(chat: &Agent, cand: &IntentCandidate) -> Option<String> {
 
     // LLM 调用是同步阻塞的（genai 全局 runtime），挪到阻塞线程池避免卡住异步任务。
     let llm = chat.chat_llm();
+    let profile = chat.profile_block();
     let decision =
-        tokio::task::spawn_blocking(move || speak::decide(&llm, &recent, &rec))
+        tokio::task::spawn_blocking(move || speak::decide(&llm, &profile, &recent, &rec))
             .await
             .unwrap_or_default();
 

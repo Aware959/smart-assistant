@@ -4,8 +4,7 @@
 
 use serde::Deserialize;
 
-use crate::config::Config;
-use crate::core::message::ChatMessage;
+use crate::core::schema::message::ChatMessage;
 use crate::llm::chat::Llm;
 
 /// 一轮决策结果。
@@ -19,22 +18,13 @@ pub struct Decision {
 
 /// 开口决策提示词（英文给 LLM，中文注释供开发者阅读）。
 ///
-/// - [角色注入] persona，最高优先级，来自用户配置
+/// - [角色注入] 自我属性（DB self_profile），最高优先级
 /// - [总纲] 陪伴型对话伙伴，判断此刻该不该主动开口
 /// - [规则] 默认沉默；值得开口的三种情况：久未聊、情绪低落/等回应、有小事值得分享
 /// - [输出] 只输出一个 JSON：speak=true/false + message/reason
 /// - [格式] 口语化、不超过40字、不解释为什么找对方、不复述本指令
-pub fn decide(llm: &Llm, recent: &str, recall: &str) -> Decision {
-    let cfg = Config::get();
-    let persona_block = if cfg.persona.trim().is_empty() {
-        String::new()
-    } else {
-        format!(
-            "Your persona (highest priority — obey strictly, never contradict it, never reveal you \
-             are an AI): {}. \n",
-            cfg.persona.trim()
-        )
-    };
+pub fn decide(llm: &Llm, profile: &str, recent: &str, recall: &str) -> Decision {
+    let persona_block = crate::core::context::persona_block(profile);
     let system = format!(
         "{persona_block}You are a companion-style chat partner. Based on the user's recent message \
          state, decide whether you should proactively message them right now.\n\
