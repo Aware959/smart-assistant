@@ -4,8 +4,8 @@
 /// 只会提醒；是否需要重建由该工具决定并执行。
 ///
 /// 用法：
-///   smart-assistant-memory check                巡检签名与现状（只读）
-///   smart-assistant-memory rebuild [--force]    重建 memory_vectors 并按 memories.content 重新向量化
+///   sa-mem check                巡检签名与现状（只读）
+///   sa-mem rebuild [--force]    重建 memory_vectors 并按 memories.content 重新向量化
 ///
 /// 安全性保证：
 ///   - 只操作 memory_vectors 表；memories（content/created_at/updated_at）永不改动；
@@ -18,7 +18,7 @@ use smart_assistant::db;
 use smart_assistant::core::memory;
 
 fn banner(title: &str) {
-    println!("\n===== smart-assistant-memory: {title} =====");
+    println!("\n===== sa-mem: {title} =====");
 }
 
 fn print_status(status: &db::VecStatus) {
@@ -98,7 +98,7 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            println!("用法:\n  smart-assistant-memory check          巡检签名与现状（只读）\n  smart-assistant-memory rebuild [--force]  重建 memory_vectors（建议先停 server）");
+            println!("用法:\n  sa-mem check          巡检签名与现状（只读）\n  sa-mem rebuild [--force]  重建 memory_vectors（建议先停 server）");
             ExitCode::FAILURE
         }
     }

@@ -25,18 +25,29 @@
 
 ```bash
 cd backend
-cargo build
+cargo build --bins             # 一次编译 sa-web / sa-link / sa-cli / sa-mem
 cargo test                      # 数据库 + 向量检索冒烟测试；全过 + 零警告是基线
 cargo check --all-targets       # 确认零警告
 cargo clippy --all-targets      # lint
-cargo run --bin smart-assistant-server
-cargo run --bin smart-assistant-cli [-- "一句话"]
-cargo run --bin smart-assistant-memory -- check          # 巡检向量签名（只读）
-cargo run --bin smart-assistant-memory -- rebuild [--force]  # 重建向量表
+cargo run --bin sa-web          # HTTP 会话主进程（Web API + 前端静态托管）
+cargo run --bin sa-link         # 通道守护（Telegram / iLink 长轮询 + 主动开口）
+cargo run --bin sa-cli [-- "一句话"]
+cargo run --bin sa-mem -- check          # 巡检向量签名（只读）
+cargo run --bin sa-mem -- rebuild [--force]  # 重建向量表
 ```
+
+进程模型：`sa-web` 与 `sa-link` 是两个独立进程，共享同一份 `.env` / `smart_assistant.db`，
+可按需只跑其一；`docs/api-doc.md` 里 Smart Assistant → sa-web（HTTP 接口）。
+根目录 `make dev` 只启动 `sa-web` 与前端；`sa-link` 在 `backend/.env` 里配置了
+Telegram token 或 `ILINK_ENABLED=1` 时由 `make dev` 一并后台拉起。
 
 根目录 `make dev / stop / build / test` 与 `scripts/dev.ps1` 等价（无 make 用 `powershell -File scripts/dev.ps1`）。
 
+## 代码约定
+
+- **单元测试不写进逻辑代码文件末尾**。新单元测试放同目录独立文件（如 `core/memory/current_relation.rs` 的测试 → `core/memory/current_relation_tests.rs`），原文件末行用 `#[cfg(test)] #[path = "<name>_tests.rs"] mod <name>_tests;` 挂载（`#[path]` 指到同级文件，否则子模块会去 `<file>/<name>_tests.rs` 目录里找），测试内用 `super::` 访问原模块（私有成员可及性不变）。
+- 顶层 `tests/` 只放集成测试（走 crate 公开 API）。历史遗留的内嵌 `#[cfg(test)] mod tests` 不强制迁移。
+
 ## 验证基线
 
-改动完成后：`cargo test` 全过 + `cargo check --all-targets` 零警告。涉及 schema 改动时，还要 `smart-assistant-memory check`（会对真实库执行增量迁移）确认旧库可正常迁移。
+改动完成后：`cargo test` 全过 + `cargo check --all-targets` 零警告。涉及 schema 改动时，还要 `sa-mem check`（会对真实库执行增量迁移）确认旧库可正常迁移。

@@ -6,7 +6,7 @@ use smart_assistant::{App, ChatInput};
 /// SMART Assistant 命令行入口。
 ///
 /// - 无参数：进入交互式 REPL（流式输出到终端）；
-/// - `smart-assistant-cli "一句话"`：单发问答，打印完整回复后退出。
+/// - `sa-cli "一句话"`：单发问答，打印完整回复后退出。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 加载运行目录下的 .env 文件（不存在则静默跳过，环境变量优先）。
     dotenvy::dotenv().ok();

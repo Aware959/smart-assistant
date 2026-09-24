@@ -15,6 +15,7 @@
 
 pub mod current_phase;
 pub mod current_relation;
+mod temporal;
 pub mod user_memory_extraction;
 
 // ---------- 记忆域值类型（跨能力层契约，纯内核值，不带序列化） ----------
@@ -166,10 +167,13 @@ impl From<&Memory> for MemoryRecord {
 ///   只刷新 updated_at 不新增（避免同一件事反复沉淀）；
 /// - **分层**：`tier` 决定存活期——`short` 按 `memory_short_ttl_days`，
 ///   `intent` 按 `memory_intent_ttl_days` 写入 expires_at，`core` 永不过期；
+/// - **相对时间锚守护**：`content` 含"今天/明天/本周末/下周/N天后"等强时间锚时，
+///   用 [`temporal::temporal_anchor`] 推导精确 `expires_at` 覆盖层级 TTL，并把层级
+///   降级为 `short`/`intent`——时效性内容过时即沉底，不再被当成核心事实召回；
 /// - `message_id` 记录该记忆来源的对话消息（手动添加时传 None）。
 ///
 /// 向量签名不匹配（维度变更未重建）时退化为只存 `memories` 内容、不写向量；
-/// 后续由 `smart-assistant-memory rebuild` 统一补齐。
+/// 后续由 `sa-mem rebuild` 统一补齐。
 pub fn store(
     db: &Database,
     content: &str,
@@ -199,18 +203,28 @@ pub fn store(
         }
     }
 
-    let ttl: i64 = match tier {
-        "short" => cfg.memory_short_ttl_days,
-        "intent" => cfg.memory_intent_ttl_days,
-        _ => 0,
+    // 相对时间锚：命中即强制降级层级并写精确 expires_at（覆盖层级 TTL），
+    // 时效性内容"明天就过期"，不再被当成核心事实长期召回。
+    let (effective_tier, expires_at) = match temporal::temporal_anchor(content) {
+        Some((anchor_tier, deadline)) => (anchor_tier.to_string(), Some(deadline.to_rfc3339())),
+        None => {
+            let ttl: i64 = match tier {
+                "short" => cfg.memory_short_ttl_days,
+                "intent" => cfg.memory_intent_ttl_days,
+                _ => 0,
+            };
+            (
+                tier.to_string(),
+                (ttl > 0)
+                    .then(|| (Utc::now() + chrono::Duration::days(ttl)).to_rfc3339()),
+            )
+        }
     };
-    let expires_at = (ttl > 0)
-        .then(|| (Utc::now() + chrono::Duration::days(ttl)).to_rfc3339());
 
     let memory = Memory::new(
         content.to_string(),
         memory_type.to_string(),
-        tier.to_string(),
+        effective_tier,
         message_id.map(String::from),
         expires_at,
     );

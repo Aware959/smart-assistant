@@ -6,6 +6,13 @@
 //! 主动推送：各渠道的 run 循环把"当前可推状态"写入 [`shared_push`]，主动引擎
 //! 经 [`ChannelsPusher`]（主动外发的具体实现）只读查询后派发文本。
 
+// 未启用任何通道特性时（如只编 sa-web），本模块整体处于惰性状态：
+// 保留占位实现以维持 core::intent 的依赖成立，但无需再为死代码报警。
+#![cfg_attr(
+    not(any(feature = "telegram", feature = "ilink")),
+    allow(dead_code, unused_imports, unused_variables)
+)]
+
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 

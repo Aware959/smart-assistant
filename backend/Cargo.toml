@@ -1,6 +1,6 @@
 [package]
 name = "smart-assistant"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 autobins = false
 
@@ -8,20 +8,27 @@ autobins = false
 crate-type = ["lib"]
 name = "smart_assistant"
 
+# 会话主进程：HTTP(S) 静态托管 + Web API（依赖 desktop）
 [[bin]]
-name = "smart-assistant-server"
-path = "src/bin/smart-assistant-server.rs"
+name = "sa-web"
+path = "src/bin/sa-web.rs"
 required-features = ["desktop"]
 
+# 通道守护进程：telegram / iLink 长轮询 + 意图主动开口（依赖 telegram + ilink）
 [[bin]]
-name = "smart-assistant-cli"
-path = "src/bin/smart-assistant-cli.rs"
-required-features = ["desktop"]
+name = "sa-link"
+path = "src/bin/sa-link.rs"
+required-features = ["telegram", "ilink"]
 
-# 记忆向量维护工具：与主程序解耦，负责巡检与确认重建（仅依赖核心库，无需 desktop）
+# 命令行会话：无需任何可选特性
 [[bin]]
-name = "smart-assistant-memory"
-path = "src/bin/smart-assistant-memory.rs"
+name = "sa-cli"
+path = "src/bin/sa-cli.rs"
+
+# 记忆向量维护工具：巡检与确认重建（仅依赖核心库，无需任何可选特性）
+[[bin]]
+name = "sa-mem"
+path = "src/bin/sa-mem.rs"
 
 [dependencies]
 # SQLite
@@ -54,10 +61,10 @@ tower-http = { version = "0.6", features = ["fs"], optional = true }
 thiserror = "2"
 anyhow = "1"
 
-# 日志
+# 日志（sa-web / sa-link 共用运行时启动脚手架，故不做可选特性）
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
-tracing-appender = { version = "0.2", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = { version = "0.2" }
 
 # 时间
 chrono = { version = "0.4", features = ["serde"] }
@@ -79,7 +86,7 @@ qrcode = { version = "0.14", optional = true }
 
 [features]
 default = ["desktop", "telegram", "ilink"]
-desktop = ["axum", "axum-server", "tower-http", "tracing-subscriber", "dep:tracing-appender"]
+desktop = ["axum", "axum-server", "tower-http"]
 telegram = ["dep:reqwest"]
 ilink = ["dep:reqwest", "dep:base64", "dep:qrcode"]
 

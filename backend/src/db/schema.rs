@@ -117,7 +117,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
     if let Some(diff) = status.diff_summary() {
         tracing::warn!(
             "记忆向量签名变更：{diff}。程序不会自动重建（memories 的内容/created_at/updated_at 均保留），\
-             记忆检索已暂停。确认重建请运行：cargo run --bin smart-assistant-memory -- rebuild"
+             记忆检索已暂停。确认重建请运行：cargo run --bin sa-mem -- rebuild"
         );
     }
     Ok(())
