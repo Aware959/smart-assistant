@@ -29,6 +29,7 @@ cargo build --bins             # 一次编译 sa-web / sa-link / sa-cli / sa-mem
 cargo test                      # 数据库 + 向量检索冒烟测试；全过 + 零警告是基线
 cargo check --all-targets       # 确认零警告
 cargo clippy --all-targets      # lint
+cargo fmt --all                 # 排版（rustfmt，配置见根目录 rust-toolchain.toml）
 cargo run --bin sa-web          # HTTP 会话主进程（Web API + 前端静态托管）
 cargo run --bin sa-link         # 通道守护（Telegram / iLink 长轮询 + 主动开口）
 cargo run --bin sa-cli [-- "一句话"]
@@ -50,4 +51,6 @@ Telegram token 或 `ILINK_ENABLED=1` 时由 `make dev` 一并后台拉起。
 
 ## 验证基线
 
-改动完成后：`cargo test` 全过 + `cargo check --all-targets` 零警告。涉及 schema 改动时，还要 `sa-mem check`（会对真实库执行增量迁移）确认旧库可正常迁移。
+改动完成后：`cargo test` 全过 + `cargo check --all-targets` 零警告 + `cargo fmt --all -- --check` 无 diff。涉及 schema 改动时，还要 `sa-mem check`（会对真实库执行增量迁移）确认旧库可正常迁移。
+
+**排版由 rustfmt 决定，不要手改**：仓库已全量 `cargo fmt` 归一（`rust-toolchain.toml` 固定 stable + rustfmt/clippy），改动写完直接跑 `cargo fmt --all`。手写排版会在下次 fmt 时被重排成另一种 diff，白白制造冲突。
