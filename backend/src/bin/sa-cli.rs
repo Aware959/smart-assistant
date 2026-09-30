@@ -41,11 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!();
                 println!("[会话 {}]", out.session_id);
                 // 回复已输出，再补记忆沉淀（CLI 无并发压力，同步即可）。
-                if let Some(mem) = chat.settle_memory(
-                    &out.session_id,
-                    &out.user_message_id,
-                    &input.message,
-                ) {
+                if let Some(mem) =
+                    chat.settle_memory(&out.session_id, &out.user_message_id, &input.message)
+                {
                     println!("[已记住] {}", mem.content);
                 }
             }
@@ -95,11 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!();
                 session_id = Some(out.session_id.clone());
                 // 回复已输出，再补记忆沉淀（CLI 无并发压力，同步即可）。
-                if let Some(mem) = chat.settle_memory(
-                    &out.session_id,
-                    &out.user_message_id,
-                    &input.message,
-                ) {
+                if let Some(mem) =
+                    chat.settle_memory(&out.session_id, &out.user_message_id, &input.message)
+                {
                     println!("[已记住] {}", mem.content);
                 }
                 println!("[会话 {}]\n", out.session_id);

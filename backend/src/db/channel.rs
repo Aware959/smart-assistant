@@ -10,11 +10,7 @@ use crate::db::Database;
 use crate::error::Result;
 
 /// 取外部对话对应的 session；不存在则新建 session 并建立映射。
-pub fn get_or_create_session(
-    db: &Database,
-    channel: &str,
-    external_id: &str,
-) -> Result<Session> {
+pub fn get_or_create_session(db: &Database, channel: &str, external_id: &str) -> Result<Session> {
     if let Some(session_id) = find_session_id(db, channel, external_id)? {
         if let Some(session) = crate::db::session::get(db, &session_id)? {
             touch(db, channel, external_id)?;
@@ -71,11 +67,12 @@ pub fn channel_of(db: &Database, session_id: &str) -> Result<Option<(String, Str
 
 /// 全量列出外部对话映射（channel, external_id, session_id），供内存运行时启动水合。
 pub fn list_mappings(db: &Database) -> Result<Vec<(String, String, String)>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT channel, external_id, session_id FROM channel_sessions",
-    )?;
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT channel, external_id, session_id FROM channel_sessions")?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn touch(db: &Database, channel: &str, external_id: &str) -> Result<()> {

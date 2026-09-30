@@ -115,7 +115,10 @@ mod tests {
             intent::record_intent_send(&db, "telegram", "100", &sid).unwrap();
         }
         let rows = intent::list_rows(&db).unwrap();
-        assert!(filter_eligible(rows, now).is_empty(), "达每日上限后不应再候选");
+        assert!(
+            filter_eligible(rows, now).is_empty(),
+            "达每日上限后不应再候选"
+        );
     }
 
     #[test]

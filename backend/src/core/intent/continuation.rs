@@ -54,7 +54,15 @@ pub async fn after_reply(
         last_intent_at: None,
         today_count: 0,
     };
-    follow_up(chat.as_ref(), session.as_ref(), tracker.as_ref(), pusher, &cand, max).await;
+    follow_up(
+        chat.as_ref(),
+        session.as_ref(),
+        tracker.as_ref(),
+        pusher,
+        &cand,
+        max,
+    )
+    .await;
 }
 
 /// 循环追加：每轮先问 LLM 要不要续，对方中途说话则不再续。
@@ -74,11 +82,7 @@ async fn follow_up(
         let Some(text) = propose_follow_up(chat, cand, appended).await else {
             return;
         };
-        if candle_reply_at(tracker, cand)
-            .ok()
-            .flatten()
-            != snapshot
-        {
+        if candle_reply_at(tracker, cand).ok().flatten() != snapshot {
             tracing::info!(user = %cand.external_id, "对方已插话，停止追加");
             return;
         }
@@ -105,11 +109,7 @@ fn candle_reply_at(
 ///
 /// `appended` 是本回合已经连续追加过的句数（0 开始），用来告诉模型
 /// "你已经连着说几句了"，避免机械凑数。
-async fn propose_follow_up(
-    chat: &Agent,
-    cand: &IntentCandidate,
-    appended: u32,
-) -> Option<String> {
+async fn propose_follow_up(chat: &Agent, cand: &IntentCandidate, appended: u32) -> Option<String> {
     let recent = chat.recent_history_text(&cand.session_id, 6);
     if recent.trim().is_empty() {
         return None;
@@ -174,8 +174,10 @@ fn decide_continue(llm: &Llm, profile: &str, recent: &str, appended: u32) -> Con
              saying."
         ));
     }
-    system.push_str("\n\nOutput only a JSON object and nothing else: \
-        {{\"continue\":true,\"message\":\"...\"}} or {{\"continue\":false}}");
+    system.push_str(
+        "\n\nOutput only a JSON object and nothing else: \
+        {{\"continue\":true,\"message\":\"...\"}} or {{\"continue\":false}}",
+    );
 
     let user = format!(
         "Your recent conversation (judge whether to add a follow-up based on the LATEST message):\n\
@@ -235,7 +237,8 @@ mod tests {
 
     #[test]
     fn parses_continue_true() {
-        let d = parse("```json\n{\"continue\": true, \"message\": \"然后我就再也不想理他了\"}\n```");
+        let d =
+            parse("```json\n{\"continue\": true, \"message\": \"然后我就再也不想理他了\"}\n```");
         assert!(d.continue_);
         assert_eq!(d.message.as_deref(), Some("然后我就再也不想理他了"));
     }

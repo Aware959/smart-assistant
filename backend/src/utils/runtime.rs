@@ -48,7 +48,10 @@ fn open_append(path: &str) -> std::io::Result<std::fs::File> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    std::fs::OpenOptions::new().create(true).append(true).open(path)
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 /// 脱敏 API key：只保留首尾四位，空值显示为 <not set>。
@@ -95,8 +98,9 @@ pub fn bootstrap() -> Runtime {
     // 中间件、轮询等所有打日志的线程串行堵死，进程全网冻结。
     // 现在通道写满时只是丢弃日志，任何业务路径都不会再被日志写阻塞。
     // 指定 SMART_ASSISTANT_LOG_FILE 时额外镜像到文件（stdout 仍保留）。
-    let file_mirror =
-        std::env::var("SMART_ASSISTANT_LOG_FILE").ok().filter(|f| !f.is_empty());
+    let file_mirror = std::env::var("SMART_ASSISTANT_LOG_FILE")
+        .ok()
+        .filter(|f| !f.is_empty());
     let mut tee = TeeWriter { file: None };
     if let Some(path) = file_mirror {
         match open_append(&path) {
@@ -139,7 +143,10 @@ pub fn bootstrap() -> Runtime {
                     tracing_subscriber::filter::Targets::new()
                         .with_target("trace", tracing::Level::TRACE),
                 );
-            tracing_subscriber::registry().with(fmt_layer).with(layer).init();
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(layer)
+                .init();
             tracing::info!(path = %path, "链路追踪日志已启用（target=trace，JSON 行）");
             Some(guard)
         }
@@ -152,8 +159,9 @@ pub fn bootstrap() -> Runtime {
     // 诊断心跳：SMART_ASSISTANT_WATCHDOG_FILE 指定时，用一个独立 OS 线程每 5 秒
     // 直接落一行（绕开 tracing）。同时一个 tokio 任务每秒更新计数器；探针据此
     // 区分「tokio 调度器已停摆」与「OS 线程也停了」——冻结类问题的关键观测。
-    if let Some(hb_path) =
-        std::env::var("SMART_ASSISTANT_WATCHDOG_FILE").ok().filter(|f| !f.is_empty())
+    if let Some(hb_path) = std::env::var("SMART_ASSISTANT_WATCHDOG_FILE")
+        .ok()
+        .filter(|f| !f.is_empty())
     {
         let last_tokio = Arc::new(std::sync::atomic::AtomicU64::new(0));
         {

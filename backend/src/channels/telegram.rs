@@ -74,11 +74,12 @@ fn build_client() -> Result<reqwest::Client, String> {
         .or_else(|| std::env::var("HTTPS_PROXY").ok())
         .or_else(|| std::env::var("ALL_PROXY").ok());
     if let Some(proxy) = proxy {
-        builder = builder.proxy(
-            reqwest::Proxy::all(&proxy).map_err(|e| format!("无效的代理地址: {e}"))?,
-        );
+        builder =
+            builder.proxy(reqwest::Proxy::all(&proxy).map_err(|e| format!("无效的代理地址: {e}"))?);
     }
-    builder.build().map_err(|e| format!("创建 HTTP 客户端失败: {e}"))
+    builder
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))
 }
 
 use super::chunk_text;
@@ -272,7 +273,10 @@ async fn run_loop(
     //
     // 首次运行（无游标）从 0 开始，即领取服务端保留的全部历史——此时几乎必然
     // 全是超时效的旧消息，会被 archive 分支挡掉，不产生任何回复。
-    let mut offset: i64 = match session.load_cursor(CHANNEL).as_deref().and_then(|s| s.parse().ok())
+    let mut offset: i64 = match session
+        .load_cursor(CHANNEL)
+        .as_deref()
+        .and_then(|s| s.parse().ok())
     {
         Some(saved) => {
             tracing::info!(offset = saved, "telegram 续传游标，从上次位置继续");
@@ -326,7 +330,9 @@ async fn run_loop(
 
         for update in batch {
             offset = offset.max(update.update_id + 1);
-            let Some(message) = update.message else { continue };
+            let Some(message) = update.message else {
+                continue;
+            };
             let chat_id = message.chat.id;
             if !allowed.is_empty() && !allowed.contains(&chat_id) {
                 tracing::info!(chat_id, "未在白名单，忽略");
@@ -350,13 +356,22 @@ async fn run_loop(
             if freshness == InboundFreshness::TooOld {
                 tracing::info!(chat_id, "消息已超时效，只入库不回复");
                 touch_user_reply(&session, &tracker, &chat_id.to_string(), sent_at);
-                if let Err(e) = session.archive_only(CHANNEL, &chat_id.to_string(), &text, sent_at.unwrap_or_else(Utc::now)) {
+                if let Err(e) = session.archive_only(
+                    CHANNEL,
+                    &chat_id.to_string(),
+                    &text,
+                    sent_at.unwrap_or_else(Utc::now),
+                ) {
                     tracing::warn!(error = %e, chat_id, "过期消息入库失败");
                 }
                 continue;
             }
 
-            tracing::info!(chat_id, ?freshness, "收到消息，开始处理（进入 AI 流水线前）");
+            tracing::info!(
+                chat_id,
+                ?freshness,
+                "收到消息，开始处理（进入 AI 流水线前）"
+            );
 
             touch_user_reply(&session, &tracker, &chat_id.to_string(), sent_at);
 
@@ -435,4 +450,3 @@ async fn run_loop(
         }
     }
 }
-

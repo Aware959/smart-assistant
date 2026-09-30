@@ -38,9 +38,8 @@ where
 
 /// 全局 tokio runtime，仅由 `block_on` 后的专用线程使用。
 fn runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| {
-        Runtime::new().expect("failed to create tokio runtime for genai adapter")
-    })
+    RUNTIME
+        .get_or_init(|| Runtime::new().expect("failed to create tokio runtime for genai adapter"))
 }
 
 /// 建立连接的硬上限：连不上就尽快失败，让上层降级，
@@ -123,7 +122,9 @@ fn build_gemini_client(
 
     let service_target_resolver = ServiceTargetResolver::from_resolver_fn(
         move |st: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
-            let ServiceTarget { model, endpoint, .. } = st;
+            let ServiceTarget {
+                model, endpoint, ..
+            } = st;
             let endpoint = match &url {
                 Some(url) => Endpoint::from_owned(url.clone()),
                 None => endpoint,
@@ -174,7 +175,9 @@ fn build_client(
 
     let service_target_resolver = ServiceTargetResolver::from_resolver_fn(
         move |st: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
-            let ServiceTarget { model, endpoint, .. } = st;
+            let ServiceTarget {
+                model, endpoint, ..
+            } = st;
             let endpoint = match &url {
                 Some(url) => Endpoint::from_owned(url.clone()),
                 None => endpoint,

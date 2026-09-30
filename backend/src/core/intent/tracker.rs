@@ -155,7 +155,12 @@ impl IntentTracker {
         external_id: &str,
         session_id: &str,
     ) -> Result<()> {
-        crate::db::intent::record_intent_send(&lock_db(&self.db), channel, external_id, session_id)?;
+        crate::db::intent::record_intent_send(
+            &lock_db(&self.db),
+            channel,
+            external_id,
+            session_id,
+        )?;
         let now = time::now();
         let today = time::local_date();
         let mut inner = self.lock();
@@ -172,7 +177,11 @@ impl IntentTracker {
                 today_date: String::new(),
             });
         st.last_intent_at = Some(now);
-        st.today_count = if st.today_date == today { st.today_count + 1 } else { 1 };
+        st.today_count = if st.today_date == today {
+            st.today_count + 1
+        } else {
+            1
+        };
         st.today_date = today;
         Ok(())
     }
@@ -192,12 +201,7 @@ impl IntentTracker {
 
     /// 频率规则过滤后的候选列表（静默时长 / 流失 / 间隔 / 每日配额）。
     pub fn eligible_candidates(&self, now: DateTime<Utc>) -> Result<Vec<IntentCandidate>> {
-        let rows: Vec<IntentRow> = self
-            .lock()
-            .rows
-            .values()
-            .map(RowState::to_row)
-            .collect();
+        let rows: Vec<IntentRow> = self.lock().rows.values().map(RowState::to_row).collect();
         Ok(filter::filter_eligible(rows, now))
     }
 }
@@ -205,11 +209,14 @@ impl IntentTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
     use crate::db::{session, Database};
+    use chrono::Duration;
     use rusqlite::params;
 
-    fn tracker_with_user(channel: &str, external: &str) -> (Arc<Mutex<Database>>, IntentTracker, String) {
+    fn tracker_with_user(
+        channel: &str,
+        external: &str,
+    ) -> (Arc<Mutex<Database>>, IntentTracker, String) {
         let db = Arc::new(Mutex::new(Database::in_memory().unwrap()));
         // 建渠道映射（意图候选来自 channel_sessions）。
         let sid = {
@@ -235,14 +242,22 @@ mod tests {
             .touch_user_reply("telegram", "100", &sid, Some(Utc::now()))
             .unwrap();
         assert!(
-            tracker.last_user_reply_at("telegram", "100").unwrap().is_some(),
+            tracker
+                .last_user_reply_at("telegram", "100")
+                .unwrap()
+                .is_some(),
             "touch 后内存即有最近入站时刻"
         );
 
         tracker.record_intent_send("telegram", "100", &sid).unwrap();
         tracker.record_intent_send("telegram", "100", &sid).unwrap();
         assert_eq!(
-            tracker.lock().rows.get(&("telegram".into(), "100".into())).unwrap().today_count,
+            tracker
+                .lock()
+                .rows
+                .get(&("telegram".into(), "100".into()))
+                .unwrap()
+                .today_count,
             2
         );
 
@@ -263,7 +278,10 @@ mod tests {
         // 新进程视角：新建运行簿从 DB 水合。
         let fresh = IntentTracker::new(db).unwrap();
         assert!(
-            fresh.last_user_reply_at("telegram", "100").unwrap().is_some(),
+            fresh
+                .last_user_reply_at("telegram", "100")
+                .unwrap()
+                .is_some(),
             "水合后 last_user_reply_at 可见"
         );
     }
@@ -280,7 +298,10 @@ mod tests {
 
         // 回拨内存里的最近入站时刻到 3 小时前（模拟时钟推进）。
         let mut inner = tracker.lock();
-        let st = inner.rows.get_mut(&("telegram".into(), "100".into())).unwrap();
+        let st = inner
+            .rows
+            .get_mut(&("telegram".into(), "100".into()))
+            .unwrap();
         st.last_user_reply_at = Some(now - Duration::hours(3));
         drop(inner);
         let el = tracker.eligible_candidates(now).unwrap();
@@ -308,7 +329,11 @@ mod tests {
             "内存应记真实发出时刻"
         );
         let rows = crate::db::intent::list_rows(&lock_db(&db)).unwrap();
-        assert_eq!(rows[0].last_user_reply_at, Some(sent_at), "DB 应同步真实时刻");
+        assert_eq!(
+            rows[0].last_user_reply_at,
+            Some(sent_at),
+            "DB 应同步真实时刻"
+        );
         assert_eq!(
             tracker.eligible_candidates(now).unwrap().len(),
             1,
@@ -339,12 +364,7 @@ mod tests {
             .touch_user_reply("telegram", "100", &sid, Some(recent))
             .unwrap();
         tracker
-            .touch_user_reply(
-                "telegram",
-                "100",
-                &sid,
-                Some(recent - Duration::hours(3)),
-            )
+            .touch_user_reply("telegram", "100", &sid, Some(recent - Duration::hours(3)))
             .unwrap();
         assert_eq!(
             tracker.last_user_reply_at("telegram", "100").unwrap(),

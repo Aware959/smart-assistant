@@ -42,9 +42,7 @@ fn attach_spa(app: Router, dist: &str) -> Router {
     }
 
     let index = ServeFile::new(dist.join("index.html"));
-    app.fallback_service(
-        ServeDir::new(&dist).not_found_service(index),
-    )
+    app.fallback_service(ServeDir::new(&dist).not_found_service(index))
 }
 
 #[tokio::main]
@@ -77,9 +75,7 @@ async fn main() {
 
     // 初始化数据库
     let start = std::time::Instant::now();
-    let app = Arc::new(
-        App::new(&cfg.db_path).expect("failed to open database"),
-    );
+    let app = Arc::new(App::new(&cfg.db_path).expect("failed to open database"));
     tracing::info!(
         db = %cfg.db_path,
         elapsed_ms = start.elapsed().as_millis() as u64,

@@ -125,7 +125,9 @@ impl Agent {
         }
 
         // 1. 会话：复用传入的 id；不存在或未传则自动新建。
-        let session = self.conversation.get_or_create_session(input.session_id.as_deref())?;
+        let session = self
+            .conversation
+            .get_or_create_session(input.session_id.as_deref())?;
 
         // 首条消息自动生成会话标题（截取前 24 个字符）。
         if session.title.trim().is_empty() {
@@ -146,11 +148,8 @@ impl Agent {
         // 会被算进历史重复出现。默认按"今天"取对话（日界=用户当地 06:00，今日过少自动
         // 并入昨天，让 AI 有连续性）；显式 history_count 则退化为取最近 N 条。
         // 取数与整理统一由 core::context 负责（与主动决策共用同一套实现）。
-        let history_turns = context::fetch_history(
-            self.conversation.as_ref(),
-            &session.id,
-            input.history_count,
-        )?;
+        let history_turns =
+            context::fetch_history(self.conversation.as_ref(), &session.id, input.history_count)?;
         tracing::info!(
             target: "trace",
             stage = "history",
@@ -161,10 +160,13 @@ impl Agent {
 
         // 用户消息入库（记录）。带通道报文时间戳时用之（消息记录精确时间线），否则记接收时刻。
         let user_message = match input.user_time.as_deref().and_then(parse_rfc3339) {
-            Some(at) => self
+            Some(at) => {
+                self.conversation
+                    .add_message_at(&session.id, "user", &input.message, at)?
+            }
+            None => self
                 .conversation
-                .add_message_at(&session.id, "user", &input.message, at)?,
-            None => self.conversation.add_message(&session.id, "user", &input.message)?,
+                .add_message(&session.id, "user", &input.message)?,
         };
 
         // 3. 上下文（二）：记忆召回（已按 memory_recall_threshold 过滤相关度、剔除过期记忆）。
@@ -246,7 +248,8 @@ impl Agent {
         );
 
         // 3. AI 回复入库，刷新会话时间戳。
-        self.conversation.add_message(&session.id, "assistant", &reply)?;
+        self.conversation
+            .add_message(&session.id, "assistant", &reply)?;
         self.conversation.touch_session(&session.id)?;
 
         span.record("user_message_id", user_message.id.as_str());
@@ -323,10 +326,12 @@ impl Agent {
         let content = extraction.content_or(text);
         let message_id = (!user_message_id.is_empty()).then_some(user_message_id);
         let store_started = std::time::Instant::now();
-        match self
-            .memory
-            .store(content, &extraction.memory_type, &extraction.tier, message_id)
-        {
+        match self.memory.store(
+            content,
+            &extraction.memory_type,
+            &extraction.tier,
+            message_id,
+        ) {
             Ok(record) => {
                 tracing::info!(
                     session_id,

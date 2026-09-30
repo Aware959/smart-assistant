@@ -8,18 +8,15 @@ use std::time::Duration;
 use base64::Engine as _;
 use serde::Deserialize;
 
-use super::session::SavedSession;
 use super::super::chunk_text;
 use super::base_info;
+use super::session::SavedSession;
 use super::{MAX_MESSAGE_LEN, QR_POLL_INTERVAL_SECS};
 
 /// 宽松取值：兼容顶层字段与 `data` 包裹两种形状，多个候选键按序尝试。
 fn get_str(v: &serde_json::Value, keys: &[&str]) -> String {
     for key in keys {
-        for candidate in [
-            v.get(key),
-            v.get("data").and_then(|d| d.get(key)),
-        ] {
+        for candidate in [v.get(key), v.get("data").and_then(|d| d.get(key))] {
             if let Some(s) = candidate.and_then(|x| x.as_str()) {
                 if !s.trim().is_empty() {
                     return s.to_string();
@@ -44,9 +41,7 @@ fn redact(v: &serde_json::Value) -> serde_json::Value {
                 })
                 .collect(),
         ),
-        serde_json::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(redact).collect())
-        }
+        serde_json::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(redact).collect()),
         _ => v.clone(),
     }
 }
@@ -218,10 +213,7 @@ async fn get_json(
 ///
 /// 响应按 `serde_json::Value` 宽松解析（兼容顶层 / `data` 包裹、多种键名），
 /// 遇到非常规状态会把脱敏后的原文打到日志，便于对照协议文档排查。
-pub(crate) async fn login(
-    client: &reqwest::Client,
-    base: &str,
-) -> Result<SavedSession, String> {
+pub(crate) async fn login(client: &reqwest::Client, base: &str) -> Result<SavedSession, String> {
     loop {
         let qr = get_json(
             client,
@@ -236,7 +228,11 @@ pub(crate) async fn login(
         }
         // qrcode_img_content 是微信可识别的二维码内容，优先用它渲染。
         let payload = get_str(&qr, &["qrcode_img_content", "qrcode_url", "qr_img"]);
-        let payload = if payload.is_empty() { qrcode.clone() } else { payload };
+        let payload = if payload.is_empty() {
+            qrcode.clone()
+        } else {
+            payload
+        };
         tracing::info!(
             "\n微信扫码登录（bot_type=3）：\n{}\n扫码后在手机上确认，超时会自动刷新二维码。",
             render_qr(&payload)
@@ -279,10 +275,7 @@ pub(crate) async fn login(
                 _ => {
                     if status != "wait" && status != "scaned" && status != last_status {
                         last_status = status.clone();
-                        tracing::info!(
-                            "非常规扫码状态 {status:?}，原文: {:?}",
-                            redact(&st)
-                        );
+                        tracing::info!("非常规扫码状态 {status:?}，原文: {:?}", redact(&st));
                     }
                     continue;
                 }
@@ -315,7 +308,10 @@ pub(crate) async fn send_typing(
         10,
     )
     .await;
-    let ticket = config.ok().and_then(|c| c.typing_ticket).unwrap_or_default();
+    let ticket = config
+        .ok()
+        .and_then(|c| c.typing_ticket)
+        .unwrap_or_default();
     if ticket.trim().is_empty() {
         return;
     }
@@ -399,16 +395,10 @@ mod tests {
         }"#;
         let updates: UpdatesResponse = serde_json::from_str(raw).unwrap();
         assert_eq!(updates.msgs.len(), 3);
-        assert_eq!(
-            updates.get_updates_buf.as_deref(),
-            Some("eyJzZXEiOjQyOH0=")
-        );
+        assert_eq!(updates.get_updates_buf.as_deref(), Some("eyJzZXEiOjQyOH0="));
 
         // 用户文本消息可提取
-        assert_eq!(
-            extract_text(&updates.msgs[0]).as_deref(),
-            Some("你好")
-        );
+        assert_eq!(extract_text(&updates.msgs[0]).as_deref(), Some("你好"));
         // bot 自己的回声跳过
         assert!(extract_text(&updates.msgs[1]).is_none());
         // 非文本 item 跳过
@@ -434,10 +424,9 @@ mod tests {
         );
 
         // data 包裹形状与候选键名同样能取到
-        let nested: serde_json::Value = serde_json::from_str(
-            r#"{"data": {"state": "confirmed", "access_token": "tok_xyz"}}"#,
-        )
-        .unwrap();
+        let nested: serde_json::Value =
+            serde_json::from_str(r#"{"data": {"state": "confirmed", "access_token": "tok_xyz"}}"#)
+                .unwrap();
         assert_eq!(get_str(&nested, &["status", "state"]), "confirmed");
         assert_eq!(
             get_str(&nested, &["bot_token", "token", "access_token"]),
@@ -472,10 +461,7 @@ mod tests {
     #[test]
     fn business_headers_have_required_fields() {
         let headers = business_headers("test_token_123").unwrap();
-        assert_eq!(
-            headers.get("AuthorizationType").unwrap(),
-            "ilink_bot_token"
-        );
+        assert_eq!(headers.get("AuthorizationType").unwrap(), "ilink_bot_token");
         assert_eq!(
             headers.get(reqwest::header::AUTHORIZATION).unwrap(),
             "Bearer test_token_123"

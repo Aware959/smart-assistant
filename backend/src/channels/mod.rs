@@ -62,11 +62,7 @@ pub(crate) struct IlinkContact {
 #[cfg(feature = "ilink")]
 impl IlinkContact {
     /// context_token 是否仍在新鲜窗口内（时效 + 次数上限）。
-    pub(crate) fn is_fresh(
-        &self,
-        now: chrono::DateTime<chrono::Utc>,
-        max_age_hours: i64,
-    ) -> bool {
+    pub(crate) fn is_fresh(&self, now: chrono::DateTime<chrono::Utc>, max_age_hours: i64) -> bool {
         let age = chrono::Duration::max(
             now.signed_duration_since(self.observed_at),
             chrono::Duration::zero(),
@@ -86,7 +82,11 @@ pub(crate) fn shared_push() -> &'static PushChannels {
 /// Telegram `Message.date` 为秒级；iLink 类微信报文常为毫秒级。None/非法值返回 None。
 pub(crate) fn ts_to_rfc3339(ts: Option<i64>) -> Option<String> {
     let ts = ts?;
-    let secs = if ts > 1_000_000_000_000 { ts / 1000 } else { ts };
+    let secs = if ts > 1_000_000_000_000 {
+        ts / 1000
+    } else {
+        ts
+    };
     chrono::DateTime::from_timestamp(secs, 0).map(|t| t.to_rfc3339())
 }
 
@@ -160,7 +160,10 @@ impl ChannelsPusher {
 #[cfg(feature = "ilink")]
 fn ilink_has_fresh_token(external_id: &str) -> bool {
     let cfg = crate::config::Config::get();
-    let reg = shared_push().ilink.lock().unwrap_or_else(|p| p.into_inner());
+    let reg = shared_push()
+        .ilink
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     reg.as_ref()
         .and_then(|r| r.contacts.get(external_id))
         .map(|c| c.is_fresh(chrono::Utc::now(), cfg.ilink_context_max_age_hours))

@@ -80,7 +80,11 @@ pub fn extract_from_text(user_input: &str) -> Result<MemoryExtraction> {
     } = judge(user_input)?;
 
     // 事实化失败不算失败：上层会用原文兜底（`MemoryExtraction::content_or`）。
-    let memory_content = if is_memory { summarize(user_input) } else { None };
+    let memory_content = if is_memory {
+        summarize(user_input)
+    } else {
+        None
+    };
 
     Ok(MemoryExtraction {
         is_memory,
@@ -391,7 +395,8 @@ mod tests {
     #[test]
     fn parse_judgement_tolerates_wrong_types() {
         // 弱约束端点（json_object）可能把布尔写成字符串、把枚举写成数字。
-        let raw = r#"{"is_memory": "true", "memory_type": "preference", "tier": 3, "relation": "warm"}"#;
+        let raw =
+            r#"{"is_memory": "true", "memory_type": "preference", "tier": 3, "relation": "warm"}"#;
         let parsed = parse_judgement(raw).unwrap();
         assert!(parsed.is_memory, "字符串 \"true\" 应视为真");
         assert_eq!(parsed.memory_type, "preference");
@@ -421,7 +426,10 @@ mod tests {
     fn parse_judgement_errors_only_when_no_json_object() {
         // 唯一仍然报错的情形：整段输出里没有任何 JSON 对象。
         let err = parse_judgement("抱歉，我无法判断。").unwrap_err();
-        assert!(err.to_string().contains("不包含可解析的 JSON 对象"), "{err}");
+        assert!(
+            err.to_string().contains("不包含可解析的 JSON 对象"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -212,7 +212,9 @@ pub fn from_byte_array(bytes: &[u8]) -> Result<Vec<f32>> {
     let mut data = Vec::with_capacity(bytes.len() / 4);
     for chunk in bytes.chunks_exact(4) {
         data.push(f32::from_le_bytes(
-            chunk.try_into().map_err(|_| SqlError::Config("invalid f32".into()))?,
+            chunk
+                .try_into()
+                .map_err(|_| SqlError::Config("invalid f32".into()))?,
         ));
     }
     Ok(data)

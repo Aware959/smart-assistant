@@ -30,7 +30,9 @@ pub(crate) fn register_vec_extension() {
                 *mut *mut i8,
                 *const rusqlite::ffi::sqlite3_api_routines,
             ) -> i32,
-        >(sqlite_vec::sqlite3_vec_init as *const ())));
+        >(
+            sqlite_vec::sqlite3_vec_init as *const ()
+        )));
     }
 }
 
@@ -86,9 +88,7 @@ impl Database {
 /// 全进程共享同一把 `Mutex<Database>`，任何组件持锁时间过长都会让其余组件
 /// （telegram 长轮询 / 世界心跳 / 主动引擎）排队——等待超过 1s 就记 warn，
 /// 用于暴露"持锁跨 LLM/embedding 阻塞调用"这类隐性卡顿。
-pub fn lock_db(
-    db: &std::sync::Mutex<Database>,
-) -> std::sync::MutexGuard<'_, Database> {
+pub fn lock_db(db: &std::sync::Mutex<Database>) -> std::sync::MutexGuard<'_, Database> {
     let start = std::time::Instant::now();
     let guard = db.lock().unwrap_or_else(|p| {
         tracing::error!("db 互斥锁中毒：回收内部状态，继续运行");

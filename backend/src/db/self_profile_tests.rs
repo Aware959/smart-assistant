@@ -28,7 +28,10 @@ fn set_reads_back_in_insertion_order() {
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0], ("性格".to_string(), "热情、开放".to_string()));
     assert_eq!(rows[1], ("人格".to_string(), "INFP".to_string()));
-    assert_eq!(rows[2], ("爱好".to_string(), "打游戏、健身、追剧".to_string()));
+    assert_eq!(
+        rows[2],
+        ("爱好".to_string(), "打游戏、健身、追剧".to_string())
+    );
 }
 
 #[test]
@@ -36,9 +39,11 @@ fn set_overwrites_value_and_touches_updated_at() {
     let conn = open_conn();
     set(&conn, "性格", "热情").unwrap();
     let first: String = conn
-        .query_row("SELECT updated_at FROM self_profile WHERE key='性格'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT updated_at FROM self_profile WHERE key='性格'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     set(&conn, "性格", "热情、开放").unwrap();
 
@@ -46,9 +51,11 @@ fn set_overwrites_value_and_touches_updated_at() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].1, "热情、开放");
     let second: String = conn
-        .query_row("SELECT updated_at FROM self_profile WHERE key='性格'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT updated_at FROM self_profile WHERE key='性格'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert!(second >= first, "覆盖应刷新 updated_at");
 }

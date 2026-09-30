@@ -64,7 +64,13 @@ pub async fn run(
         let idle = pace::next_sleep();
         tracing::debug!(next_in_secs = idle.as_secs(), "等待下一轮意图判定");
         tokio::time::sleep(idle).await;
-        run_once(chat.as_ref(), session.as_ref(), tracker.as_ref(), pusher.as_ref()).await;
+        run_once(
+            chat.as_ref(),
+            session.as_ref(),
+            tracker.as_ref(),
+            pusher.as_ref(),
+        )
+        .await;
     }
 }
 
@@ -91,10 +97,17 @@ async fn run_once(
         }
     };
     if candidates.is_empty() {
-        tracing::debug!(elapsed_ms = round_start.elapsed().as_millis() as u64, "本轮无可用候选");
+        tracing::debug!(
+            elapsed_ms = round_start.elapsed().as_millis() as u64,
+            "本轮无可用候选"
+        );
         return;
     }
-    tracing::info!(n = candidates.len(), elapsed_ms = round_start.elapsed().as_millis() as u64, "意图判定：候选已筛出");
+    tracing::info!(
+        n = candidates.len(),
+        elapsed_ms = round_start.elapsed().as_millis() as u64,
+        "意图判定：候选已筛出"
+    );
 
     for cand in candidates.iter().take(MAX_CANDIDATES_PER_CYCLE) {
         if !sender::pushable(pusher, cand) {

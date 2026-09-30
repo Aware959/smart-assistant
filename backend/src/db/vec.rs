@@ -50,7 +50,9 @@ impl VecStatus {
         let mut parts = Vec::new();
         let actual = self.actual_dim;
         if actual != Some(self.configured_dim) {
-            let s = actual.map(|d| d.to_string()).unwrap_or_else(|| "缺失".into());
+            let s = actual
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "缺失".into());
             parts.push(format!("embedding_dim {s} -> {}", self.configured_dim));
         }
         if let Some(m) = self.stored_model.as_deref() {
@@ -69,12 +71,8 @@ impl VecStatus {
 
 /// 确认 sqlite-vec 扩展可用。
 pub fn ensure_vec_extension(conn: &Connection) -> Result<()> {
-    conn.query_row(
-        "SELECT vec_version()",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .map_err(|_| SqlError::Config("sqlite-vec extension not available".to_string()))?;
+    conn.query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
+        .map_err(|_| SqlError::Config("sqlite-vec extension not available".to_string()))?;
     Ok(())
 }
 
@@ -107,8 +105,7 @@ pub fn inspect_vec(
     configured_dim: usize,
     configured_model: &str,
 ) -> Result<VecStatus> {
-    let stored_dim = meta::get(conn, KEY_EMBEDDING_DIM)?
-        .and_then(|v| v.parse::<usize>().ok());
+    let stored_dim = meta::get(conn, KEY_EMBEDDING_DIM)?.and_then(|v| v.parse::<usize>().ok());
     let stored_model = meta::get(conn, KEY_EMBEDDING_MODEL)?;
     let actual_dim = existing_vec_dim(conn)?;
 
@@ -139,8 +136,7 @@ pub(crate) fn init_vector_table(
     configured_dim: usize,
     configured_model: String,
 ) -> Result<VecStatus> {
-    let stored_dim = meta::get(conn, KEY_EMBEDDING_DIM)?
-        .and_then(|v| v.parse::<usize>().ok());
+    let stored_dim = meta::get(conn, KEY_EMBEDDING_DIM)?.and_then(|v| v.parse::<usize>().ok());
 
     if existing_vec_dim(conn)?.is_none() {
         let dim = stored_dim.unwrap_or(configured_dim);
@@ -334,7 +330,9 @@ mod tests {
         assert_eq!(st.memory_count, 2, "memories 不应受影响");
 
         let content: String = conn
-            .query_row("SELECT content FROM memories WHERE id = 'a'", [], |row| row.get(0))
+            .query_row("SELECT content FROM memories WHERE id = 'a'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(content, "content-a");
     }

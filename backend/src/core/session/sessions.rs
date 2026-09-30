@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 
 use super::{ConversationSession, MessageTurn, StoredMessage};
-use crate::db::{lock_db, Database};
 use crate::db::message::Message as DbMessage;
+use crate::db::{lock_db, Database};
 use crate::error::Result;
 
 /// 某通道的入站消息时效分级：决定"这条消息现在该不该回、回得多自然"。
@@ -209,7 +209,12 @@ impl Sessions {
     }
 
     /// 追加一条消息（时间取存储侧"现在"）。
-    pub fn add_message(&self, session_id: &str, role: &str, content: &str) -> Result<StoredMessage> {
+    pub fn add_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+    ) -> Result<StoredMessage> {
         let m = crate::db::message::create(&lock_db(&self.db), session_id, role, content)?;
         self.reflect_message(session_id, m.clone())?;
         Ok(StoredMessage { id: m.id })
@@ -276,7 +281,9 @@ impl Sessions {
 
     /// 读取某通道上次确认的拉取游标（从未持久化则为 None）。
     pub fn load_cursor(&self, channel: &str) -> Option<String> {
-        crate::db::channel::get_cursor(&lock_db(&self.db), channel).ok().flatten()
+        crate::db::channel::get_cursor(&lock_db(&self.db), channel)
+            .ok()
+            .flatten()
     }
 
     /// 持久化某通道的拉取游标（供重启后续传，避免丢弃离线期消息）。
@@ -341,7 +348,9 @@ fn turn_from(m: &DbMessage) -> MessageTurn {
 }
 
 fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 #[cfg(test)]
@@ -394,17 +403,21 @@ mod tests {
     fn session_map_resolve_sets_channel_and_latest_time() {
         let sessions = Sessions::new(db()).unwrap();
         let sid = sessions.resolve("telegram", "100").unwrap();
-        sessions.add_message_at(
-            &sid,
-            "user",
-            "你好",
-            chrono::DateTime::parse_from_rfc3339("2026-09-14T03:47:00+00:00")
-                .unwrap()
-                .with_timezone(&Utc),
-        )
-        .unwrap();
+        sessions
+            .add_message_at(
+                &sid,
+                "user",
+                "你好",
+                chrono::DateTime::parse_from_rfc3339("2026-09-14T03:47:00+00:00")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            )
+            .unwrap();
 
-        assert_eq!(sessions.channel_of(&sid), Some(("telegram".into(), "100".into())));
+        assert_eq!(
+            sessions.channel_of(&sid),
+            Some(("telegram".into(), "100".into()))
+        );
         assert!(sessions.latest_user_at(&sid).is_some());
     }
 
@@ -419,10 +432,7 @@ mod tests {
         );
         // 15 分钟 ~ 24 小时 → 交给模型判断怎么接
         assert_eq!(
-            classify_inbound(
-                now - Duration::minutes(FRESH_WINDOW_MINUTES + 1),
-                now
-            ),
+            classify_inbound(now - Duration::minutes(FRESH_WINDOW_MINUTES + 1), now),
             InboundFreshness::Delayed
         );
         assert_eq!(
@@ -431,10 +441,7 @@ mod tests {
         );
         // 超过 24 小时 → 只入库不回复
         assert_eq!(
-            classify_inbound(
-                now - Duration::hours(MAX_REPLYABLE_HOURS + 1),
-                now
-            ),
+            classify_inbound(now - Duration::hours(MAX_REPLYABLE_HOURS + 1), now),
             InboundFreshness::TooOld
         );
         // 时钟回拨：负间隔视作刚收到，不该误判成 TooOld
@@ -471,10 +478,7 @@ mod tests {
     fn cursor_persists_across_instances() {
         let db = db();
         let first = Sessions::new(db.clone()).unwrap();
-        assert!(
-            first.load_cursor("telegram").is_none(),
-            "首次运行无游标"
-        );
+        assert!(first.load_cursor("telegram").is_none(), "首次运行无游标");
         first.save_cursor("telegram", "4821");
         first.save_cursor("ilink", "buf-abc");
 

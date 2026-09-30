@@ -251,7 +251,9 @@ mod tests {
         let before = seeded("telegram", "42")
             .apply_event(RelationEvent::Warm, Utc::now())
             .apply_event(RelationEvent::Warm, Utc::now());
-        let after = before.clone().apply_event(RelationEvent::Conflict, Utc::now());
+        let after = before
+            .clone()
+            .apply_event(RelationEvent::Conflict, Utc::now());
         assert!(after.closeness < before.closeness);
         assert!(after.trust < before.trust);
         assert!((after.closeness - before.closeness * CONFLICT_CLOSENESS_FACTOR).abs() < 1e-4);
@@ -267,8 +269,12 @@ mod tests {
         let armed = seeded("telegram", "42")
             .apply_event(RelationEvent::Warm, Utc::now())
             .apply_event(RelationEvent::Warm, Utc::now());
-        let conflicted = armed.clone().apply_event(RelationEvent::Conflict, Utc::now());
-        let healed = conflicted.clone().apply_event(RelationEvent::Reconcile, Utc::now());
+        let conflicted = armed
+            .clone()
+            .apply_event(RelationEvent::Conflict, Utc::now());
+        let healed = conflicted
+            .clone()
+            .apply_event(RelationEvent::Reconcile, Utc::now());
         assert!(healed.trust > conflicted.trust);
         assert!(healed.closeness > conflicted.closeness);
         assert!(healed.trust > armed.trust, "和解/道歉能显著修复信任");
@@ -277,11 +283,23 @@ mod tests {
     #[test]
     fn event_labels_parse() {
         assert_eq!(RelationEvent::from_label("warm"), RelationEvent::Warm);
-        assert_eq!(RelationEvent::from_label("  AMBIG "), RelationEvent::Ambiguous);
-        assert_eq!(RelationEvent::from_label("conflict"), RelationEvent::Conflict);
-        assert_eq!(RelationEvent::from_label("apology"), RelationEvent::Reconcile);
+        assert_eq!(
+            RelationEvent::from_label("  AMBIG "),
+            RelationEvent::Ambiguous
+        );
+        assert_eq!(
+            RelationEvent::from_label("conflict"),
+            RelationEvent::Conflict
+        );
+        assert_eq!(
+            RelationEvent::from_label("apology"),
+            RelationEvent::Reconcile
+        );
         assert_eq!(RelationEvent::from_label("care"), RelationEvent::Warm);
-        assert_eq!(RelationEvent::from_label("whatever"), RelationEvent::Neutral);
+        assert_eq!(
+            RelationEvent::from_label("whatever"),
+            RelationEvent::Neutral
+        );
         assert_eq!(RelationEvent::from_label(""), RelationEvent::Neutral);
     }
 
@@ -294,7 +312,10 @@ mod tests {
         let before = frozen.closeness;
         let after = frozen.decayed(Utc::now());
         assert!(after.closeness < before);
-        assert!((after.closeness - before * 0.5).abs() < 1e-3, "半衰期 14 天");
+        assert!(
+            (after.closeness - before * 0.5).abs() < 1e-3,
+            "半衰期 14 天"
+        );
     }
 
     #[test]

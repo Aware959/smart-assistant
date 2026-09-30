@@ -39,9 +39,9 @@ pub fn create(db: &Database, title: &str) -> Result<Session> {
 }
 
 pub fn get(db: &Database, id: &str) -> Result<Option<Session>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?1",
-    )?;
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?1")?;
     let mut rows = stmt.query_map([id], |row| {
         Ok(Session {
             id: row.get(0)?,
@@ -93,6 +93,7 @@ pub fn list(db: &Database, limit: usize) -> Result<Vec<Session>> {
 }
 
 pub fn delete(db: &Database, id: &str) -> Result<()> {
-    db.conn().execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+    db.conn()
+        .execute("DELETE FROM sessions WHERE id = ?1", [id])?;
     Ok(())
 }

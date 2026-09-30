@@ -5,8 +5,8 @@
 use chrono::{DateTime, Duration, Utc};
 
 use crate::core::schema::message::ChatMessage;
-use crate::core::session::Sessions;
 use crate::core::session::MessageTurn;
+use crate::core::session::Sessions;
 use crate::error::Result;
 
 /// 一天的起点钟点（用户当地时钟）：这个钟点之前算昨天、之后算今天。
@@ -49,8 +49,7 @@ pub(crate) fn fetch(
             let start = day_window_start(USER_OFFSET_MINUTES);
             let mut turns = conversation.messages_since(session_id, start)?;
             if turns.len() < DAY_POOL_THRESHOLD {
-                turns = conversation
-                    .messages_since(session_id, start - Duration::days(1))?;
+                turns = conversation.messages_since(session_id, start - Duration::days(1))?;
             }
             build_day_history(&turns)
         }
@@ -99,8 +98,8 @@ pub(crate) fn build_day_history(turns: &[MessageTurn]) -> Result<Vec<ChatMessage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Timelike;
     use crate::core::session::MessageTurn;
+    use chrono::Timelike;
 
     const EAST8_OFFSET: i64 = 8 * 60;
 
@@ -152,7 +151,11 @@ mod tests {
         let turns = (0..(DAY_CONTEXT_MAX + 10))
             .map(|i| {
                 let role = if i % 2 == 0 { "user" } else { "assistant" };
-                turn(role, &format!("消息{i}"), &rfc(base + Duration::minutes(i as i64)))
+                turn(
+                    role,
+                    &format!("消息{i}"),
+                    &rfc(base + Duration::minutes(i as i64)),
+                )
             })
             .collect::<Vec<_>>();
         let tail_start = turns.len() - (DAY_CONTEXT_MAX - DAY_KEEP_HEAD);
@@ -163,7 +166,10 @@ mod tests {
         assert_eq!(out[0].content, "消息0");
         assert_eq!(out[1].content, "消息1");
         assert_eq!(out[DAY_KEEP_HEAD].content, format!("消息{tail_start}"));
-        assert_eq!(out.last().unwrap().content, format!("消息{}", turns.len() - 1));
+        assert_eq!(
+            out.last().unwrap().content,
+            format!("消息{}", turns.len() - 1)
+        );
     }
 
     #[test]

@@ -14,24 +14,40 @@
 use std::process::ExitCode;
 
 use smart_assistant::config::Config;
-use smart_assistant::db;
 use smart_assistant::core::memory;
+use smart_assistant::db;
 
 fn banner(title: &str) {
     println!("\n===== sa-mem: {title} =====");
 }
 
 fn print_status(status: &db::VecStatus) {
-    println!("  配置签名      : embedding_dim = {} , embedding_model = {}",
-        status.configured_dim, status.configured_model);
-    println!("  存储签名      : embedding_dim = {} , embedding_model = {}",
-        status.stored_dim.map(|d| d.to_string()).unwrap_or_else(|| "未记录".into()),
-        status.stored_model.as_deref().unwrap_or("未记录"));
-    println!("  向量表实际维度: {}", status.actual_dim.map(|d| d.to_string()).unwrap_or_else(|| "表不存在".into()));
+    println!(
+        "  配置签名      : embedding_dim = {} , embedding_model = {}",
+        status.configured_dim, status.configured_model
+    );
+    println!(
+        "  存储签名      : embedding_dim = {} , embedding_model = {}",
+        status
+            .stored_dim
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "未记录".into()),
+        status.stored_model.as_deref().unwrap_or("未记录")
+    );
+    println!(
+        "  向量表实际维度: {}",
+        status
+            .actual_dim
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "表不存在".into())
+    );
     println!("  memories 记录 : {} 条", status.memory_count);
     println!("  memory_vectors: {} 条", status.vector_count);
     if status.needs_rebuild() {
-        println!("  状态          : 签名不一致，需要重建（{}）", status.diff_summary().unwrap_or_default());
+        println!(
+            "  状态          : 签名不一致，需要重建（{}）",
+            status.diff_summary().unwrap_or_default()
+        );
     } else if status.search_usable() {
         println!("  状态          : 正常，记忆检索可用");
     } else {
@@ -58,7 +74,9 @@ fn cmd_rebuild(cfg: &Config, force: bool) -> Result<(), String> {
         return Ok(());
     }
     if status.needs_rebuild() {
-        println!("\n  确认重建：仅重建 memory_vectors，memories(content/created_at/updated_at) 不动。");
+        println!(
+            "\n  确认重建：仅重建 memory_vectors，memories(content/created_at/updated_at) 不动。"
+        );
     } else {
         println!("\n  强制重建（--force）：仅重建 memory_vectors，memories 不动。");
     }

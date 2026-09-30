@@ -23,8 +23,7 @@ pub(crate) fn load(path: &str) -> SavedSession {
 }
 
 pub(crate) fn save(path: &str, sess: &SavedSession) -> Result<(), String> {
-    let data =
-        serde_json::to_string_pretty(sess).map_err(|e| format!("序列化会话失败: {e}"))?;
+    let data = serde_json::to_string_pretty(sess).map_err(|e| format!("序列化会话失败: {e}"))?;
     std::fs::write(path, data).map_err(|e| format!("写入会话文件失败: {e}"))?;
     Ok(())
 }

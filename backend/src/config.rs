@@ -185,9 +185,9 @@ impl Config {
                 .unwrap_or(90),
             tls_cert: std::env::var("SMART_ASSISTANT_TLS_CERT").ok(),
             tls_key: std::env::var("SMART_ASSISTANT_TLS_KEY").ok(),
-            web_dist: std::env::var("SMART_ASSISTANT_WEB_DIST").ok().or_else(|| {
-                Some("../frontend/dist".to_string())
-            }),
+            web_dist: std::env::var("SMART_ASSISTANT_WEB_DIST")
+                .ok()
+                .or_else(|| Some("../frontend/dist".to_string())),
             telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
             telegram_enabled: std::env::var("TELEGRAM_ENABLED")
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
@@ -232,7 +232,9 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(180),
             intent_quiet_hours: parse_quiet_hours(
-                std::env::var("INTENT_QUIET_HOURS").unwrap_or_default().as_str(),
+                std::env::var("INTENT_QUIET_HOURS")
+                    .unwrap_or_default()
+                    .as_str(),
             ),
             intent_daily_limit: std::env::var("INTENT_DAILY_LIMIT")
                 .ok()

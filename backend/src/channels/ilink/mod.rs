@@ -111,9 +111,7 @@ async fn handle_text(
                     history_count: None,
                     user_time,
                 };
-                chat
-                    .chat_stream(&input, |_| {})
-                    .map_err(|e| e.to_string())
+                chat.chat_stream(&input, |_| {}).map_err(|e| e.to_string())
             })
             .await
             .map_err(|e| format!("对话任务失败: {e}"))??;
@@ -370,7 +368,15 @@ pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, tracker: Arc<IntentTr
         }
 
         tracing::info!("iLink 通道已连接，开始长轮询");
-        match run_loop(chat.clone(), session.clone(), tracker.clone(), &client, &sess).await {
+        match run_loop(
+            chat.clone(),
+            session.clone(),
+            tracker.clone(),
+            &client,
+            &sess,
+        )
+        .await
+        {
             Ok(PollResult::Relogin) => {
                 // 会话过期：清掉旧凭证，下一轮重新扫码。
                 sess = SavedSession::default();

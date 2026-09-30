@@ -58,9 +58,9 @@ pub fn create_at(
 }
 
 pub fn get(db: &Database, id: &str) -> Result<Option<Message>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT id, session_id, role, content, created_at FROM messages WHERE id = ?1",
-    )?;
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT id, session_id, role, content, created_at FROM messages WHERE id = ?1")?;
     let mut rows = stmt.query_map([id], |row| {
         Ok(Message {
             id: row.get(0)?,
@@ -84,11 +84,7 @@ pub fn list_by_session(db: &Database, session_id: &str, limit: usize) -> Result<
 
 /// 取某会话在 `since`（UTC，含）之后的消息，按时间正序。
 /// created_at 统一以 `to_rfc3339()` 落库，文本序即时间序。
-pub fn list_since(
-    db: &Database,
-    session_id: &str,
-    since: DateTime<Utc>,
-) -> Result<Vec<Message>> {
+pub fn list_since(db: &Database, session_id: &str, since: DateTime<Utc>) -> Result<Vec<Message>> {
     let mut stmt = db.conn().prepare(
         "SELECT id, session_id, role, content, created_at
          FROM messages WHERE session_id = ?1 AND created_at >= ?2
@@ -98,7 +94,8 @@ pub fn list_since(
         rusqlite::params![session_id, since.to_rfc3339()],
         map_message_row,
     )?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// 按会话取最近 `limit` 条消息，返回时仍按时间正序。
@@ -114,7 +111,8 @@ pub fn list_all(db: &Database, session_id: &str) -> Result<Vec<Message>> {
          ORDER BY created_at ASC, rowid ASC",
     )?;
     let rows = stmt.query_map([session_id], map_message_row)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// 该会话最近一条用户消息的时刻（无用户消息返回 None），用于时间世界模型。
@@ -138,7 +136,11 @@ fn list_range(db: &Database, session_id: &str, limit: usize, recent: bool) -> Re
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let (by, rowid) = if recent { ("DESC", "DESC") } else { ("ASC", "ASC") };
+    let (by, rowid) = if recent {
+        ("DESC", "DESC")
+    } else {
+        ("ASC", "ASC")
+    };
     let sql = format!(
         "SELECT id, session_id, role, content, created_at
          FROM messages WHERE session_id = ?1
@@ -165,18 +167,16 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
 }
 
 pub fn delete_for_session(db: &Database, session_id: &str) -> Result<()> {
-    db.conn().execute(
-        "DELETE FROM messages WHERE session_id = ?1",
-        [session_id],
-    )?;
+    db.conn()
+        .execute("DELETE FROM messages WHERE session_id = ?1", [session_id])?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
     use crate::db::Database;
+    use chrono::{Duration, Utc};
 
     fn session_id(db: &Database) -> String {
         crate::db::session::create(db, "").unwrap().id
@@ -193,7 +193,11 @@ mod tests {
 
         let got = list_since(&db, &sid, base).unwrap();
         let contents: Vec<&str> = got.iter().map(|m| m.content.as_str()).collect();
-        assert_eq!(contents, vec!["中", "晚"], "仅返回 since 之后的并按时间正序");
+        assert_eq!(
+            contents,
+            vec!["中", "晚"],
+            "仅返回 since 之后的并按时间正序"
+        );
 
         let empty = list_since(&db, &sid, base + Duration::hours(1)).unwrap();
         assert!(empty.is_empty());

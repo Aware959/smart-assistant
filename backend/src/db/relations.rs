@@ -67,9 +67,9 @@ pub fn save(db: &Database, row: &RelationRow) -> Result<()> {
 
 /// 读全表（供心跳对每条关系做时间衰减）。
 pub fn list_all(db: &Database) -> Result<Vec<RelationRow>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT channel, external_id, closeness, trust, updated_at FROM relations",
-    )?;
+    let mut stmt = db
+        .conn()
+        .prepare("SELECT channel, external_id, closeness, trust, updated_at FROM relations")?;
     let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
@@ -96,7 +96,9 @@ pub fn list_all(db: &Database) -> Result<Vec<RelationRow>> {
 }
 
 fn parse_ts(s: String) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(&s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 #[cfg(test)]

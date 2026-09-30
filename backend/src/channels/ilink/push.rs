@@ -4,10 +4,10 @@
 //! （约 24h / `ILINK_MAX_SENDS_PER_REFRESH` 次的保守取值）主动发送；超窗或超次数须等
 //! 用户再次入站刷新。窗口可用性由 [`super::super::IlinkContact::is_fresh`] 判定。
 
+use super::super::{IlinkContact, IlinkRegistry};
 use super::protocol;
 use super::session::SavedSession;
-use super::{DEFAULT_BASE};
-use super::super::{IlinkContact, IlinkRegistry};
+use super::DEFAULT_BASE;
 use crate::config::Config;
 
 /// 登录会话更新：登录/重登录后调用（重登录时清空全部用户 token 缓存）。

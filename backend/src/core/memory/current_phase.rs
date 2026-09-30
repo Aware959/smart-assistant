@@ -42,14 +42,38 @@ pub enum Phase {
 impl Phase {
     /// 全部时段（顺序即一天顺序；供遍历/校验与 `phase_of` 数据驱动匹配）。
     pub const ALL: [Phase; 8] = [
-        Phase::DeepNight(PhaseDef { hours: (0, 4), label: "深夜" }),
-        Phase::EarlyMorning(PhaseDef { hours: (5, 6), label: "清晨" }),
-        Phase::Morning(PhaseDef { hours: (7, 9), label: "早上" }),
-        Phase::Forenoon(PhaseDef { hours: (10, 11), label: "上午" }),
-        Phase::Noon(PhaseDef { hours: (12, 13), label: "中午" }),
-        Phase::Afternoon(PhaseDef { hours: (14, 17), label: "下午" }),
-        Phase::Evening(PhaseDef { hours: (18, 19), label: "傍晚" }),
-        Phase::Night(PhaseDef { hours: (20, 23), label: "晚上" }),
+        Phase::DeepNight(PhaseDef {
+            hours: (0, 4),
+            label: "深夜",
+        }),
+        Phase::EarlyMorning(PhaseDef {
+            hours: (5, 6),
+            label: "清晨",
+        }),
+        Phase::Morning(PhaseDef {
+            hours: (7, 9),
+            label: "早上",
+        }),
+        Phase::Forenoon(PhaseDef {
+            hours: (10, 11),
+            label: "上午",
+        }),
+        Phase::Noon(PhaseDef {
+            hours: (12, 13),
+            label: "中午",
+        }),
+        Phase::Afternoon(PhaseDef {
+            hours: (14, 17),
+            label: "下午",
+        }),
+        Phase::Evening(PhaseDef {
+            hours: (18, 19),
+            label: "傍晚",
+        }),
+        Phase::Night(PhaseDef {
+            hours: (20, 23),
+            label: "晚上",
+        }),
     ];
 
     /// 取内嵌的时段定义（数值区间 + 名称）。

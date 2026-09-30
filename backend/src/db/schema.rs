@@ -191,9 +191,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         // v9：命名统一 proactive → intent（表名 + 列名）。旧表有数据则整体改名
         // （SQLite RENAME 保留数据与外键），新库由 init_schema 的 CREATE TABLE 建好。
         if table_exists(conn, "proactive_state")? {
-            conn.execute_batch(
-                "ALTER TABLE proactive_state RENAME TO intent_state;",
-            )?;
+            conn.execute_batch("ALTER TABLE proactive_state RENAME TO intent_state;")?;
             if !column_exists(conn, "intent_state", "last_intent_at")? {
                 conn.execute_batch(
                     "ALTER TABLE intent_state RENAME COLUMN last_proactive_at TO last_intent_at;",
@@ -239,9 +237,7 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, def: &str
         return Ok(());
     }
 
-    conn.execute_batch(&format!(
-        "ALTER TABLE {table} ADD COLUMN {column} {def};"
-    ))?;
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {def};"))?;
     tracing::info!("迁移：memories 补列 {column} {def}");
     Ok(())
 }
@@ -301,7 +297,11 @@ mod tests {
         );
 
         let content: String = conn
-            .query_row("SELECT content FROM memories WHERE id = 'keep'", [], |row| row.get(0))
+            .query_row(
+                "SELECT content FROM memories WHERE id = 'keep'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(content, "不要丢我");
     }
@@ -360,13 +360,14 @@ mod tests {
 
         assert!(table_exists(&conn, "self_profile").unwrap());
         assert!(
-            meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap()
-                == SCHEMA_VERSION.to_string()
+            meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap() == SCHEMA_VERSION.to_string()
         );
         let content: String = conn
-            .query_row("SELECT content FROM messages WHERE id = 'keep'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT content FROM messages WHERE id = 'keep'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(content, "别丢");
     }

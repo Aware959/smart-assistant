@@ -12,11 +12,7 @@ use crate::error::Result;
 pub(crate) const RECALL_LIMIT: usize = 5;
 
 /// 取与 `query` 语义相关的记忆。
-pub(crate) fn fetch(
-    memory: &Store,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<MemoryHit>> {
+pub(crate) fn fetch(memory: &Store, query: &str, limit: usize) -> Result<Vec<MemoryHit>> {
     memory.search(query, limit)
 }
 

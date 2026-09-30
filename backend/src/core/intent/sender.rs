@@ -78,7 +78,9 @@ fn record_sent(
         tracing::warn!(error = %e, "消息写回历史失败");
     }
     if count_as_intent {
-        if let Err(e) = tracker.record_intent_send(&cand.channel, &cand.external_id, &cand.session_id) {
+        if let Err(e) =
+            tracker.record_intent_send(&cand.channel, &cand.external_id, &cand.session_id)
+        {
             tracing::warn!(error = %e, "意图状态记录失败");
         }
     }

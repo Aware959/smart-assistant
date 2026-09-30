@@ -32,7 +32,13 @@ enum SseMsg {
 }
 
 /// 生成 OpenAI 兼容的 `chat.completion.chunk` 数据行。
-fn openai_chunk_json(id: &str, created: u64, model: &str, delta_content: &str, finish_reason: Option<&str>) -> String {
+fn openai_chunk_json(
+    id: &str,
+    created: u64,
+    model: &str,
+    delta_content: &str,
+    finish_reason: Option<&str>,
+) -> String {
     let delta = if finish_reason.is_some() {
         serde_json::json!({})
     } else {
@@ -101,8 +107,8 @@ async fn handle_chat_stream(
             match *outcome {
                 Ok(out) => {
                     events.push(Ok(Event::default().data("[DONE]")));
-                    let meta =
-                        serde_json::to_string(&ChatOutputDto::from(out)).unwrap_or_else(|_| "{}".into());
+                    let meta = serde_json::to_string(&ChatOutputDto::from(out))
+                        .unwrap_or_else(|_| "{}".into());
                     events.push(Ok(Event::default().event("done").data(meta)));
                 }
                 Err(message) => {
@@ -128,10 +134,7 @@ async fn handle_chat_stream(
 
 // ---------- WebSocket ----------
 
-async fn handle_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<Agent>>,
-) -> impl IntoResponse {
+async fn handle_ws(ws: WebSocketUpgrade, State(state): State<Arc<Agent>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
@@ -173,7 +176,9 @@ async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: Arc<Agen
                     let payload = match msg {
                         SseMsg::Delta(text) => text,
                         SseMsg::Done(outcome) => match *outcome {
-                            Ok(out) => serde_json::to_string(&ChatOutputDto::from(out)).unwrap_or_default(),
+                            Ok(out) => {
+                                serde_json::to_string(&ChatOutputDto::from(out)).unwrap_or_default()
+                            }
                             Err(message) => format!("error: {message}"),
                         },
                     };

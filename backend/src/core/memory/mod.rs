@@ -215,8 +215,7 @@ pub fn store(
             };
             (
                 tier.to_string(),
-                (ttl > 0)
-                    .then(|| (Utc::now() + chrono::Duration::days(ttl)).to_rfc3339()),
+                (ttl > 0).then(|| (Utc::now() + chrono::Duration::days(ttl)).to_rfc3339()),
             )
         }
     };

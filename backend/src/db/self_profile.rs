@@ -12,9 +12,11 @@ use crate::error::Result;
 /// 读取全部属性（按插入序，key 在前 value 在后）。
 pub(crate) fn all(conn: &Connection) -> Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare("SELECT key, value FROM self_profile ORDER BY rowid")?;
-    let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// 写入 / 覆盖属性（刷新 updated_at）。

@@ -14,9 +14,7 @@ pub(crate) mod recall;
 
 pub(crate) use history::fetch as fetch_history;
 pub(crate) use prompt::{persona_block, system_prompt};
-pub(crate) use recall::{
-    build_recall_context, fetch as fetch_recall, plain_lines, RECALL_LIMIT,
-};
+pub(crate) use recall::{build_recall_context, fetch as fetch_recall, plain_lines, RECALL_LIMIT};
 
 use crate::core::memory::MemoryHit;
 use crate::core::schema::message::ChatMessage;

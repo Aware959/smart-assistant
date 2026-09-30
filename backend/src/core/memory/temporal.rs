@@ -14,7 +14,17 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-const IMMEDIATE: &[&str] = &["马上", "待会儿", "待会", "等会儿", "等会", "一会儿", "稍后", "过会儿", "几分钟"];
+const IMMEDIATE: &[&str] = &[
+    "马上",
+    "待会儿",
+    "待会",
+    "等会儿",
+    "等会",
+    "一会儿",
+    "稍后",
+    "过会儿",
+    "几分钟",
+];
 const TODAY: &[&str] = &["今天", "今日", "今晚", "今早", "今晨"];
 const TOMORROW: &[&str] = &["明天", "明日", "明早", "明晚"];
 const DAY_AFTER: &[&str] = &["后天", "明后天", "大后天"];
@@ -84,14 +94,20 @@ fn numeric_anchor(
             while i < n && chars[i].is_ascii_digit() {
                 i += 1;
             }
-            chars[num_start..i].iter().collect::<String>().parse::<i64>().ok()?
+            chars[num_start..i]
+                .iter()
+                .collect::<String>()
+                .parse::<i64>()
+                .ok()?
         } else if is_cn_digit(chars[i]) {
             // 中文数字：贪婪取整段（"三五"这类非法串解析失败则跳过）。
             let num_start = i;
             while i < n && is_cn_digit(chars[i]) {
                 i += 1;
             }
-            let Some(num) = cn_number(&chars[num_start..i]) else { continue };
+            let Some(num) = cn_number(&chars[num_start..i]) else {
+                continue;
+            };
             num
         } else {
             i += 1;
@@ -147,7 +163,10 @@ fn numeric_anchor(
 
 /// 单个中文数字字符（含"两"）。
 fn is_cn_digit(c: char) -> bool {
-    matches!(c, '零' | '〇' | '一' | '二' | '两' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十')
+    matches!(
+        c,
+        '零' | '〇' | '一' | '二' | '两' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+    )
 }
 
 fn cn_digit_value(c: char) -> Option<i64> {
@@ -176,7 +195,11 @@ fn cn_number(cs: &[char]) -> Option<i64> {
         None => cn_digit_value(cs[0]),
         Some(t) => {
             // "X十Y"：t=0 时是"十"或"十几"，否则首位是十位数。
-            let tens = if t == 0 { 10 } else { cn_digit_value(cs[0])? * 10 };
+            let tens = if t == 0 {
+                10
+            } else {
+                cn_digit_value(cs[0])? * 10
+            };
             let ones = cs.get(t + 1).map_or(Some(0), |c| cn_digit_value(*c))?;
             Some(tens + ones)
         }

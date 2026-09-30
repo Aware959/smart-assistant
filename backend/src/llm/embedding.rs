@@ -33,5 +33,9 @@ pub fn embed_texts(texts: &[String]) -> Result<Vec<Vec<f32>>> {
         client.embed_batch(&model, texts.to_vec(), None).await
     })?;
 
-    Ok(res.embeddings.into_iter().map(|e| e.into_vector()).collect())
+    Ok(res
+        .embeddings
+        .into_iter()
+        .map(|e| e.into_vector())
+        .collect())
 }

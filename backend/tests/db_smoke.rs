@@ -19,7 +19,10 @@ fn sqlite_vec_extension_available() {
         .conn()
         .query_row("SELECT vec_version()", [], |r| r.get(0))
         .expect("vec_version() should work");
-    assert!(version.starts_with('v'), "expected vec version, got {version}");
+    assert!(
+        version.starts_with('v'),
+        "expected vec version, got {version}"
+    );
 }
 
 #[test]
@@ -28,10 +31,22 @@ fn store_and_search_memory() {
 
     let d = dim();
     let v: Vec<f32> = vector(d, 0);
-    let m1 = db_memory::Memory::new("关于小明的事实".into(), "user".into(), "core".into(), None, None);
+    let m1 = db_memory::Memory::new(
+        "关于小明的事实".into(),
+        "user".into(),
+        "core".into(),
+        None,
+        None,
+    );
     db_memory::create(&db, &m1, &v).unwrap();
 
-    let m2 = db_memory::Memory::new("另一个记忆".into(), "user".into(), "core".into(), None, None);
+    let m2 = db_memory::Memory::new(
+        "另一个记忆".into(),
+        "user".into(),
+        "core".into(),
+        None,
+        None,
+    );
     let v2: Vec<f32> = vector(d, d);
     db_memory::create(&db, &m2, &v2).unwrap();
 
@@ -93,7 +108,9 @@ fn message_list_recent_orders_and_limits() {
     let contents: Vec<&str> = recent.iter().map(|m| m.content.as_str()).collect();
     assert_eq!(contents, vec!["a8", "u9", "a9"]);
 
-    assert!(message::list_recent(&db, &session.id, 0).unwrap().is_empty());
+    assert!(message::list_recent(&db, &session.id, 0)
+        .unwrap()
+        .is_empty());
 
     let all = message::list_by_session(&db, &session.id, 100).unwrap();
     assert_eq!(all.len(), 20);
@@ -137,10 +154,19 @@ fn db_management_roundtrip() {
     let sessions = db::session::list(&db, 10).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, sid);
-    assert_eq!(db::message::list_by_session(&db, &sid, 10).unwrap().len(), 0);
+    assert_eq!(
+        db::message::list_by_session(&db, &sid, 10).unwrap().len(),
+        0
+    );
 
     let d = dim();
-    let m = db_memory::Memory::new("小明是产品的负责人".into(), "fact".into(), "core".into(), None, None);
+    let m = db_memory::Memory::new(
+        "小明是产品的负责人".into(),
+        "fact".into(),
+        "core".into(),
+        None,
+        None,
+    );
     db_memory::create(&db, &m, &vector(d, 10)).unwrap();
 
     db_memory::delete(&db, &m.id).unwrap();

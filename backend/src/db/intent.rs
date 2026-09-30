@@ -24,7 +24,12 @@ pub struct IntentRow {
 }
 
 /// 保证 (channel, external_id) 在状态表有行（read 到当前值）。
-pub fn ensure_state(db: &Database, channel: &str, external_id: &str, session_id: &str) -> Result<()> {
+pub fn ensure_state(
+    db: &Database,
+    channel: &str,
+    external_id: &str,
+    session_id: &str,
+) -> Result<()> {
     db.conn().execute(
         "INSERT OR IGNORE INTO intent_state
              (channel, external_id, session_id)
@@ -130,10 +135,8 @@ pub fn last_intent_at(
 
 /// 列出全部候选行（有会话映射即候选），未建状态的行以默认统计出现。
 pub fn list_rows(db: &Database) -> Result<Vec<IntentRow>> {
-    let mut stmt = db
-        .conn()
-        .prepare(
-            "SELECT
+    let mut stmt = db.conn().prepare(
+        "SELECT
                 cs.channel,
                 cs.external_id,
                 cs.session_id,
@@ -143,7 +146,7 @@ pub fn list_rows(db: &Database) -> Result<Vec<IntentRow>> {
              FROM channel_sessions cs
              LEFT JOIN intent_state ps
                ON ps.channel = cs.channel AND ps.external_id = cs.external_id",
-        )?;
+    )?;
     let rows = stmt.query_map([], |row| {
         Ok(IntentRow {
             channel: row.get(0)?,
@@ -165,8 +168,8 @@ pub fn list_rows(db: &Database) -> Result<Vec<IntentRow>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Database;
     use crate::db::session;
+    use crate::db::Database;
 
     fn add_user(db: &Database, channel: &str, external_id: &str) -> String {
         let s = session::create(db, "").unwrap();
