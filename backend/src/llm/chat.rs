@@ -95,6 +95,11 @@ const STREAM_MAX_TOKENS: u32 = 1024;
 /// 流式调用远程 LLM 对话：每个文本增量在生成时立即回调 `on_delta`，返回完整文本。
 ///
 /// 回调在阻塞生成线程上同步执行，适合把增量转发到 channel / socket / FFI。
+///
+/// **增量是归一化过的**：模型偶发的 `\n\n` 在下发前就被收敛（见
+/// [`crate::utils::textflow`]）。必须在这里做而不是事后改写完整文本——`on_delta`
+/// 是逐段下发的，等拿到全文再改，用户早就看到带空行的原文了。提示词负责降低
+/// 出现概率，这里负责把漏网的变成确定结果，两者叠加。
 pub fn complete_stream<F>(messages: &[ChatMessage], mut on_delta: F) -> Result<String>
 where
     F: FnMut(&str) + Send,
@@ -116,21 +121,28 @@ where
         // 首字节之前的等待集中了几个最典型的卡点：LLM 服务端重新加载模型、
         // TCP 半开连接、上游排队。记到 info，任何反常都能在日志时间轴上看出。
         let started = std::time::Instant::now();
-        let mut full = String::new();
+        let mut flat = crate::utils::textflow::ParagraphFlattener::new();
+        let mut collapsed = 0usize;
         while let Some(event) = stream.next().await {
             match event? {
                 ChatStreamEvent::Chunk(chunk) => {
-                    if full.is_empty() {
+                    if flat.is_empty() {
                         let first_ms = started.elapsed().as_millis() as u64;
                         tracing::info!(model = %model, first_ms, "LLM 流式：首字节到达");
                     }
-                    full.push_str(&chunk.content);
-                    on_delta(&chunk.content);
+                    // 原文可能带空白而产出片段不带，差值即被归一化掉的字符数。
+                    let before = chunk.content.len();
+                    let piece = flat.push(&chunk.content);
+                    collapsed += before - piece.len();
+                    if !piece.is_empty() {
+                        on_delta(&piece);
+                    }
                 }
                 ChatStreamEvent::End(end) => {
                     // capture_content=true 时这里给出权威的完整拼接文本，兜底对齐。
+                    // 只纠正最终入库文本，不重复下发增量（用户看到的流不回滚）。
                     if let Some(texts) = end.captured_texts() {
-                        full = texts.concat();
+                        flat.overwrite(&texts.concat());
                     }
                     break;
                 }
@@ -138,12 +150,22 @@ where
             }
         }
         let total_ms = started.elapsed().as_millis() as u64;
-        tracing::info!(model = %model, total_ms, "LLM 流式：结束");
+        if collapsed > 0 {
+            tracing::info!(
+                model = %model,
+                total_ms,
+                collapsed,
+                "LLM 流式：结束（已归一化空白）"
+            );
+        } else {
+            tracing::info!(model = %model, total_ms, "LLM 流式：结束");
+        }
 
+        let full = flat.finish();
         if full.is_empty() {
             return Err(SqlError::Config("LLM 流式返回内容为空".to_string()));
         }
-        Ok(full)
+        Ok(full.to_string())
     })
 }
 

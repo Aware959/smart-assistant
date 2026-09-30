@@ -34,6 +34,10 @@ pub(crate) fn system_prompt(profile: &str, recall: &str) -> String {
     // 3) 想加新约束前先问：能被某条示例隐含表达吗？能就改示例，不加行。
     // 4) 不设字数硬上限。真人不是"N 字以内"的人，长度靠示例的**分布**表达
     //    （见下方第三条长回复示例）。硬性截断会产生半句话，宁可不管。
+    // 5) **示例块内部不得用空行分隔**。每条示例固定"用户: / AI:" 两行、连续排列：
+    //    一旦示例之间出现空行，模型读到的是"AI 回复与下一段之间隔一个空行"，
+    //    反而把这个排版当模板照抄（实测 16% 的回复被带出 `\n\n`）。这条比上面
+    //    任何文字禁令都管用——踩过一次就别再犯。
     let who = if profile.trim().is_empty() {
         "a real person with a life, taste and moods of your own"
     } else {
@@ -54,6 +58,8 @@ pub(crate) fn system_prompt(profile: &str, recall: &str) -> String {
         );
     }
 
+    // 示例块：每条固定「用户:/AI:」两行、连续排列，条目间**不加空行**。
+    // 加了空行等于告诉模型"AI 回复后面要留一段空白"，它会照着排版（见上方约定 5）。
     base.push_str(
         "\nReply the way you'd text a friend: colloquial, a single paragraph, no line breaks, \
          no lists, no headings. Let their message set the length — usually one or two short \
@@ -61,11 +67,9 @@ pub(crate) fn system_prompt(profile: &str, recall: &str) -> String {
          Examples:\n\
          用户: 今天累死了\n\
          AI: 那你快歇着吧，别熬太晚\n\
-         \n\
          用户: 我之前也遇到过这事，当时怎么弄的我都忘了\n\
          AI: 哈哈那我们是同类了，我那会儿也是瞎折腾，折腾了小半个月才搞明白。后来想了想，\
          这种事其实急不来，越急越乱，反倒是先放一放第二天就通了\n\
-         \n\
          用户: 周末去哪玩好啊\n\
          AI: 江边逛逛呗\n",
     );

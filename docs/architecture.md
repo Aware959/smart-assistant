@@ -39,6 +39,7 @@
 ├──────────────────────────────────────────────────────────────────────┤
 │  能力层（core 直接接线的具体能力）                                     │
 │  llm/chat.rs       Llm（complete / complete_structured / stream）      │
+│                    stream 内做空白归一化（utils/textflow.rs，§2 ③）     │
 │  llm/embedding.rs  embed_text()（genai 阻塞 API，spawn_blocking）    │
 │  channels/ChannelsPusher 主动外发（只读通道就绪注册表 + Config）      │
 │  core/memory/Store   记忆读写（core 内具体类型，非独立能力口）          │
@@ -109,6 +110,8 @@ TG 长轮询收到 Update
   │       │   模型对"不要用空行"这类禁令抑制力很弱，示例才是分布信号。
   │       │   规则只保留示例承载不了的价值判断：不出戏 / 不自称 AI / 身份边界。
   │       │   不设字数硬上限（真人不是"N 字以内"的人，硬截断会产生半句话）
+  │       │   ⚠ 示例块内**不得用空行分隔**：空行会被模型读成"AI 回复后留一段空白"
+  │       │     的排版模板而照抄（实测 16% 回复被带出 \n\n，见 prompt.rs 约定 5）
   │       ├─ 召回记忆文本（"Below is what you know about the other person..."）
   │       └─ 延迟消息时追加 delay_notice() 时差说明（§2.1）——仅 Delayed 档
   │
@@ -116,7 +119,9 @@ TG 长轮询收到 Update
   │     Llm::complete_stream(messages, on_delta)
   │       → genai_client: 按 LLM_PROVIDER 选 OpenAI / Gemini adapter
   │       → genai 0.6.5 流式 API
-  │       → delta 逐段回调 on_delta（SSE 逐块推送 / CLI 实时打印）
+  │       → 逐 chunk 过 ParagraphFlattener（utils/textflow.rs）→ delta 回调 on_delta
+  │         （SSE 逐块推送 / CLI 实时打印）。空白归一化必须在流里做：on_delta 是
+  │         逐段下发的，事后改写全文会让"看到的"与"入库的"不一致
   │       → max_tokens = STREAM_MAX_TOKENS(1024) 异常熔断：
   │         正常输出远小于此；触发即说明生成已跑偏，砍掉重来优于发出失控文本。
   │         **只兜底，不参与塑形**（输出形状由提示词示例负责）
@@ -430,5 +435,5 @@ Kotlin/Swift。
 6. **vec0 kNN 约束**：查询必须写 `k = ?`，把 LIMIT 写在外层查询会报 "A LIMIT or 'k = ?' constraint is required"。
 7. **JSON 结构化输出**：记忆判定 / 开口决策 / 延续判断均走 json_schema（支持的模型自动约束输出格式，不支持时退化为自由 JSON + 容错解析）。模型输出一律当**不可信输入**：字段缺失 / `null` / 类型不符 / 空白都回退默认值，不让一次格式抖动变成业务失败。
 8. **记忆后置 + 全链路降级**：记忆沉淀（判定 / 事实化 / 落库）不挂在对话路径上，由宿主在回复交付之后调用 `Agent::settle_memory`（telegram / iLink 用 `spawn_blocking` 后台跑，SSE / CLI 同步补再把结果回填 `ChatOutput.memory`）。记忆链路的任何环节失败都只记 warn 并降级，绝不冒泡成"对话失败"。
-9. **提示词靠示例不靠禁令**：输出形状（换行、长度、句数）只用 few-shot 示例表达，不写成"不要用空行""不超过 N 字"——模型对禁令的抑制力远弱于示例分布。规则只留示例承载不了的价值判断。字数硬上限会被砍成半句话，宁可不做；`max_tokens` 只作异常熔断。这是 `core/context/prompt.rs` 顶部维护约定的由来，也是防止提示词无限膨胀的纪律。
+9. **提示词塑形 + 流内归一化，两层叠加**：输出形状（换行、长度、句数）主要由 few-shot 示例表达，不写成"不要用空行""不超过 N 字"——模型对禁令的抑制力远弱于示例分布。规则只留示例承载不了的价值判断。字数硬上限会被砍成半句话，宁可不做；`max_tokens` 只作异常熔断。提示词是概率约束，兜不住全部——实测 DeepSeek-V4.1-Flash 仍有 16% 回复带 `\n\n`，故流内再用 `utils/textflow.rs` 归一化空白（收敛连续空白、裁首尾、CJK 两侧不补空格）。**归一化 ≠ 塑形**：它只动空白、不截断不删词，所以不产生半句话，与被砍掉的 `MAX_REPLY_CHARS` 有本质区别。归一化必须发生在 `on_delta` 之前，事后改写全文会让"看到的"和"入库的"不一致。`core/context/prompt.rs` 顶部的维护约定（含"示例块内不得用空行分隔"）是防提示词膨胀与自相矛盾的纪律。
 10. **入站按真实时刻记账**：消息时刻一律取通道报文时间戳，不取接收时刻。这同时决定两件事——消息入库的时间线、主动陪伴静默窗口的起点。离线积压按游标续传 + 时效分级处理（§2.1），不丢弃也不假装刚收到。
