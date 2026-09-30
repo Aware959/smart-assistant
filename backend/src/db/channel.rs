@@ -94,3 +94,20 @@ fn delete_mapping(db: &Database, channel: &str, external_id: &str) -> Result<()>
     )?;
     Ok(())
 }
+
+/// 读取某通道的拉取游标（从未持久化则为 None）。
+///
+/// 游标存在 `meta` 表（Telegram 的 update_id / iLink 的 get_updates_buf），
+/// 让重启后的进程从上次确认的位置续传，而不是跳到最新把离线期消息整段丢弃。
+pub fn get_cursor(db: &Database, channel: &str) -> Result<Option<String>> {
+    crate::db::meta::get(db.conn(), &cursor_key(channel))
+}
+
+/// 写入某通道的拉取游标。
+pub fn set_cursor(db: &Database, channel: &str, cursor: &str) -> Result<()> {
+    crate::db::meta::set(db.conn(), &cursor_key(channel), cursor)
+}
+
+fn cursor_key(channel: &str) -> String {
+    format!("channel_cursor:{channel}")
+}

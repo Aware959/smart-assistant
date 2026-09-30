@@ -35,18 +35,26 @@ pub fn ensure_state(db: &Database, channel: &str, external_id: &str, session_id:
 }
 
 /// 用户发来消息时调用：记录"对方刚说话"，并刷新 session 指向。
+///
+/// `at` 是**消息真实发出时刻**（来自通道报文时间戳），不是接收时刻。
+/// 这一点直接决定主动发言的静默窗口从哪算起：若用接收时刻，一条几小时前的
+/// 离线消息会被记成"刚刚说过话"，窗口归零、引擎立刻判定该开口。
+///
+/// 只前进不后退：积压消息可能乱序到达，用 RFC3339 字符串比较保证时间单调。
 pub fn touch_user_reply(
     db: &Database,
     channel: &str,
     external_id: &str,
     session_id: &str,
+    at: DateTime<Utc>,
 ) -> Result<()> {
     ensure_state(db, channel, external_id, session_id)?;
-    let now = Utc::now().to_rfc3339();
+    let now = at.to_rfc3339();
     db.conn().execute(
         "UPDATE intent_state
          SET last_user_reply_at = ?1, session_id = ?2
-         WHERE channel = ?3 AND external_id = ?4",
+         WHERE channel = ?3 AND external_id = ?4
+           AND (last_user_reply_at IS NULL OR last_user_reply_at < ?1)",
         params![now, session_id, channel, external_id],
     )?;
     Ok(())
@@ -177,7 +185,7 @@ mod tests {
     fn touch_and_record_roundtrip() {
         let db = Database::in_memory().unwrap();
         let sid = add_user(&db, "telegram", "100");
-        touch_user_reply(&db, "telegram", "100", &sid).unwrap();
+        touch_user_reply(&db, "telegram", "100", &sid, Utc::now()).unwrap();
 
         let rows = list_rows(&db).unwrap();
         assert_eq!(rows.len(), 1);
@@ -189,5 +197,46 @@ mod tests {
         let rows = list_rows(&db).unwrap();
         assert_eq!(rows[0].today_count, 2);
         assert!(rows[0].last_intent_at.is_some());
+    }
+
+    /// 静默窗口必须从**消息真实发出时刻**算起：离线 5 小时后补收的消息，
+    /// 若被记成"刚刚"，主动发言窗口会错误归零、引擎立刻判定该开口。
+    #[test]
+    fn touch_user_reply_uses_real_message_time() {
+        let db = Database::in_memory().unwrap();
+        let sid = add_user(&db, "telegram", "100");
+        let sent_at = Utc::now() - chrono::Duration::hours(5);
+        touch_user_reply(&db, "telegram", "100", &sid, sent_at).unwrap();
+
+        let rows = list_rows(&db).unwrap();
+        let recorded = rows[0].last_user_reply_at.unwrap();
+        // 记录值应贴近真实发出时刻（秒级精度），而不是 Utc::now()。
+        assert!(
+            (recorded - sent_at).num_seconds().abs() <= 1,
+            "应记录消息真实时刻，偏差过大：{recorded} vs {sent_at}"
+        );
+    }
+
+    /// 积压消息可能乱序到达，时间戳只前进不后退——
+    /// 否则一条迟到的旧消息会把静默窗口拉回过去，引擎误判为"刚说过话"。
+    #[test]
+    fn touch_user_reply_never_moves_backwards() {
+        let db = Database::in_memory().unwrap();
+        let sid = add_user(&db, "telegram", "100");
+        let recent = Utc::now();
+        touch_user_reply(&db, "telegram", "100", &sid, recent).unwrap();
+        let after_recent = list_rows(&db).unwrap()[0].last_user_reply_at.unwrap();
+
+        // 一条 3 小时前发出的积压消息后到，不应覆盖较新的时刻。
+        touch_user_reply(
+            &db,
+            "telegram",
+            "100",
+            &sid,
+            recent - chrono::Duration::hours(3),
+        )
+        .unwrap();
+        let after_old = list_rows(&db).unwrap()[0].last_user_reply_at.unwrap();
+        assert_eq!(after_recent, after_old, "较旧的入站不应覆盖较新的时刻");
     }
 }

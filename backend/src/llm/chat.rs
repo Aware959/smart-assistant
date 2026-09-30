@@ -84,6 +84,14 @@ fn complete_impl(
         .ok_or_else(|| SqlError::Config("LLM 返回内容为空".to_string()))
 }
 
+/// 流式生成的最大 token 数：**异常熔断，不是长度塑形**。
+///
+/// 正常对话输出远小于这个量；一旦触发说明这次生成已经跑偏（长篇大论 / 复读），
+/// 砍掉重来的代价远小于把一段失控文本发给用户。注意部分推理模型的思考 token
+/// 也计入此额度，故取值留足余量。输出形状（长度 / 换行）由提示词示例负责，
+/// 这里只兜底极端情况，不参与日常塑形。
+const STREAM_MAX_TOKENS: u32 = 1024;
+
 /// 流式调用远程 LLM 对话：每个文本增量在生成时立即回调 `on_delta`，返回完整文本。
 ///
 /// 回调在阻塞生成线程上同步执行，适合把增量转发到 channel / socket / FFI。
@@ -95,6 +103,7 @@ where
     let model = crate::config::Config::get().llm_model.clone();
     let options = ChatOptions {
         capture_content: Some(true),
+        max_tokens: Some(STREAM_MAX_TOKENS),
         ..Default::default()
     };
 

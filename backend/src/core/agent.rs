@@ -206,9 +206,14 @@ impl Agent {
         tracing::info!(session = %session.id, "对话阶段：提示词组装完成");
         let profile = self.profile_block();
         let recall = context::build_recall_context(&ctx.memories);
+        // 延迟消息（离线积压）才追加时差说明，让模型知道"这条是几小时前发的"。
+        let system = match delay_notice(input.user_time.as_deref(), chrono::Utc::now()) {
+            Some(notice) => format!("{}{notice}", context::system_prompt(&profile, &recall)),
+            None => context::system_prompt(&profile, &recall),
+        };
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
-            content: context::system_prompt(&profile, &recall),
+            content: system,
         }];
         for turn in ctx.history.iter().chain(input.history.iter()) {
             messages.push(ChatMessage {
@@ -350,6 +355,35 @@ fn parse_rfc3339(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|d| d.with_timezone(&chrono::Utc))
+}
+
+/// 延迟消息的时差说明块（英文给 LLM），拼在 system prompt 末尾。
+///
+/// 让模型知道"这条是 3 小时前发的"，由它自己决定怎么接——真人看到隔了几小时的
+/// 消息会说"刚看到"，不会假装刚收到。这是示例之外必须显式告知的信息：模型看不到
+/// 通道层的时间戳，也无从推断。
+fn delay_notice(user_time: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Option<String> {
+    let sent_at = parse_rfc3339(user_time?)?;
+    if !matches!(
+        crate::core::session::classify_inbound(sent_at, now),
+        crate::core::session::InboundFreshness::Delayed
+    ) {
+        return None;
+    }
+    let age = now.signed_duration_since(sent_at);
+    let hours = age.num_hours().max(0);
+    let when = if hours >= 1 {
+        format!("about {hours} hour{}", if hours == 1 { "" } else { "s" })
+    } else {
+        format!("about {} minutes", age.num_minutes().max(1))
+    };
+    Some(format!(
+        "\n\nNote: the other person sent this {when} ago, and you are only just seeing it now. \
+         Don't pretend it just arrived, and don't apologize for the delay. Reply the way a \
+         real person would when they finally check their phone: either pick the conversation \
+         back up naturally, or briefly acknowledge that you're only just seeing it. \
+         Never mention waiting, being offline, or how long it took."
+    ))
 }
 
 /// 把消息列表渲染成 `role: content` 多行文本（追踪日志用，仅在开启全文时构建）。

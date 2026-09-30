@@ -26,10 +26,12 @@ pub(crate) use session::SavedSession;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+
 use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::intent::IntentTracker;
-use crate::core::session::Sessions;
+use crate::core::session::{classify_inbound, InboundFreshness, Sessions};
 use crate::{ChatInput, ChatOutput};
 
 const CHANNEL: &str = "ilink";
@@ -53,10 +55,17 @@ pub(crate) fn base_info() -> serde_json::Value {
 
 /// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
 /// 先解析会话映射，再写主动状态追踪。
-fn touch_user_reply(session: &Sessions, tracker: &IntentTracker, external_id: &str) {
+/// `sent_at` 传**消息真实发出时刻**（报文 `create_time_ms`），不是接收时刻。
+/// 静默窗口从对方实际说话那一刻算起，缺时间戳才回退到接收时刻。
+fn touch_user_reply(
+    session: &Sessions,
+    tracker: &IntentTracker,
+    external_id: &str,
+    sent_at: Option<DateTime<Utc>>,
+) {
     if let Err(e) = (|| {
         let sid = session.resolve(CHANNEL, external_id)?;
-        tracker.touch_user_reply(CHANNEL, external_id, &sid)
+        tracker.touch_user_reply(CHANNEL, external_id, &sid, sent_at)
     })() {
         tracing::warn!(error = %e, "记录入站状态失败");
     }
@@ -134,7 +143,15 @@ async fn run_loop(
         sess.baseurl.clone()
     };
     let allowed = Config::get().ilink_allowed_ids.clone();
-    let mut cursor = String::new();
+    // 拉取游标：从上次确认的位置续传（与 Telegram 同一套语义）。空 cursor 表示
+    // 首次运行，服务端会回放它保留的历史消息——这些消息会在下方按时效分级，
+    // 超 24h 的只入库不回复，不会造成"对着旧话题连珠炮"。
+    let mut cursor = session.load_cursor(CHANNEL).unwrap_or_default();
+    if cursor.is_empty() {
+        tracing::info!("iLink 无历史游标，从空 cursor 开始");
+    } else {
+        tracing::info!("iLink 续传游标，从上次位置继续");
+    }
 
     loop {
         let updates: protocol::UpdatesResponse = match protocol::api_post(
@@ -168,6 +185,8 @@ async fn run_loop(
         }
         if let Some(buf) = updates.get_updates_buf {
             if !buf.is_empty() {
+                // 游标先落盘再处理消息：中途崩溃重启不会重放本批。
+                session.save_cursor(CHANNEL, &buf);
                 cursor = buf;
             }
         }
@@ -185,16 +204,41 @@ async fn run_loop(
                 continue;
             }
 
-            push::refresh_contact(&msg.from_user_id, &msg.context_token);
-            touch_user_reply(&session, &tracker, &msg.from_user_id);
-
             let user_time = super::ts_to_rfc3339(msg.create_time_ms);
+            let sent_at = user_time.as_deref().and_then(|s| {
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            });
             if msg.create_time_ms.is_none() {
                 let keys: Vec<&String> = msg.extra.keys().collect();
                 tracing::debug!(keys = ?keys, "iLink 报文未命中时间戳字段，实际键名：");
             } else {
                 tracing::debug!(create_time_ms = ?msg.create_time_ms, user_time = ?user_time, "入站消息时间戳（用于时间世界模型）");
             }
+
+            push::refresh_contact(&msg.from_user_id, &msg.context_token);
+
+            // 时效分级：离线积压的旧消息不该被当成刚收到的实时消息来回。
+            let freshness = sent_at
+                .map(|at| classify_inbound(at, Utc::now()))
+                .unwrap_or(InboundFreshness::Fresh);
+            if freshness == InboundFreshness::TooOld {
+                tracing::info!(from = %msg.from_user_id, "消息已超时效，只入库不回复");
+                touch_user_reply(&session, &tracker, &msg.from_user_id, sent_at);
+                if let Err(e) = session.archive_only(
+                    CHANNEL,
+                    &msg.from_user_id,
+                    &text,
+                    sent_at.unwrap_or_else(Utc::now),
+                ) {
+                    tracing::warn!(error = %e, "过期消息入库失败");
+                }
+                continue;
+            }
+
+            touch_user_reply(&session, &tracker, &msg.from_user_id, sent_at);
+            tracing::info!(from = %msg.from_user_id, ?freshness, "iLink 收到消息，开始处理");
 
             protocol::send_typing(client, &base, sess, &msg.context_token).await;
 

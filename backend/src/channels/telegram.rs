@@ -9,12 +9,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::intent::IntentTracker;
-use crate::core::session::Sessions;
+use crate::core::session::{classify_inbound, InboundFreshness, Sessions};
 use crate::{ChatInput, ChatOutput};
 
 const CHANNEL: &str = "telegram";
@@ -146,11 +147,19 @@ pub(crate) async fn push_send(chat_id: i64, text: &str) -> Result<(), String> {
 }
 
 /// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
+///
+/// `sent_at` 传**消息真实发出时刻**（报文 `date`），不是接收时刻——静默窗口必须
+/// 从对方实际说话那一刻算起，否则离线几小时后补收的消息会把窗口错误归零。
 /// 先解析会话映射，再写主动状态追踪。
-fn touch_user_reply(session: &Sessions, tracker: &IntentTracker, external_id: &str) {
+fn touch_user_reply(
+    session: &Sessions,
+    tracker: &IntentTracker,
+    external_id: &str,
+    sent_at: Option<DateTime<Utc>>,
+) {
     if let Err(e) = (|| {
         let sid = session.resolve(CHANNEL, external_id)?;
-        tracker.touch_user_reply(CHANNEL, external_id, &sid)
+        tracker.touch_user_reply(CHANNEL, external_id, &sid, sent_at)
     })() {
         tracing::warn!(error = %e, "记录入站状态失败");
     }
@@ -255,21 +264,24 @@ async fn run_loop(
         .telegram_ready
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // 丢弃启动前积压的 update，避免重启后重复回复
-    //（offset 语义：小于 offset 的 update 视为已确认）。
-    let mut offset: i64 = {
-        let updates: ApiResponse<Vec<Update>> = api_get(
-            &client,
-            &format!("{base}/getUpdates?timeout=0&limit=1&offset=-1"),
-        )
-        .await?;
-        updates
-            .result
-            .unwrap_or_default()
-            .into_iter()
-            .map(|u| u.update_id + 1)
-            .max()
-            .unwrap_or(0)
+    // 拉取游标：从上次确认的位置续传，而不是跳到最新把离线期消息整段丢弃。
+    //
+    // Telegram 服务端会保留 update 约 24 小时，进程重启后仍能取回这期间的消息。
+    // 取回后按消息真实时刻做时效分级（见 run_loop）：太旧的只入库不回复，
+    // 有延迟的交给模型自己决定怎么接。用户因此不必为"上次没被收到"重发一遍。
+    //
+    // 首次运行（无游标）从 0 开始，即领取服务端保留的全部历史——此时几乎必然
+    // 全是超时效的旧消息，会被 archive 分支挡掉，不产生任何回复。
+    let mut offset: i64 = match session.load_cursor(CHANNEL).as_deref().and_then(|s| s.parse().ok())
+    {
+        Some(saved) => {
+            tracing::info!(offset = saved, "telegram 续传游标，从上次位置继续");
+            saved
+        }
+        None => {
+            tracing::info!("telegram 无历史游标，从 0 开始领取服务端保留的 update");
+            0
+        }
     };
 
     let allowed = Config::get().telegram_allowed_ids.clone();
@@ -302,6 +314,16 @@ async fn run_loop(
             continue;
         }
 
+        // 整批确认后立即落盘游标：即使后续处理中途崩溃，重启也不会重放这批。
+        offset = offset.max(
+            batch
+                .iter()
+                .map(|u| u.update_id + 1)
+                .max()
+                .unwrap_or(offset),
+        );
+        session.save_cursor(CHANNEL, &offset.to_string());
+
         for update in batch {
             offset = offset.max(update.update_id + 1);
             let Some(message) = update.message else { continue };
@@ -315,9 +337,28 @@ async fn run_loop(
                 continue;
             }
             let user_time = super::ts_to_rfc3339(message.date);
-            tracing::info!(chat_id, "收到消息，开始处理（进入 AI 流水线前）");
+            let sent_at = user_time.as_deref().and_then(|s| {
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|d| d.with_timezone(&Utc))
+            });
 
-            touch_user_reply(&session, &tracker, &chat_id.to_string());
+            // 时效分级：离线积压的旧消息不该被当成刚收到的实时消息来回。
+            let freshness = sent_at
+                .map(|at| classify_inbound(at, Utc::now()))
+                .unwrap_or(InboundFreshness::Fresh);
+            if freshness == InboundFreshness::TooOld {
+                tracing::info!(chat_id, "消息已超时效，只入库不回复");
+                touch_user_reply(&session, &tracker, &chat_id.to_string(), sent_at);
+                if let Err(e) = session.archive_only(CHANNEL, &chat_id.to_string(), &text, sent_at.unwrap_or_else(Utc::now)) {
+                    tracing::warn!(error = %e, chat_id, "过期消息入库失败");
+                }
+                continue;
+            }
+
+            tracing::info!(chat_id, ?freshness, "收到消息，开始处理（进入 AI 流水线前）");
+
+            touch_user_reply(&session, &tracker, &chat_id.to_string(), sent_at);
 
             send_typing(&client, &base, chat_id).await;
             let handle_started = std::time::Instant::now();

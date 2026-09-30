@@ -110,13 +110,24 @@ impl IntentTracker {
 
 impl IntentTracker {
     /// 记录"对方刚发消息"（确保状态行存在并刷新最近入站时刻）。
+    ///
+    /// `at` 传**消息真实发出时刻**（通道报文时间戳），缺省才用接收时刻。
+    /// 内存与 DB 两侧都只前进不后退，与 SQL 层的单调约束保持一致。
     pub fn touch_user_reply(
         &self,
         channel: &str,
         external_id: &str,
         session_id: &str,
+        at: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        crate::db::intent::touch_user_reply(&lock_db(&self.db), channel, external_id, session_id)?;
+        let at = at.unwrap_or_else(time::now);
+        crate::db::intent::touch_user_reply(
+            &lock_db(&self.db),
+            channel,
+            external_id,
+            session_id,
+            at,
+        )?;
         let mut inner = self.lock();
         let st = inner
             .rows
@@ -130,7 +141,9 @@ impl IntentTracker {
                 today_count: 0,
                 today_date: String::new(),
             });
-        st.last_user_reply_at = Some(time::now());
+        if st.last_user_reply_at.is_none_or(|prev| prev < at) {
+            st.last_user_reply_at = Some(at);
+        }
         st.session_id = session_id.to_string();
         Ok(())
     }
@@ -218,7 +231,9 @@ mod tests {
     #[test]
     fn touch_and_record_sync_memory_and_db() {
         let (db, tracker, sid) = tracker_with_user("telegram", "100");
-        tracker.touch_user_reply("telegram", "100", &sid).unwrap();
+        tracker
+            .touch_user_reply("telegram", "100", &sid, Some(Utc::now()))
+            .unwrap();
         assert!(
             tracker.last_user_reply_at("telegram", "100").unwrap().is_some(),
             "touch 后内存即有最近入站时刻"
@@ -240,7 +255,9 @@ mod tests {
     #[test]
     fn fresh_book_hydrates_from_db() {
         let (db, tracker, sid) = tracker_with_user("telegram", "100");
-        tracker.touch_user_reply("telegram", "100", &sid).unwrap();
+        tracker
+            .touch_user_reply("telegram", "100", &sid, Some(Utc::now()))
+            .unwrap();
         crate::db::intent::record_intent_send(&lock_db(&db), "telegram", "100", &sid).unwrap();
 
         // 新进程视角：新建运行簿从 DB 水合。
@@ -254,7 +271,9 @@ mod tests {
     #[test]
     fn eligible_reads_from_memory() {
         let (_, tracker, sid) = tracker_with_user("telegram", "100");
-        tracker.touch_user_reply("telegram", "100", &sid).unwrap();
+        tracker
+            .touch_user_reply("telegram", "100", &sid, Some(Utc::now()))
+            .unwrap();
         let now = Utc::now();
         // 刚说过话 → 静默不足 2h，不应候选。
         assert!(tracker.eligible_candidates(now).unwrap().is_empty());
@@ -267,5 +286,69 @@ mod tests {
         let el = tracker.eligible_candidates(now).unwrap();
         assert_eq!(el.len(), 1);
         assert_eq!(el[0].external_id, "100");
+    }
+
+    /// 离线 5 小时后补收的消息，内存与 DB 都应记**真实发出时刻**。
+    ///
+    /// 这正是修复前的 bug：用接收时刻会让静默窗口从 0 起算（5h → 0），
+    /// 引擎误以为对方刚说过话而**压掉**本该发生的主动开口。记真实时刻后
+    /// 窗口是 5h，越过 2h 门槛 → 成为候选。
+    #[test]
+    fn late_delivered_message_uses_real_age_not_receive_time() {
+        let (db, tracker, sid) = tracker_with_user("telegram", "100");
+        let sent_at = Utc::now() - Duration::hours(5);
+        tracker
+            .touch_user_reply("telegram", "100", &sid, Some(sent_at))
+            .unwrap();
+
+        let now = Utc::now();
+        assert_eq!(
+            tracker.last_user_reply_at("telegram", "100").unwrap(),
+            Some(sent_at),
+            "内存应记真实发出时刻"
+        );
+        let rows = crate::db::intent::list_rows(&lock_db(&db)).unwrap();
+        assert_eq!(rows[0].last_user_reply_at, Some(sent_at), "DB 应同步真实时刻");
+        assert_eq!(
+            tracker.eligible_candidates(now).unwrap().len(),
+            1,
+            "静默 5h 已越过 2h 门槛，应为候选（修复前因窗口归零被误压掉）"
+        );
+    }
+
+    /// 对照：消息确实是刚收到的（1 分钟前），静默不足 2h，不该是候选。
+    /// 与上一条成对，共同锁住"窗口按真实时差计算"这一语义。
+    #[test]
+    fn just_received_message_is_not_yet_eligible() {
+        let (_, tracker, sid) = tracker_with_user("telegram", "100");
+        tracker
+            .touch_user_reply("telegram", "100", &sid, Some(Utc::now()))
+            .unwrap();
+        assert!(
+            tracker.eligible_candidates(Utc::now()).unwrap().is_empty(),
+            "静默 0 分钟，不足 2h，不该是候选"
+        );
+    }
+
+    /// 迟到的旧消息不应把时刻拉回过去（内存侧与 db 侧同规则）。
+    #[test]
+    fn late_delivery_never_moves_timestamp_backwards() {
+        let (_, tracker, sid) = tracker_with_user("telegram", "100");
+        let recent = Utc::now();
+        tracker
+            .touch_user_reply("telegram", "100", &sid, Some(recent))
+            .unwrap();
+        tracker
+            .touch_user_reply(
+                "telegram",
+                "100",
+                &sid,
+                Some(recent - Duration::hours(3)),
+            )
+            .unwrap();
+        assert_eq!(
+            tracker.last_user_reply_at("telegram", "100").unwrap(),
+            Some(recent)
+        );
     }
 }

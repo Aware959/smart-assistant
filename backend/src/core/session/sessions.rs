@@ -21,6 +21,41 @@ use crate::db::{lock_db, Database};
 use crate::db::message::Message as DbMessage;
 use crate::error::Result;
 
+/// 某通道的入站消息时效分级：决定"这条消息现在该不该回、回得多自然"。
+///
+/// 根因是长轮询的离线积压——用户发完消息没等到回复就关机/断网，进程重启后
+/// 这条消息仍在通道服务端排队。不处理它等于用户凭空失忆（还得再发一次）；
+/// 无脑按实时处理又会让 bot 假装刚收到，答非所问。按真实时延分级才像真人。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundFreshness {
+    /// 新鲜（≤ 15 分钟）：按实时消息正常回。
+    Fresh,
+    /// 有延迟（15 分钟 ~ 24 小时）：交给模型自己判断怎么接——
+    /// 可以说"刚看到"，也可以顺着话题自然回，不要假装是刚收到的。
+    Delayed,
+    /// 太久（> 24 小时）：只入库留痕，不触发任何回复。
+    TooOld,
+}
+
+/// 时效阈值（分钟）：与 [`InboundFreshness::Fresh`] / [`Delayed`] 的分界。
+pub const FRESH_WINDOW_MINUTES: i64 = 15;
+/// 时效上限（小时）：超过则只入库不回复。
+pub const MAX_REPLYABLE_HOURS: i64 = 24;
+
+/// 按消息真实发出时刻与当前时刻的间隔做时效分级。
+///
+/// 时钟回拨导致的负间隔按 0 处理（视作刚收到）。
+pub fn classify_inbound(sent_at: DateTime<Utc>, now: DateTime<Utc>) -> InboundFreshness {
+    let age = now.signed_duration_since(sent_at).num_minutes().max(0);
+    if age <= FRESH_WINDOW_MINUTES {
+        InboundFreshness::Fresh
+    } else if age <= MAX_REPLYABLE_HOURS * 60 {
+        InboundFreshness::Delayed
+    } else {
+        InboundFreshness::TooOld
+    }
+}
+
 type Key = (String, String);
 
 /// 一个已水合、驻留在内存的会话缓冲。
@@ -237,6 +272,35 @@ impl Sessions {
 
     // ---------- 通道映射（原 SessionMap 端口） ----------
 
+    // ---------- 拉取游标（离线积压续传） ----------
+
+    /// 读取某通道上次确认的拉取游标（从未持久化则为 None）。
+    pub fn load_cursor(&self, channel: &str) -> Option<String> {
+        crate::db::channel::get_cursor(&lock_db(&self.db), channel).ok().flatten()
+    }
+
+    /// 持久化某通道的拉取游标（供重启后续传，避免丢弃离线期消息）。
+    pub fn save_cursor(&self, channel: &str, cursor: &str) {
+        if let Err(e) = crate::db::channel::set_cursor(&lock_db(&self.db), channel, cursor) {
+            tracing::warn!(error = %e, channel, "拉取游标持久化失败");
+        }
+    }
+
+    /// 只入库留痕，不调 LLM、不回复（用于超过时效上限的离线积压消息）。
+    ///
+    /// 消息仍以**真实时刻**入库，所以下次对方说话时历史时间线是对的。
+    pub fn archive_only(
+        &self,
+        channel: &str,
+        external_id: &str,
+        text: &str,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        let session_id = self.resolve(channel, external_id)?;
+        self.add_message_at(&session_id, "user", text, at)?;
+        Ok(())
+    }
+
     /// 解析（没有则创建）该通道用户的会话，返回 session id。
     pub fn resolve(&self, channel: &str, external_id: &str) -> Result<String> {
         let key = (channel.to_string(), external_id.to_string());
@@ -283,6 +347,7 @@ fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     fn db() -> Arc<Mutex<Database>> {
         Arc::new(Mutex::new(Database::in_memory().unwrap()))
@@ -341,6 +406,84 @@ mod tests {
 
         assert_eq!(sessions.channel_of(&sid), Some(("telegram".into(), "100".into())));
         assert!(sessions.latest_user_at(&sid).is_some());
+    }
+
+    #[test]
+    fn freshness_buckets_split_by_real_age() {
+        let now = Utc::now();
+        // 刚发出 → 正常回
+        assert_eq!(classify_inbound(now, now), InboundFreshness::Fresh);
+        assert_eq!(
+            classify_inbound(now - Duration::minutes(FRESH_WINDOW_MINUTES), now),
+            InboundFreshness::Fresh
+        );
+        // 15 分钟 ~ 24 小时 → 交给模型判断怎么接
+        assert_eq!(
+            classify_inbound(
+                now - Duration::minutes(FRESH_WINDOW_MINUTES + 1),
+                now
+            ),
+            InboundFreshness::Delayed
+        );
+        assert_eq!(
+            classify_inbound(now - Duration::hours(MAX_REPLYABLE_HOURS), now),
+            InboundFreshness::Delayed
+        );
+        // 超过 24 小时 → 只入库不回复
+        assert_eq!(
+            classify_inbound(
+                now - Duration::hours(MAX_REPLYABLE_HOURS + 1),
+                now
+            ),
+            InboundFreshness::TooOld
+        );
+        // 时钟回拨：负间隔视作刚收到，不该误判成 TooOld
+        assert_eq!(
+            classify_inbound(now + Duration::hours(3), now),
+            InboundFreshness::Fresh
+        );
+    }
+
+    /// 离线积压的过期消息只入库，不建 AI 回复、不产生 assistant 消息，
+    /// 但仍以真实时刻落库——下次对方说话时历史时间线是对的。
+    #[test]
+    fn archive_only_stores_with_real_time_and_no_reply() {
+        let sessions = Sessions::new(db()).unwrap();
+        let sent_at = Utc::now() - Duration::hours(30);
+        sessions
+            .archive_only("telegram", "100", "三天前那条", sent_at)
+            .unwrap();
+
+        let sid = sessions.resolve("telegram", "100").unwrap();
+        let recent = sessions.recent_messages(&sid, 10).unwrap();
+        assert_eq!(recent.len(), 1, "只应留下用户消息本身");
+        assert_eq!(recent[0].role, "user");
+        assert_eq!(recent[0].content, "三天前那条");
+        assert_eq!(
+            sessions.latest_user_at(&sid),
+            Some(sent_at),
+            "应以真实发出时刻入库，而非入库时刻"
+        );
+    }
+
+    /// 游标持久化：重启后的新实例能续上上次位置（离线消息不丢的关键）。
+    #[test]
+    fn cursor_persists_across_instances() {
+        let db = db();
+        let first = Sessions::new(db.clone()).unwrap();
+        assert!(
+            first.load_cursor("telegram").is_none(),
+            "首次运行无游标"
+        );
+        first.save_cursor("telegram", "4821");
+        first.save_cursor("ilink", "buf-abc");
+
+        // 新进程视角：同一 DB 重新装配 → 游标可见。
+        let restarted = Sessions::new(db).unwrap();
+        assert_eq!(restarted.load_cursor("telegram").as_deref(), Some("4821"));
+        assert_eq!(restarted.load_cursor("ilink").as_deref(), Some("buf-abc"));
+        // 通道间互不干扰。
+        assert!(restarted.load_cursor("other").is_none());
     }
 
     #[test]

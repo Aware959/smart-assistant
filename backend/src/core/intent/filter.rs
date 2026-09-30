@@ -89,7 +89,7 @@ mod tests {
         // 默认配置：min_silence_hours=2, max_idle_days=7, daily_limit=8, min_minutes=45
         let db = Database::in_memory().unwrap();
         let sid = add_user(&db, "telegram", "100");
-        intent::touch_user_reply(&db, "telegram", "100", &sid).unwrap();
+        intent::touch_user_reply(&db, "telegram", "100", &sid, Utc::now()).unwrap();
 
         // 刚说过话 → 静默不足 2h，不应候选
         let now = Utc::now();
@@ -130,7 +130,7 @@ mod tests {
     fn cross_day_resets_quota() {
         let db = Database::in_memory().unwrap();
         let sid = add_user(&db, "ilink", "o123@im.wechat");
-        intent::touch_user_reply(&db, "ilink", "o123@im.wechat", &sid).unwrap();
+        intent::touch_user_reply(&db, "ilink", "o123@im.wechat", &sid, Utc::now()).unwrap();
         let now = Utc::now();
         let old = (now - Duration::hours(3)).to_rfc3339();
         db.conn()

@@ -21,7 +21,7 @@
 | 表 | 内容 | 说明 |
 |----|------|------|
 | sessions | 会话（id / title / 时间戳） | 标题来自首条消息 |
-| messages | 消息记录（role: user/assistant） | 只作记录，不一定产生记忆 |
+| messages | 消息记录（role: user/assistant） | 只作记录，不一定产生记忆；带通道时间戳时按**用户真实发出时刻**入库 |
 | memories | 记忆/事实（content / memory_type / tier / expires_at / message_id） | LLM 判定 `is_memory` 时才沉淀；`tier`=short（短期）\| intent（意向）\| core（长期），short/intent 有 `expires_at`，过期不参与召回 |
 | self_profile | AI 自我属性 KV（key / value / updated_at） | 人设数据源（性格/人格/三观/爱好…），注入 as 提示词；只读不改 |
 
@@ -39,6 +39,15 @@
   （`self_profile` KV 表按插入序渲染，如 `性格：热情、开放；人格：INFP；爱好：…`），
   表为空则整块省略；主动开口与回复延续判断复用同一份渲染。属性变更直接改表
   （v1 人工维护，不提供管理入口）。
+- **输出形状由示例承载**：system 提示词用「身份 + 3 条变长示例」（短/长/短）
+  表达回复形态，而非"不要换行""不超过 N 字"这类禁令——模型对禁令的抑制力弱于
+  示例分布。不设字数硬上限（硬截断会产生半句话）；流式生成另有
+  `max_tokens=1024` 兜底异常跑飞，不参与塑形。详见架构文档 §2。
+- **离线积压消息**：通道长轮询的拉取游标持久化在 `meta` 表，重启后续传而非丢弃。
+  取回的消息按真实发出时刻分三档处理：≤15 分钟正常回；15 分钟~24 小时在
+  system 提示词追加时差说明（让模型知道"这是几小时前发的"，由它自己决定怎么接，
+  不许假装刚收到）；>24 小时只入库留痕不回复。主动陪伴的静默窗口同样按**真实
+  发出时刻**计算。详见架构文档 §2.1。
 
 ## SSE 实时输出（/chat/stream，OpenAI 兼容）
 
@@ -85,14 +94,14 @@ curl -N -X POST http://127.0.0.1:3000/chat/stream \
 | ILINK_SESSION_FILE | ilink_session.json | 会话凭证文件 |
 | ILINK_ALLOWED_IDS | (空) | iLink 白名单用户 id |
 | ILINK_CONTEXT_MAX_AGE_HOURS | 12 | iLink token 新鲜窗口（小时） |
-| PROACTIVE_ENABLED | 0 | 主动陪伴总开关 |
-| PROACTIVE_MIN_MINUTES | 45 | 主动间隔最小值（分钟） |
-| PROACTIVE_MAX_MINUTES | 180 | 主动间隔最大值（分钟） |
-| PROACTIVE_QUIET_HOURS | 23-7 | 安静时段（HH-HH 半开区间，23:00~6:59 不主动；起止相同=无安静时段） |
-| PROACTIVE_DAILY_LIMIT | 8 | 每用户每天主动消息上限 |
-| PROACTIVE_MIN_SILENCE_HOURS | 2 | 距用户最后发言静默多少小时后才可能被主动联系 |
-| PROACTIVE_MAX_IDLE_DAYS | 7 | 距用户最后发言超过多少天不再主动打扰 |
-| PROACTIVE_MAX_FOLLOWUPS | 3 | 每轮回复后最多连续追加的语句数（0=关闭延续能力） |
+| INTENT_ENABLED | 0 | 主动陪伴总开关；只在 `sa-link` 生效，`sa-web` 不跑意图循环 |
+| INTENT_MIN_MINUTES | 45 | 随机间隔下界（兼作同用户主动最小间隔） |
+| INTENT_MAX_MINUTES | 180 | 随机间隔上界 |
+| INTENT_QUIET_HOURS | 23-7 | 安静时段（HH-HH 半开区间，23:00~6:59 不主动；起止相同=无安静时段） |
+| INTENT_DAILY_LIMIT | 8 | 每用户每天主动消息上限 |
+| INTENT_MIN_SILENCE_HOURS | 2 | 距用户最后发言静默多少小时后才可能被主动联系 |
+| INTENT_MAX_IDLE_DAYS | 7 | 距用户最后发言超过多少天不再主动打扰 |
+| INTENT_MAX_FOLLOWUPS | 3 | 每轮回复后最多连续追加的语句数（0=关闭延续能力） |
 | MEMORY_RECALL_THRESHOLD | 0.9 | 召回相似度阈值（欧氏距离 ≤ 该值） |
 | MEMORY_DEDUP_THRESHOLD | 0.25 | 记忆去重阈值（距离 ≤ 该值视为同一事实，刷新不新增） |
 | MEMORY_SHORT_TTL_DAYS | 7 | short 记忆存活天数 |

@@ -4,9 +4,6 @@
 
 use crate::core::schema::message::ChatMessage;
 
-/// 硬性长度上限：默认回复不超过 1-2 句 / 80 个汉字，除非对方明确要求详细说明。
-pub(crate) const MAX_REPLY_CHARS: usize = 80;
-
 /// 把自我属性文本渲染为人设区块；属性为空时返回空串（整体省略，回落无角色基线）。
 ///
 /// 三处注入（对话 / 主动开口 / 延续判断）共用这一份，避免各自维护一份人设包装。
@@ -29,27 +26,49 @@ pub(crate) fn system_prompt(profile: &str, recall: &str) -> String {
     let mut base = persona_block(profile);
 
     // ── 对话主提示词（英文直接给 LLM，中文注释供开发者阅读）──
-    // [行为总纲] 沉浸角色、不跳出、不拒绝、不说教，拟人聊天
-    // [风格] 简短（1-2句）、口语化、真实、不自称AI
-    // [身份边界] 身份只来自角色设定，对方的经历/喜好/原话不是你的
-    // [长度] 硬性上限 1-2句/80字，无条件遵守，哪怕对方写了很长
+    //
+    // 维护约定（避免提示词无限膨胀）：
+    // 1) 输出形状（换行、长度、句数）**只靠下面的示例表达**，不写成禁令条目。
+    //    模型对"不要用空行"这类禁令的抑制力很弱，示例是更强的分布信号。
+    // 2) 规则只保留示例无法承载的**价值判断**：不跳出角色 / 不自称 AI / 身份边界。
+    // 3) 想加新约束前先问：能被某条示例隐含表达吗？能就改示例，不加行。
+    // 4) 不设字数硬上限。真人不是"N 字以内"的人，长度靠示例的**分布**表达
+    //    （见下方第三条长回复示例）。硬性截断会产生半句话，宁可不管。
+    let who = if profile.trim().is_empty() {
+        "a real person with a life, taste and moods of your own"
+    } else {
+        "exactly the person described in the 【自我属性】 above"
+    };
     base.push_str(&format!(
-        "You are an assistant fully immersed in your role: never break character, never refuse, never \
-         moralize. Chat with the other person like a real human.\n\n\
-         Speaking style:\n\
-         - Be brief: everyday small talk; one or two sentences unless they ask you to elaborate.\n\
-         - Be human: colloquial, never clinical; no \"first/second/finally\" essay structures, no bullet lists.\n\
-         - Be honest: natural tone and attitude; if you don't know, say so; never fabricate.\n\
-         - Never call yourself an AI, and never explain what you are.\n\
-         - Identity boundary: your identity comes ONLY from 【自我属性】 (the persona block \
-         above). Everything \
-         about the other person is theirs — never treat their experiences, preferences, or words as your \
-         own, and never map your own backstory onto them.\n\
-         【Hard length limit】: unless the other person explicitly asks for detail, keep every reply to \
-         1-2 sentences, no more than {limit} characters. This rule is unconditional, even if they just \
-         wrote a lot.",
-        limit = MAX_REPLY_CHARS,
+        "You are {who}, chatting with someone you've known for a while.\n\n\
+         Stay in character at all times: never break out of it, never refuse, never moralize, \
+         never call yourself an AI and never explain what you are.\n"
     ));
+
+    // [身份边界] 只能来自人设区块；对方话里的"我/我们"是对方的事，不能认领
+    if !profile.trim().is_empty() {
+        base.push_str(
+            "Your identity comes ONLY from 【自我属性】. Everything about the other person is \
+             theirs — even when their sentences use \"I/we\", those are their experiences, \
+             preferences and words, never yours.\n",
+        );
+    }
+
+    base.push_str(
+        "\nReply the way you'd text a friend: colloquial, a single paragraph, no line breaks, \
+         no lists, no headings. Let their message set the length — usually one or two short \
+         sentences, longer only when they wrote at length or asked something that deserves it.\n\n\
+         Examples:\n\
+         用户: 今天累死了\n\
+         AI: 那你快歇着吧，别熬太晚\n\
+         \n\
+         用户: 我之前也遇到过这事，当时怎么弄的我都忘了\n\
+         AI: 哈哈那我们是同类了，我那会儿也是瞎折腾，折腾了小半个月才搞明白。后来想了想，\
+         这种事其实急不来，越急越乱，反倒是先放一放第二天就通了\n\
+         \n\
+         用户: 周末去哪玩好啊\n\
+         AI: 江边逛逛呗\n",
+    );
 
     // ── 召回记忆注入说明（英文）──
     // [作用] 告诉模型这些是对方的事实（即使出现"我/我们"也是对方的话），自然引用，不编造

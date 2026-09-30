@@ -2,7 +2,7 @@
 
 > 本文描述后端 Rust 内核的分层结构、核心数据流与各子系统的协作方式。
 > 
-> 上一次更新：2026-09-22
+> 上一次更新：2026-09-30
 
 ---
 
@@ -13,32 +13,35 @@
 │  传输层（外部适配层，经 bin 接线）                                     │
 │  ┌──────────┐  ┌──────────────┐  ┌────────────────┐                │
 │  │ HTTP/WS  │  │ Telegram     │  │ iLink 微信     │                │
-│  │ /chat/   │  │ long-poll    │  │ WS relay       │                │
+│  │ /chat/   │  │ long-poll    │  │ long-poll      │                │
 │  │ stream   │  │ polling      │  │                │                │
 │  └────┬─────┘  └──────┬───────┘  └───────┬────────┘                │
-│       │ Host         │ Host + ChannelsPusher（PushPort 实现）      │
+│       │ Agent+Sessions │ Agent+Sessions+IntentTracker                │
+│       │                │ + ChannelsPusher（主动外发唯一实现）        │
 ├───────┴───────────────┴──────────────────┴──────────────────────────┤
-│  应用本体：core/（具体类型直连，只对三个能力口编程）                    │
-│  app.rs      组合根 Assistant：开 db、装配会话/主动簿/能力口、实现 Host │
-│  host.rs     窄端口 Arc<dyn Host>（无 Host::db）                     │
-│  agent_run.rs 单轮流水线 chat_stream() + 记忆沉淀 settle_memory()（§2）│
+│  应用本体：core/（具体类型直连，能力以具体类型接线）                    │
+│  app.rs      组合根 App：开 db、装配 Sessions / IntentTracker / Llm /  │
+│              Store / Profile → 注入 Agent。只装配不转发。             │
+│  agent.rs    Agent 单轮流水线 chat_stream() + 记忆沉淀 settle_memory() │
+│              （§2）                                                   │
 │  session/    Sessions 会话内存运行时（首碰水合 + 变化即写穿）          │
-│  runtime/    ProactiveBook 主动状态簿 + realtime 统一"现在"时间源     │
-│  memory/     AI 记忆：Store（MemoryStore）/ user_memory_extraction    │
-│                + current_relation / current_phase（纯实现，详见 §3） │
-│  proactive/  主动陪伴引擎（调度/决策/推送/延续，外发经 PushPort）      │
+│              + classify_inbound() 入站时效分级（§2.1）                │
+│  intent/     主动陪伴引擎：pace 调度 / filter 规则 / speak+continuation│
+│              决策 / sender 派发 / tracker 状态簿（§4）                 │
+│  memory/     AI 记忆：Store / user_memory_extraction                  │
+│              + current_relation / current_phase（纯实现，详见 §3）    │
 │  context/    上下文组装：历史时间线 / 记忆召回的取数与渲染             │
-│  ports.rs    能力口：ChatLlm / MemoryStore / PushPort                │
-│  types.rs    ChatInput/Output、AgentContext、Extraction、MemoryRecord/│
-│              Hit、MessageTurn、ProactiveCandidate、RelationEvent      │
-│  旧"存储端口"（ConversationStore / SessionMap / ProactiveStore /     │
-│  Embedder）已删除——core 与 db 直接接线，会话/状态簿为本体 inherent     │
+│  schema/     ChatInput/Output、AgentContext、Extraction、MemoryRecord/│
+│              Hit、MessageTurn、IntentCandidate、RelationEvent          │
+│  旧"存储端口"与 Host / ports.rs 窄端口已删除——core 与 db 直接接线，   │
+│  会话/状态簿为本体 inherent；唯一反向引用是 ChannelsPusher（主动外发    │
+│  属"外部能力"而非传输端点，见 tests/layer_guard.rs）                  │
 ├──────────────────────────────────────────────────────────────────────┤
-│  能力层（实现 core 的能力口）                                          │
-│  llm/chat.rs       → ChatLlm   （complete/complete_structured/stream）│
-│  llm/embedding.rs  → embed_text()（genai 阻塞 API，spawn_blocking）    │
-│  channels/ChannelsPusher → PushPort（外发派发，只读 PushChannels 注册表）│
-│  core/memory/Store → MemoryStore                                     │
+│  能力层（core 直接接线的具体能力）                                     │
+│  llm/chat.rs       Llm（complete / complete_structured / stream）      │
+│  llm/embedding.rs  embed_text()（genai 阻塞 API，spawn_blocking）    │
+│  channels/ChannelsPusher 主动外发（只读通道就绪注册表 + Config）      │
+│  core/memory/Store   记忆读写（core 内具体类型，非独立能力口）          │
 ├──────────────────────────────────────────────────────────────────────┤
 │  存储层：db/mod.rs（rusqlite + sqlite-vec）                            │
 │  messages / memories / memory_vectors / sessions / channel_sessions / │
@@ -65,15 +68,25 @@ TG 长轮询收到 Update
   ├─ ts_to_rfc3339(msg.date) → 归一化为 RFC3339 用户真实发出时刻
   │  （路径：channels/mod.rs ts_to_rfc3339）
   │
-  ├─ Host::ensure_session("telegram", chat_id)
-  │  → core/session::Sessions.resolve() 内存通道映射命中即复用，未命中建映射（即写穿）
+  ├─ classify_inbound(sent_at, now) → 时效分级（§2.1）
+  │  ├─ TooOld（>24h）→ Sessions::archive_only()：只按真实时刻入库留痕，
+  │  │   不调 LLM、不回复、不产生 assistant 消息 → 本条结束
+  │  └─ Fresh / Delayed → 继续下方流水线
+  │
+  ├─ IntentTracker::touch_user_reply(channel, id, session_id, sent_at)
+  │  → 写穿 intent_state.last_user_reply_at = **消息真实时刻**（单调不后退）
+  │    静默窗口从对方实际说话那一刻算起；用接收时刻会把窗口错误归零
+  │
+  ├─ Sessions::resolve("telegram", chat_id)
+  │  → 内存通道映射命中即复用，未命中建映射（即写穿）
   │
   ├─ Sessions::add_message_at(session_id, "user", text, user_time)
   │  → 内存缓冲追加 + 即写穿 messages 表
-  │  （路径：core/agent_run.rs，有通道时间戳时用之，否则记接收时刻）
+  │  （路径：core/agent.rs，有通道时间戳时用之，否则记接收时刻）
   │
-  ├─ ① 记忆召回（语义向量检索，≤ threshold 才入选，走 MemoryStore 能力口）
-  │     core::agent_run → core/memory::search(db, text, MEMORY_RECALL_LIMIT=5)
+  ├─ ① 记忆召回（语义向量检索，≤ threshold 才入选）
+  │     core::agent → core/context::fetch_recall → core/memory::Store::search
+  │     （MEMORY_RECALL_LIMIT=5）
   │       → llm::embedding::embed_text(text) → embedding API（本地 1234 端口）
   │       → db_memory::search_similar() → vec0 kNN（k = ? 约束）
   │       → 按 memory_recall_threshold 过滤，剔除已过期记忆
@@ -87,38 +100,81 @@ TG 长轮询收到 Update
   │       ├─ 内容保持原文，不带时间/角色前缀
   │       ├─ history_count 显式指定 → 退化为取最近 N 条
   │       └─ ⚠ 必须在"本条用户消息入库之前"取，否则本轮消息会被算进历史
-  │     context::system_prompt(profile, recall)
+  │     context::system_prompt(profile, recall) → core/context/prompt.rs
   │       ├─ 角色设定：self_profile KV 表（AI 自我属性，中文原文注入，最高优先级；
   │       │   由 core/self_profile::Profile::block 渲染为「性格：…；人格：…」，
   │       │   对话/主动开口/延续判断三处共用同一 persona_block，空表整块省略）
-  │       ├─ 英文行为指令：对方中心 / 格式禁令 / 长度约束 / 身份边界
-  │       └─ 召回记忆文本（"Below is what you know about the other person..."）
+  │       ├─ 英文行为指令：**身份 + 3 条变长示例**（短/长/短）。
+  │       │   输出形状（换行、长度、句数）只由示例表达，不写禁令条目——
+  │       │   模型对"不要用空行"这类禁令抑制力很弱，示例才是分布信号。
+  │       │   规则只保留示例承载不了的价值判断：不出戏 / 不自称 AI / 身份边界。
+  │       │   不设字数硬上限（真人不是"N 字以内"的人，硬截断会产生半句话）
+  │       ├─ 召回记忆文本（"Below is what you know about the other person..."）
+  │       └─ 延迟消息时追加 delay_notice() 时差说明（§2.1）——仅 Delayed 档
   │
-  ├─ ③ 流式生成回复（走 ChatLlm 端口）
-  │     llm::chat::complete_stream(messages, on_delta)
+  ├─ ③ 流式生成回复
+  │     Llm::complete_stream(messages, on_delta)
   │       → genai_client: 按 LLM_PROVIDER 选 OpenAI / Gemini adapter
   │       → genai 0.6.5 流式 API
   │       → delta 逐段回调 on_delta（SSE 逐块推送 / CLI 实时打印）
+  │       → max_tokens = STREAM_MAX_TOKENS(1024) 异常熔断：
+  │         正常输出远小于此；触发即说明生成已跑偏，砍掉重来优于发出失控文本。
+  │         **只兜底，不参与塑形**（输出形状由提示词示例负责）
   │
   ├─ ④ 回复入库，刷新会话时间戳
   │     Sessions::add_message(session_id, "assistant", reply) + touch_session(session_id)
   │     → 内存缓冲 + 即写穿
-  │     （core/agent_run 内全部 inherent 方法，不再有 ConversationStore 端口）
   │     → Agent::chat_stream 到此返回（带 session_id / reply / user_message_id）
   │
-  └─ ⑤ 记忆沉淀（**回复交付之后**，宿主调 Agent::settle_memory，走 MemoryStore 能力口）
-├─ 判定：memory::user_memory_extraction::judge(text) → 极窄 JSON 标签，走 json_schema / json_object
+  └─ ⑤ 记忆沉淀（**回复交付之后**，宿主调 Agent::settle_memory）
+  ├─ 判定：memory::user_memory_extraction::judge(text) → 极窄 JSON 标签，走 json_schema / json_object
   │     { is_memory, memory_type, tier, relation }（schema 用 enum 收窄）
   │     只做分类、不生成自然语言，输出维度小 → 模型几乎写不歪
   │     （relation 标签仍产出并随记忆提取保留，关系演化接线已随 aiworld 拆出，重设计后恢复）
-        ├─ 事实化：仅当 is_memory=true 才追加一次调用
-│        user_memory_extraction::summarize(text) → 第三人称事实句（纯文本，不是 JSON）
-        └─ 落库：memory::store(...) → memories 行 + memory_vectors（去重/分层/TTL）
-              → llm::embedding::embed_text(content) → 向量化
-              → 去重：与已有记忆距离 ≤ dedup_threshold → 只刷 updated_at，不新增
-              → 插入 memories + memory_vectors
+         ├─ 事实化：仅当 is_memory=true 才追加一次调用
+ │        user_memory_extraction::summarize(text) → 第三人称事实句（纯文本，不是 JSON）
+         └─ 落库：Store::store(...) → memories 行 + memory_vectors（去重/分层/TTL）
+               → llm::embedding::embed_text(content) → 向量化
+               → 去重：与已有记忆距离 ≤ dedup_threshold → 只刷 updated_at，不新增
+               → 插入 memories + memory_vectors
         任何环节失败只记 warn 并降级（不写记忆），绝不影响已交付的回复
 ```
+
+### 2.1 离线积压消息的续传与时效分级
+
+用户发完消息没等到回复就关机 / 断网 / 关掉 app，进程重启后这条消息仍在通道服务端
+排队。**早期实现在启动时把拉取游标直接跳到最新，等于把这批消息整段丢弃**——用户
+必须重发一遍，且"对方刚说过话"的时钟被改写（见 §4.2）。现在按两步处理：
+
+**第一步：游标持久化，续传而非跳到最新。**
+
+| 通道 | 游标 | 存取 |
+|------|------|------|
+| Telegram | `update_id`（服务端保留约 24h） | `meta` 表键 `channel_cursor:telegram` |
+| iLink | `get_updates_buf` | `meta` 表键 `channel_cursor:ilink` |
+
+- `db/channel.rs` 的 `get_cursor` / `set_cursor` 负责 SQL；
+  `Sessions::load_cursor` / `save_cursor` 是 core 侧能力口（传输层不碰 db）。
+- 游标在**整批确认后、处理消息之前**落盘：中途崩溃重启不会重放本批。
+- 首次运行无游标 → Telegram 从 0 开始领取服务端保留的全部历史；这些消息几乎
+  必然超时效，会被下面的 TooOld 分支挡掉，不产生任何回复。
+
+**第二步：按消息真实时刻做时效分级。**
+
+`core/session/sessions.rs` 的 `classify_inbound(sent_at, now)` 返回三档：
+
+| 档位 | 时长 | 行为 |
+|------|------|------|
+| `Fresh` | ≤ 15 分钟 | 按实时消息正常回 |
+| `Delayed` | 15 分钟 ~ 24 小时 | 正常回，但 system prompt 追加 `delay_notice()` 时差说明 |
+| `TooOld` | > 24 小时 | `Sessions::archive_only()`：只按真实时刻入库留痕，不调 LLM、不回复 |
+
+`delay_notice()` 明说"this was sent N hours ago, you're only just seeing it"，并禁止
+模型假装刚收到、道歉、提 offline。这是**示例承载不了**的信息——模型看不到通道层时间
+戳，只能显式告知。时钟回拨导致的负间隔按 0 处理（视作刚收到）。
+
+> `MAX_REPLYABLE_HOURS = 24` 刻意与 Telegram 服务端的 update 保留窗口对齐：关机
+> 超过 24h，那条消息服务端也已丢弃，任何实现都救不回来。
 
 ---
 
@@ -138,7 +194,7 @@ AI "关于自己的记忆"（性格/情绪/关系/作息画像，结构化运行
 | `memory/ai_realtime_mood.rs`（情绪 `Mood` / 回落） | 已删除 |
 | `memory/current_state_assemble.rs`（快照 `Snapshot` / `render`） | 已删除 |
 | `db/world_state.rs` / `db/time_profile.rs`（写穿模块） | 已删除 |
-| `Host::world_snapshot_text` / `Host::tick_state`、`bin/server` 世界心跳 | 已删除 |
+| `Agent::world_snapshot_text` / 世界心跳（`bin/server`） | 已删除 |
 | `core/context/state.rs`（`render_state` 取数封装） | 已删除 |
 | **保留** `memory/current_relation.rs` / `memory/current_phase.rs`（纯值 + 演化规则） | 纯实现留存 |
 | 表 `world_state` / `relations` / `time_profiles` | 按 schema 只增约定保留，暂无代码接线 |
@@ -156,43 +212,70 @@ AI "关于自己的记忆"（性格/情绪/关系/作息画像，结构化运行
 
 ---
 
-## 4. 主动陪伴引擎（proactive/）
+## 4. 主动陪伴引擎（core/intent/）
 
-与世界引擎解耦，依赖 `PROACTIVE_ENABLED=1` 且至少有一个通道启用。
+与世界引擎解耦，依赖 `INTENT_ENABLED=1`（默认关）且至少有一个通道启用。
+**只在 `sa-link` 里 spawn**（`bin/sa-link.rs`）——`sa-web` 不跑这个循环，
+`IntentTracker` 在 sa-web 中虽被装配但无消费者，只跑 Web UI 时不会有主动发言。
 
-### 4.1 主循环
+模块分工：`pace` 调度节奏 / `filter` 纯规则 / `speak` 开口决策 /
+`continuation` 续话 / `sender` 派发 / `tracker` 状态簿。
+
+### 4.1 主循环（core/intent/mod.rs）
 
 ```
-proactive::run(assistant, pusher)   ← pusher = Arc<dyn PushPort>（bin 注入 ChannelsPusher）
+intent::run(chat, session, tracker, pusher)   ← pusher = Arc<ChannelsPusher>
   loop {
-      idle = scheduler::next_sleep()        ← 随机间隔（安静时段则直接睡到结束）
-      sleep(idle)
-      run_once(assistant, pusher)           ← 每轮最多发出一条主动消息
+      idle = pace::next_sleep()        ← 随机 45~179 分钟；安静时段则睡到结束 +30s
+      sleep(idle)                       ← **先睡后跑**：启动后首个周期必然延迟一个间隔
+      run_once(...)                     ← 每轮最多发出一条主动消息
   }
 ```
+
+用的是 `tokio::time::sleep` 而非 `interval`，所以没有"首次 tick 立即触发"的语义。
+这是刻意的：启动就开口会让用户觉得 bot 一睁眼就在聒噪。
 
 ### 4.2 单轮评估（run_once）
 
 ```
-1. in_quiet_hours() → 静默跳过
-2. ProactiveBook::eligible_candidates() → 内存状态簿 + proactive/store 过滤：
-     - last_user_reply_at + min_silence_hours ≤ now（用户沉默够久）
+1. pace::in_quiet_hours() → 静默跳过（等待期间可能恰好跨入安静时段，竞态兜底）
+2. tracker.eligible_candidates() → 内存状态簿 + filter::filter_eligible 过滤：
+     - last_user_reply_at 必须存在（对方至少说过话）
+     - 静默时长 ∈ [min_silence_hours, max_idle_days]（2h ~ 7d）
+     - 距上次主动 ≥ intent_min_minutes
      - today_count < daily_limit（当日未超限）
-     - （iLink 还需 context_token 在新鲜窗口内）
-3. 对每个候选（每轮最多 MAX_CANDIDATES=5）：
-     - sender::pushable(pusher, cand) → PushPort 查询通道是否可推（TG：已连通；iLink：token 未过期且发送次数未超）
-     - propose() → 组装上下文（经 Host：最近历史 + 记忆召回）→ LLM 开口决策（JSON）
-     - sender::dispatch(assistant, pusher, cand, text) → 经 PushPort 外发（Telegram / iLink）
-     - 发出即 return（一轮只发一条，避免轰炸）
+3. 对每个候选（每轮最多 MAX_CANDIDATES_PER_CYCLE=5）：
+     - sender::pushable(pusher, cand) → 通道可推性预筛
+       （TG：长连通即 true；iLink：context_token 在 ILINK_CONTEXT_MAX_AGE_HOURS=12h
+         窗口内且 sends_since_refresh < 10）
+     - propose() → 最近 8 条历史 + 3 条记忆召回 → speak::decide 问 LLM（JSON）
+     - sender::dispatch(...) → ChannelsPusher 外发，写回历史 + 计入配额
+     - 发出即 return（一轮全通道合计一条）
 ```
+
+**静默窗口的时钟**：`last_user_reply_at` 记的是**消息真实发出时刻**（通道报文
+时间戳），不是接收时刻，见 §2.1。积压消息乱序到达时该值只前进不后退（SQL 层
+`AND last_user_reply_at < ?1` + 内存侧同规则）。
+
+`decide` 返回 `speak:false` 无退避计数、无失败升级，只按 `Decision.reason` 记
+debug 日志；唯一的隐式退避是恒定随机间隔本身。
 
 ### 4.3 延续追加（continuation）
 
-每次正常回复后（含主动回复），由 `continuation::propose_follow_up()` 按
-`proactive_max_followups` 限制的次数决定是否像真人一样接着补一两句
-（话题有延展性时）。追加句是"对话"而非"主动发起"，**不计入每日主动配额**
-（原文档此处表述有误，一并修正）。continuation 由各 relay 传入 `&ChannelsPusher`
-复用同一能力口。
+每次正常回复成功后（含主动回复），由 `continuation::after_reply()` 按
+`INTENT_MAX_FOLLOWUPS` 限制的次数决定是否像真人一样接着补一两句（话题有延展性时，
+或自己上一句话没说完）。追加句是"对话"而非"主动发起"，**不计入每日主动配额**、
+不设 `last_intent_at`，但会写历史、且消耗 iLink 窗口次数。由各 relay 传入
+`&ChannelsPusher` 复用同一能力口。
+
+### 4.4 已知约束
+
+| 约束 | 说明 |
+|------|------|
+| `INTENT_MIN_MINUTES` 一词两义 | 既是 `pace` 随机间隔下界，又是 `filter` 的同用户最小间隔。默认 45min 而实际调度 45~179min，故 §4.2 的间隔判断几乎不生效——节奏实际由随机间隔控制 |
+| 沉默 > 7 天永久拉黑 | `INTENT_MAX_IDLE_DAYS`。主动发言**不**刷新 `last_user_reply_at`（只写 `last_intent_at` / `today_count`），时钟仅被用户入站推进；所以 bot 自己发满 8 条也救不回沉睡用户 |
+| iLink 静默 > 12h 不可推 | `context_token` 过期，`pushable` 恒 false。比 7d 上限更早生效，协议限制无法绕过。iLink 实际可触发窗口只有约 10 小时 |
+| 每日配额日界不一致 | `tracker` 内存用本地日、`filter` 判定用 UTC 日，东八区本地 00:00~08:00 期间配额会提前/延后重置 |
 
 ---
 
@@ -228,7 +311,7 @@ proactive::run(assistant, pusher)   ← pusher = Arc<dyn PushPort>（bin 注入 
 ### 6.2 向量检索
 
 ```
-core/memory::search(query)
+Store::search(query)
   │
   ├─ vec_status()?.search_usable() → 向量签名不匹配时静默降级为空
   ├─ llm::embedding::embed_text(query) → EMBEDDING_API_URL（本地 1234 端口，同步阻塞）
@@ -252,7 +335,7 @@ SQLite + WAL 模式 + sqlite-vec 向量扩展。所有业务表仅做增量迁�
 
 | 表名 | 用途 |
 |------|------|
-| `meta` | 纯键值元信息（schema_version / embedding_dim / embedding_model） |
+| `meta` | 纯键值元信息（schema_version / embedding_dim / embedding_model / `channel_cursor:{channel}` 拉取游标，§2.1） |
 | `sessions` | 会话（id / title / created_at / updated_at） |
 | `messages` | 对话消息（role = user / assistant） |
 | `memories` | 记忆事实（content / tier / expires_at / message_id） |
@@ -294,15 +377,21 @@ ILINK_ENABLED=0      # 0/留空 = 不启动；1 = 启动（有 token 直连，�
 ### 8.3 主动陪伴
 
 ```env
-PROACTIVE_ENABLED=0          # 总开关
-PROACTIVE_MIN_MINUTES=45     # 随机间隔最小
-PROACTIVE_MAX_MINUTES=180    # 随机间隔最大
-PROACTIVE_QUIET_HOURS=23-7   # 安静时段（本机时间，HH-HH，跨午夜取 start > end）
-PROACTIVE_DAILY_LIMIT=8      # 每用户每天上限
-PROACTIVE_MIN_SILENCE_HOURS=2   # 用户沉默多久才可能被主动联系
-PROACTIVE_MAX_IDLE_DAYS=7    # 超过多少天未回复则不再打扰
-PROACTIVE_MAX_FOLLOWUPS=3    # 每轮回复后最多连续追加几句话
+INTENT_ENABLED=0             # 总开关（默认关）
+INTENT_MIN_MINUTES=45        # 随机间隔最小（兼作同用户主动最小间隔，见 §4.4）
+INTENT_MAX_MINUTES=180       # 随机间隔最大
+INTENT_QUIET_HOURS=23-7      # 安静时段（本机时间，HH-HH，跨午夜取 start > end；起止相同=禁用）
+INTENT_DAILY_LIMIT=8         # 每用户每天上限
+INTENT_MIN_SILENCE_HOURS=2   # 用户沉默多久才可能被主动联系
+INTENT_MAX_IDLE_DAYS=7       # 超过多少天未回复则不再打扰
+INTENT_MAX_FOLLOWUPS=3       # 每轮回复后最多连续追加几句话（0=关闭）
 ```
+
+### 8.4 离线积压时效
+
+入站消息时效分级的两个阈值是**编译期常量**（`core/session/sessions.rs`），暂不
+开放为环境变量：`FRESH_WINDOW_MINUTES = 15`、`MAX_REPLYABLE_HOURS = 24`。
+后者刻意与 Telegram 服务端的 update 保留窗口对齐（§2.1）。
 
 ---
 
@@ -341,3 +430,5 @@ Kotlin/Swift。
 6. **vec0 kNN 约束**：查询必须写 `k = ?`，把 LIMIT 写在外层查询会报 "A LIMIT or 'k = ?' constraint is required"。
 7. **JSON 结构化输出**：记忆判定 / 开口决策 / 延续判断均走 json_schema（支持的模型自动约束输出格式，不支持时退化为自由 JSON + 容错解析）。模型输出一律当**不可信输入**：字段缺失 / `null` / 类型不符 / 空白都回退默认值，不让一次格式抖动变成业务失败。
 8. **记忆后置 + 全链路降级**：记忆沉淀（判定 / 事实化 / 落库）不挂在对话路径上，由宿主在回复交付之后调用 `Agent::settle_memory`（telegram / iLink 用 `spawn_blocking` 后台跑，SSE / CLI 同步补再把结果回填 `ChatOutput.memory`）。记忆链路的任何环节失败都只记 warn 并降级，绝不冒泡成"对话失败"。
+9. **提示词靠示例不靠禁令**：输出形状（换行、长度、句数）只用 few-shot 示例表达，不写成"不要用空行""不超过 N 字"——模型对禁令的抑制力远弱于示例分布。规则只留示例承载不了的价值判断。字数硬上限会被砍成半句话，宁可不做；`max_tokens` 只作异常熔断。这是 `core/context/prompt.rs` 顶部维护约定的由来，也是防止提示词无限膨胀的纪律。
+10. **入站按真实时刻记账**：消息时刻一律取通道报文时间戳，不取接收时刻。这同时决定两件事——消息入库的时间线、主动陪伴静默窗口的起点。离线积压按游标续传 + 时效分级处理（§2.1），不丢弃也不假装刚收到。
