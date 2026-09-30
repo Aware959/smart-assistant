@@ -4,5 +4,6 @@
 //! 本进程内对"现在"的取值一致、可测试。
 
 pub mod runtime;
+pub mod textflow;
 pub mod time;
 pub mod trace;
