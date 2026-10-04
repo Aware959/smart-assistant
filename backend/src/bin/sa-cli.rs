@@ -11,6 +11,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 加载运行目录下的 .env 文件（不存在则静默跳过，环境变量优先）。
     dotenvy::dotenv().ok();
 
+    // 初始化日志（与 sa-link / sa-web 同一个 bootstrap）。
+    // 不接的话 CLI 完全不输出 tracing——工具调用入参、LLM 流式统计这些
+    // 就只能在 Telegram 端看，排查"模型到底调了什么"时没有第二只眼睛。
+    // guard 必须活到 main 结束，否则非阻塞写线程会被提前拆掉、丢日志。
+    let _runtime = smart_assistant::utils::runtime::bootstrap();
+
     // Ctrl+C：安装处理器后用 exit(0) 干净退出（Windows 下默认是 STATUS_CONTROL_C_EXIT 非正常终止）。
     ctrlc::set_handler(|| {
         println!("\n[Ctrl+C] 再见");
@@ -33,12 +39,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             history_count: None,
             user_time: None,
         };
-        match chat.chat_stream(&input, |delta| {
-            print!("{delta}");
+        // 回调收到的是**一条完整消息**（不再逐字增量）：每次调用即一行。
+        // 注意 `on_message` 在 `chat_stream` 返回前就已全部触发，这里不能再打
+        // `out.reply`——那会把整轮内容重复输出一遍。
+        match chat.chat_stream(&input, |msg| {
+            println!("{msg}");
             io::stdout().flush().ok();
         }) {
             Ok(out) => {
-                println!();
                 println!("[会话 {}]", out.session_id);
                 // 回复已输出，再补记忆沉淀（CLI 无并发压力，同步即可）。
                 if let Some(mem) =
@@ -85,12 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             history_count: None,
             user_time: None,
         };
-        match chat.chat_stream(&input, |delta| {
-            print!("{delta}");
-            io::stdout().flush().ok();
+        match chat.chat_stream(&input, |msg| {
+            println!("{msg}");
         }) {
             Ok(out) => {
-                println!();
                 session_id = Some(out.session_id.clone());
                 // 回复已输出，再补记忆沉淀（CLI 无并发压力，同步即可）。
                 if let Some(mem) =

@@ -40,10 +40,7 @@ impl From<ChatRequest> for ChatInput {
             history: r
                 .history
                 .into_iter()
-                .map(|t| ChatMessage {
-                    role: t.role,
-                    content: t.content,
-                })
+                .map(|t| ChatMessage::new(t.role, t.content))
                 .collect(),
             history_count: r.history_count,
             user_time: None,

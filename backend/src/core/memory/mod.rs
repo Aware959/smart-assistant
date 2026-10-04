@@ -182,7 +182,7 @@ pub fn store(
     message_id: Option<&str>,
 ) -> Result<Memory> {
     let cfg = Config::get();
-    let usable = db.vec_status()?.search_usable();
+    let usable = db.vec_search_usable()?;
 
     // 向量化一次，同时用于去重判定与正式写入。
     let mut vector = Vec::new();
@@ -239,7 +239,9 @@ pub fn store(
 /// 语义检索记忆。**只返回未过期且距离 ≤ `memory_recall_threshold` 的条目**；
 /// 向量签名不匹配时返回空结果（检索暂停，等待确认重建）。
 pub fn search(db: &Database, query: &str, limit: usize) -> Result<Vec<(Memory, f32)>> {
-    if !db.vec_status()?.search_usable() {
+    // 热路径每轮都走：只查维度（sqlite_master 里 vec0 的建表语句），
+    // 不要退回 vec_status()——那会连带扫两次 COUNT(*)。
+    if !db.vec_search_usable()? {
         return Ok(Vec::new());
     }
     let vector = embedding::embed_text(query)?;

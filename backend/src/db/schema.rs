@@ -9,7 +9,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const SCHEMA_VERSION: i64 = 11;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -104,7 +104,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (channel, external_id)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
         "#,
     )?;
@@ -211,6 +211,13 @@ fn migrate(conn: &Connection) -> Result<()> {
             );
             "#,
         )?;
+    }
+
+    if version < 11 {
+        // v11：messages 改用 (session_id, created_at) 复合索引。
+        // 历史单列索引 (session_id) 已被它完全覆盖（最左前缀即可服务
+        // "按会话过滤"），留着只是每条消息多维护一棵 B 树。
+        conn.execute_batch("DROP INDEX IF EXISTS idx_messages_session;")?;
     }
 
     if version >= SCHEMA_VERSION {
@@ -370,5 +377,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(content, "别丢");
+    }
+
+    /// v11：旧库（带历史单列索引）迁移后换成 (session_id, created_at) 复合索引，
+    /// 业务数据不动。
+    #[test]
+    fn v11_replaces_message_index_with_composite() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, created_at TEXT);
+             CREATE INDEX idx_messages_session ON messages(session_id);
+             INSERT INTO messages (id, session_id, role, content, created_at)
+             VALUES ('keep', 's1', 'user', '别丢', 't');
+             INSERT INTO meta (key, value) VALUES ('schema_version', '10');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(
+            !index_exists(&conn, "idx_messages_session").unwrap(),
+            "单列索引应被复合索引取代"
+        );
+        let content: String = conn
+            .query_row(
+                "SELECT content FROM messages WHERE id = 'keep'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "别丢");
+    }
+
+    /// 索引是否已存在（sqlite_master）。
+    fn index_exists(conn: &Connection, name: &str) -> Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
     }
 }

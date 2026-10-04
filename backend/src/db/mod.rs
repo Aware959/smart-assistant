@@ -72,9 +72,22 @@ impl Database {
     }
 
     /// 当前向量库巡检状态（配置签名来自运行时 Config）。
+    ///
+    /// 会连带 `COUNT(*)` 扫 `memories` 与 `memory_vectors` 两张表——给 `sa-mem`
+    /// 这类一次性巡检用。热路径（每轮记忆召回）请改用 [`Self::vec_search_usable`]。
     pub fn vec_status(&self) -> Result<VecStatus> {
         let cfg = crate::config::Config::get();
         inspect_vec(&self.conn, cfg.embedding_dim, &cfg.embedding_model)
+    }
+
+    /// 向量检索当前是否可用：**只看维度是否与配置一致**。
+    ///
+    /// 与 [`VecStatus::search_usable`] 同义，但不构造完整状态、也不做两轮 `COUNT(*)`。
+    /// 维度只随 `rebuild_vectors`（DROP + 重建）变化，vec0 的建表语句在
+    /// `sqlite_master` 里，改表才会变——因此这里每次都真读也不会有实质开销。
+    pub fn vec_search_usable(&self) -> Result<bool> {
+        let cfg = crate::config::Config::get();
+        Ok(vec::existing_vec_dim(&self.conn)? == Some(cfg.embedding_dim))
     }
 
     /// 重建向量库并写入新签名；**只影响 memory_vectors**。
@@ -103,3 +116,7 @@ pub fn lock_db(db: &std::sync::Mutex<Database>) -> std::sync::MutexGuard<'_, Dat
     }
     guard
 }
+
+#[cfg(test)]
+#[path = "mod_tests.rs"]
+mod mod_tests;

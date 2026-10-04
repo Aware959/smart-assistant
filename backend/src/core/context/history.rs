@@ -13,7 +13,7 @@ use crate::error::Result;
 const DAY_START_HOUR: u32 = 6;
 /// 用户当地时区与 UTC 的偏移（分钟）：日界兜底用东八区。
 /// 此前由世界状态运行时按画像动态推断，aiworld 已拆、等待重新设计，暂用固定常量。
-const USER_OFFSET_MINUTES: i64 = 8 * 60;
+pub(crate) const USER_OFFSET_MINUTES: i64 = 8 * 60;
 /// 今日消息少于该条数时，把昨天也并入上下文（人记得昨晚的事）。
 const DAY_POOL_THRESHOLD: usize = 6;
 /// 按天上下文的最大消息条数；超出时保留开头与结尾、中间整段省略。
@@ -67,10 +67,7 @@ pub(crate) fn fetch_recent(
     Ok(conversation
         .recent_messages(session_id, limit)?
         .into_iter()
-        .map(|m| ChatMessage {
-            role: m.role,
-            content: m.content,
-        })
+        .map(|m| ChatMessage::new(m.role.clone(), m.content))
         .collect())
 }
 
@@ -87,10 +84,7 @@ pub(crate) fn build_day_history(turns: &[MessageTurn]) -> Result<Vec<ChatMessage
         if compact && idx >= DAY_KEEP_HEAD && idx < tail_start {
             continue;
         }
-        out.push(ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        });
+        out.push(ChatMessage::new(m.role.clone(), m.content.clone()));
     }
     Ok(out)
 }

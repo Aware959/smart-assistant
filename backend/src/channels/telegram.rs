@@ -62,6 +62,24 @@ struct SendMessage<'a> {
     text: &'a str,
 }
 
+/// `sendMessage` 响应体。Bot API 会用 200 携带业务错误（`ok:false`），
+/// 限流时在 `parameters.retry_after` 里给出应当等待的秒数。
+#[derive(Debug, Default, Deserialize)]
+struct SendResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    parameters: Option<SendParameters>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendParameters {
+    #[serde(default)]
+    retry_after: Option<u64>,
+}
+
 fn api_base(token: &str) -> String {
     format!("https://api.telegram.org/bot{token}")
 }
@@ -83,6 +101,7 @@ fn build_client() -> Result<reqwest::Client, String> {
 }
 
 use super::chunk_text;
+use super::{status_retryable, with_send_retry, SendErr, SEND_RETRY};
 
 async fn api_get<T: for<'de> Deserialize<'de>>(
     client: &reqwest::Client,
@@ -104,6 +123,11 @@ async fn api_get<T: for<'de> Deserialize<'de>>(
         .map_err(|e| format!("解析响应失败: {e}"))
 }
 
+/// 发一条文本，超长自动分片。
+///
+/// 每片独立重试：已送达的前片不会因后片最终失败而被重发（否则用户会收到重复内容）。
+/// 只对"重投可能成功"的失败退避重试——传输层错误、429 限流、5xx、响应被截断；
+/// 4xx 与 `ok:false` 属确定性拒绝，立即放弃，把失败交回调用方。
 async fn send_text(
     client: &reqwest::Client,
     base: &str,
@@ -111,19 +135,56 @@ async fn send_text(
     text: &str,
 ) -> Result<(), String> {
     for chunk in chunk_text(text, MAX_MESSAGE_LEN) {
-        let resp = client
-            .post(format!("{base}/sendMessage"))
-            .timeout(Duration::from_secs(30))
-            .json(&SendMessage {
-                chat_id,
-                text: &chunk,
-            })
-            .send()
-            .await
-            .map_err(|e| format!("发送消息失败: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("发送消息被拒绝: {}", resp.status()));
-        }
+        let chunk = &chunk;
+        with_send_retry("telegram/sendMessage", SEND_RETRY, |_| async move {
+            let resp = client
+                .post(format!("{base}/sendMessage"))
+                .timeout(Duration::from_secs(30))
+                .json(&SendMessage {
+                    chat_id,
+                    text: chunk,
+                })
+                .send()
+                .await
+                .map_err(|e| SendErr::Retryable {
+                    reason: format!("发送消息失败: {e}"),
+                    retry_after: None,
+                })?;
+
+            let status = resp.status();
+            let body = match resp.json::<SendResponse>().await {
+                Ok(b) => b,
+                // 2xx 却读不出 JSON：响应多半在传输途中被掐断，重投有望送达。
+                Err(e) if status.is_success() => {
+                    return Err(SendErr::Retryable {
+                        reason: format!("解析响应失败: {e}"),
+                        retry_after: None,
+                    });
+                }
+                // 错误状态读不到 body 也不妨碍按状态码判定。
+                Err(_) => SendResponse::default(),
+            };
+
+            if !status.is_success() || !body.ok {
+                let reason = body
+                    .description
+                    .filter(|d| !d.trim().is_empty())
+                    .unwrap_or_else(|| status.to_string());
+                if status_retryable(status.as_u16()) {
+                    return Err(SendErr::Retryable {
+                        reason: format!("服务端 {status}: {reason}"),
+                        // 限流按服务端给的秒数等，别把余下几次重投全耗在 429 上。
+                        retry_after: body
+                            .parameters
+                            .and_then(|p| p.retry_after)
+                            .map(Duration::from_secs),
+                    });
+                }
+                return Err(SendErr::Fatal(format!("发送被拒绝({status}): {reason}")));
+            }
+            Ok(())
+        })
+        .await?;
     }
     Ok(())
 }
@@ -166,11 +227,15 @@ fn touch_user_reply(
     }
 }
 
+/// 模型整轮没说任何话、或本轮失败/超时时的兜底话术。
+const FALLBACK_REPLY: &str = "刚才走神了，再发一次试试。";
+
 /// 命令类回执：没有后续记忆沉淀需求（`user_message_id` 为空即代表"无需沉淀"）。
 fn plain_reply(reply: &str) -> ChatOutput {
     ChatOutput {
         session_id: String::new(),
         reply: reply.to_string(),
+        messages: vec![reply.to_string()],
         user_message_id: String::new(),
         memory: None,
     }
@@ -217,9 +282,13 @@ async fn handle_text(
             })
             .await
             .map_err(|e| format!("对话任务失败: {e}"))??;
-            if out.reply.trim().is_empty() {
-                out.reply = "(空回复)".to_string();
+            // 模型可能整轮只调只读工具、没说任何话；`reply` 已被拼成空串。
+            // 逐条发送用 `messages`，两者必须同步兜底，否则会出现"发了 (空回复)"
+            // 而 `reply` 还是空的不一致状态。
+            if out.messages.iter().all(|m| m.trim().is_empty()) {
+                out.messages = vec![FALLBACK_REPLY.to_string()];
             }
+            out.reply = out.messages.join("\n");
             Ok(Some(out))
         }
     }
@@ -378,7 +447,9 @@ async fn run_loop(
             send_typing(&client, &base, chat_id).await;
             let handle_started = std::time::Instant::now();
 
-            let (next_reply, is_fallback, pending_memory) = match tokio::time::timeout(
+            // 本轮产出的是**一组独立消息**（模型自己决定说几句），逐条发送。
+            // 整段 join 成一首发出去等于退回单条长回复，整个改造就白做了。
+            let (next_messages, is_fallback, pending_memory) = match tokio::time::timeout(
                 Duration::from_secs(super::AI_DEADLINE_SECS),
                 handle_text(chat.clone(), session.clone(), chat_id, &text, user_time),
             )
@@ -388,17 +459,18 @@ async fn run_loop(
                     tracing::info!(
                         chat_id,
                         elapsed_ms = handle_started.elapsed().as_millis() as u64,
+                        messages = out.messages.len(),
                         "handle_text 返回（回复生产阶段完成）"
                     );
                     // 有 user_message_id 才需要沉淀（命令类回执没有）。
                     let pending = (!out.user_message_id.is_empty())
                         .then(|| (out.session_id.clone(), out.user_message_id.clone()));
-                    (out.reply, false, pending)
+                    (out.messages, false, pending)
                 }
                 Ok(Ok(None)) => continue,
                 Ok(Err(e)) => {
                     tracing::error!(error = %e, "对话失败");
-                    ("刚才走神了，再发一次试试。".to_string(), true, None)
+                    (vec![FALLBACK_REPLY.to_string()], true, None)
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -406,14 +478,34 @@ async fn run_loop(
                         deadline_secs = super::AI_DEADLINE_SECS,
                         "单轮对话超时，放弃本轮，继续轮询"
                     );
-                    ("刚才走神了，再发一次试试。".to_string(), true, None)
+                    (vec![FALLBACK_REPLY.to_string()], true, None)
                 }
             };
 
-            if let Err(e) = send_text(&client, &base, chat_id, &next_reply).await {
-                tracing::error!(error = %e, chat_id, "回复发送失败");
-            } else {
-                tracing::info!(chat_id, is_fallback, "回复已发送，进入后置处理");
+            // 逐条投递：条与条之间留真人打字节奏，并在每次发送前刷新打字态
+            //（工具轮不产消息时模型在想，首条之前可能已经等了很久）。
+            let mut sent_any = false;
+            for (i, one) in next_messages.iter().enumerate() {
+                if i > 0 {
+                    tokio::time::sleep(super::pacing_delay(i)).await;
+                }
+                send_typing(&client, &base, chat_id).await;
+                match send_text(&client, &base, chat_id, one).await {
+                    Ok(()) => sent_any = true,
+                    Err(e) => {
+                        tracing::error!(error = %e, chat_id, index = i, "回复发送失败");
+                        break;
+                    }
+                }
+            }
+
+            if sent_any {
+                tracing::info!(
+                    chat_id,
+                    is_fallback,
+                    sent = next_messages.len(),
+                    "回复已发送，进入后置处理"
+                );
                 // 回复已送达，再后台补记忆沉淀：判定/事实化要调 LLM，不能占用户等待时间。
                 if let Some((session_id, user_message_id)) = pending_memory {
                     let chat = chat.clone();
@@ -423,28 +515,6 @@ async fn run_loop(
                         let _ = chat.settle_memory(&session_id, &user_message_id, &text);
                         tracing::debug!(session_id = %session_id, "记忆沉淀(settle_memory)结束");
                     });
-                }
-                if !is_fallback {
-                    // 正常回复发送成功：按语境决定是否像真人一样接着补几句。
-                    // 延续判断同样要调 LLM，套同一个看门狗，避免拖死轮询。
-                    let cont_started = std::time::Instant::now();
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(super::AI_DEADLINE_SECS),
-                        crate::core::intent::continuation::after_reply(
-                            chat.clone(),
-                            session.clone(),
-                            tracker.clone(),
-                            &super::ChannelsPusher,
-                            CHANNEL,
-                            &chat_id.to_string(),
-                        ),
-                    )
-                    .await;
-                    tracing::info!(
-                        chat_id,
-                        elapsed_ms = cont_started.elapsed().as_millis() as u64,
-                        "延续判断(after_reply)结束"
-                    );
                 }
             }
         }

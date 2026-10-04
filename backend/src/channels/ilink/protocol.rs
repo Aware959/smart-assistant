@@ -9,6 +9,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 
 use super::super::chunk_text;
+use super::super::{status_retryable, with_send_retry, SendErr, SEND_RETRY};
 use super::base_info;
 use super::session::SavedSession;
 use super::{MAX_MESSAGE_LEN, QR_POLL_INTERVAL_SECS};
@@ -162,6 +163,22 @@ pub(crate) async fn api_post<T: for<'de> Deserialize<'de>>(
     body: &serde_json::Value,
     timeout_secs: u64,
 ) -> Result<T, String> {
+    api_post_classified(client, url, token, body, timeout_secs)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// [`api_post`] 的分类版：失败时带上"是否值得重投"，供出站发送决定退避重试。
+///
+/// 入站轮询有自己的 5s 重试，不需要这个标记；出站发送必须区分 4xx（别白等）
+/// 与传输层/5xx（值得再试）。
+async fn api_post_classified<T: for<'de> Deserialize<'de>>(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    body: &serde_json::Value,
+    timeout_secs: u64,
+) -> Result<T, SendErr> {
     let resp = client
         .post(url)
         .headers(business_headers(token)?)
@@ -169,13 +186,25 @@ pub(crate) async fn api_post<T: for<'de> Deserialize<'de>>(
         .json(body)
         .send()
         .await
-        .map_err(|e| format!("请求失败: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("服务端拒绝: {}", resp.status()));
+        .map_err(|e| SendErr::Retryable {
+            reason: format!("请求失败: {e}"),
+            retry_after: None,
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(if status_retryable(status.as_u16()) {
+            SendErr::Retryable {
+                reason: format!("服务端 {status}"),
+                retry_after: None,
+            }
+        } else {
+            SendErr::Fatal(format!("服务端拒绝: {status}"))
+        });
     }
-    resp.json::<T>()
-        .await
-        .map_err(|e| format!("解析响应失败: {e}"))
+    resp.json::<T>().await.map_err(|e| SendErr::Retryable {
+        reason: format!("解析响应失败: {e}"),
+        retry_after: None,
+    })
 }
 
 // ---------- 扫码登录 ----------
@@ -330,6 +359,10 @@ pub(crate) async fn send_typing(
     .await;
 }
 
+/// 发一条文本，超长自动分片。每片独立重试，已送达的前片不会被重发。
+///
+/// 同一片的重投复用同一个 `client_id`（报文在重试之外构造），服务端若按它去重
+/// 就不会把弱网抖动变成用户的重复消息。
 pub(crate) async fn send_text(
     client: &reqwest::Client,
     base: &str,
@@ -338,25 +371,23 @@ pub(crate) async fn send_text(
     context_token: &str,
     text: &str,
 ) -> Result<(), String> {
+    let url = format!("{base}/ilink/bot/sendmessage");
     for chunk in chunk_text(text, MAX_MESSAGE_LEN) {
-        let _: serde_json::Value = api_post(
-            client,
-            &format!("{base}/ilink/bot/sendmessage"),
-            &sess.bot_token,
-            &serde_json::json!({
-                "msg": {
-                    "from_user_id": "",
-                    "to_user_id": to_user_id,
-                    "client_id": format!("smart-assistant-{}", uuid::Uuid::new_v4()),
-                    "message_type": 2,
-                    "message_state": 2,
-                    "context_token": context_token,
-                    "item_list": [{ "type": 1, "text_item": { "text": chunk } }],
-                },
-                "base_info": base_info(),
-            }),
-            20,
-        )
+        let body = serde_json::json!({
+            "msg": {
+                "from_user_id": "",
+                "to_user_id": to_user_id,
+                "client_id": format!("smart-assistant-{}", uuid::Uuid::new_v4()),
+                "message_type": 2,
+                "message_state": 2,
+                "context_token": context_token,
+                "item_list": [{ "type": 1, "text_item": { "text": chunk } }],
+            },
+            "base_info": base_info(),
+        });
+        with_send_retry("ilink/sendmessage", SEND_RETRY, |_| {
+            api_post_classified::<serde_json::Value>(client, &url, &sess.bot_token, &body, 20)
+        })
         .await?;
     }
     Ok(())

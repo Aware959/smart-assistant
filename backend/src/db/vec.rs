@@ -77,7 +77,7 @@ pub fn ensure_vec_extension(conn: &Connection) -> Result<()> {
 }
 
 /// 从 sqlite_master 中提取已有 vec0 表创建语句里的维度（兼容无 meta 记录的旧库）。
-fn existing_vec_dim(conn: &Connection) -> Result<Option<usize>> {
+pub(crate) fn existing_vec_dim(conn: &Connection) -> Result<Option<usize>> {
     let sql: Option<String> = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_vectors'",

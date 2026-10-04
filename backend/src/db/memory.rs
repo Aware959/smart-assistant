@@ -175,8 +175,12 @@ pub fn search_similar(
     // 只召回未过期的记忆（core 永不失效）；纯按相关度排序。
     // 注意：vec0 的 kNN 查询必须用 `k = ?` 约束，LIMIT 属于外层查询，
     // 否则 vec0 会报 "A LIMIT or 'k = ?' constraint is required"。
+    //
+    // 一次 JOIN 把整行 memories 带出来：早先这里是"查出 id 再逐条 get()"，每轮召回
+    // 多打 limit 次主键查询（recall 取 5 条 = 5 次），这层往返是纯浪费。
     let mut stmt = db.conn().prepare(
-        "SELECT v.memory_id, v.distance
+        "SELECT m.id, m.content, m.memory_type, m.tier, m.expires_at, m.message_id,
+                m.created_at, m.updated_at, v.distance
          FROM memory_vectors v
          JOIN memories m ON m.id = v.memory_id
          WHERE v.embedding MATCH ?1
@@ -187,17 +191,25 @@ pub fn search_similar(
 
     let rows = stmt.query_map(
         rusqlite::params![bytes.as_slice(), Utc::now().to_rfc3339(), limit as i64],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?)),
+        |row| {
+            Ok((
+                Memory {
+                    id: row.get(0)?,
+                    content: row.get(1)?,
+                    memory_type: row.get(2)?,
+                    tier: row.get(3)?,
+                    expires_at: row.get(4)?,
+                    message_id: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                },
+                row.get::<_, f32>(8)?,
+            ))
+        },
     )?;
 
-    let mut result = Vec::new();
-    for row in rows {
-        let (id, distance) = row?;
-        if let Ok(memory) = get(db, &id) {
-            result.push((memory, distance));
-        }
-    }
-    Ok(result)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn to_byte_array(data: &[f32]) -> Vec<u8> {
@@ -219,3 +231,7 @@ pub fn from_byte_array(bytes: &[u8]) -> Result<Vec<f32>> {
     }
     Ok(data)
 }
+
+#[cfg(test)]
+#[path = "memory_tests.rs"]
+mod memory_tests;

@@ -16,18 +16,6 @@ pub(crate) fn fetch(memory: &Store, query: &str, limit: usize) -> Result<Vec<Mem
     memory.search(query, limit)
 }
 
-/// 渲染成对话 system prompt 里的"你记得这些事"块。
-pub(crate) fn build_recall_context(memory_hits: &[MemoryHit]) -> String {
-    let mut ctx = String::new();
-    if !memory_hits.is_empty() {
-        ctx.push_str("你记得这些事：\n");
-        for hit in memory_hits.iter().take(RECALL_LIMIT) {
-            ctx.push_str(&format!("- {}\n", hit.content));
-        }
-    }
-    ctx
-}
-
 /// 渲染成纯内容多行文本（主动决策阅读用，不带列表前缀）。
 pub(crate) fn plain_lines(memory_hits: &[MemoryHit]) -> String {
     memory_hits

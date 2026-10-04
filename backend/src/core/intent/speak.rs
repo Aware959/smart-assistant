@@ -45,16 +45,7 @@ pub fn decide(llm: &Llm, profile: &str, recent: &str, recall: &str) -> Decision 
          person:\n{recall}\n\nNow decide whether to send them a proactive message. Output JSON only."
     );
 
-    let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: system,
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: user,
-        },
-    ];
+    let messages = vec![ChatMessage::system(system), ChatMessage::user(user)];
 
     match llm.complete(&messages) {
         Ok(text) => parse(&text),

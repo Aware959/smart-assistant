@@ -7,3 +7,4 @@
 pub mod chat;
 pub mod embedding;
 pub mod genai_client;
+pub mod tool;

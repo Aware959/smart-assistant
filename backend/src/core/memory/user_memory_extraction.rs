@@ -98,14 +98,8 @@ pub fn extract_from_text(user_input: &str) -> Result<MemoryExtraction> {
 /// 第一步：只判定标签，不生成任何自然语言。
 fn judge(user_input: &str) -> Result<Judgement> {
     let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: MEMORY_JUDGE_PROMPT.to_string(),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: user_input.to_string(),
-        },
+        ChatMessage::system(MEMORY_JUDGE_PROMPT.to_string()),
+        ChatMessage::user(user_input.to_string()),
     ];
 
     let raw = chat::complete_structured(
@@ -121,14 +115,8 @@ fn judge(user_input: &str) -> Result<Judgement> {
 /// 第二步：把原话归一成一条第三人称事实句（纯文本输出）。
 fn summarize(user_input: &str) -> Option<String> {
     let messages = vec![
-        ChatMessage {
-            role: "system".to_string(),
-            content: MEMORY_SUMMARY_PROMPT.to_string(),
-        },
-        ChatMessage {
-            role: "user".to_string(),
-            content: user_input.to_string(),
-        },
+        ChatMessage::system(MEMORY_SUMMARY_PROMPT.to_string()),
+        ChatMessage::user(user_input.to_string()),
     ];
 
     let raw = chat::complete_with_model(&messages, &extract_model_or_default()).ok()?;

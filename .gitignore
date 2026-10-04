@@ -1,6 +1,7 @@
 # Rust (backend/)
 /target
 /backend/target
+/backend/target-alt
 *.db
 *.db-wal
 *.db-shm

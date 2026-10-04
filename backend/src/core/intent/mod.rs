@@ -2,13 +2,16 @@
 //!
 //! 频率控制（DB 状态追踪 + 随机间隔 + 安静时段 + 每日上限）：见 [`crate::db::intent`]；
 //! 节奏计算：见 [`pace`]；开口决策（LLM）：见 [`speak`]；通道派发：见 [`sender`]。
-//! 是否续话（回复后再补一句）：见 [`continuation`]。内存状态追踪：见 [`tracker::IntentTracker`]。
+//! 内存状态追踪：见 [`tracker::IntentTracker`]。
+//!
+//! **不再有 continuation 模块**：对话里的"多回几句"改由模型自己在一次响应里并行
+//! 调用多个 `send_message` 决定（见 [`crate::llm::tool`] 与 [`crate::core::agent`]），
+//! 不再由后置状态机在回复送达后追加。主动开口能力不受影响，仍在 [`speak`]。
 //!
 //! 与通道的关系：Telegram 长连通后可随时推送；iLink 依赖用户最近入站刷新的
 //! `context_token`（窗口约束见 [`crate::channels`]），窗口内不可推的用户在决策前
 //! 就被剔除。每轮周期最多开口联系一个用户，其余留到下一轮，避免连环轰炸。
 
-pub mod continuation;
 pub mod filter;
 pub mod pace;
 pub mod sender;

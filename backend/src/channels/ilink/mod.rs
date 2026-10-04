@@ -71,11 +71,15 @@ fn touch_user_reply(
     }
 }
 
+/// 模型整轮没说任何话、或本轮失败/超时时的兜底话术。
+const FALLBACK_REPLY: &str = "刚才走神了，再发一次试试。";
+
 /// 命令类回执：没有后续记忆沉淀需求（`user_message_id` 为空即代表"无需沉淀"）。
 fn plain_reply(reply: &str) -> ChatOutput {
     ChatOutput {
         session_id: String::new(),
         reply: reply.to_string(),
+        messages: vec![reply.to_string()],
         user_message_id: String::new(),
         memory: None,
     }
@@ -115,9 +119,10 @@ async fn handle_text(
             })
             .await
             .map_err(|e| format!("对话任务失败: {e}"))??;
-            if out.reply.trim().is_empty() {
-                out.reply = "(空回复)".to_string();
+            if out.messages.iter().all(|m| m.trim().is_empty()) {
+                out.messages = vec![FALLBACK_REPLY.to_string()];
             }
+            out.reply = out.messages.join("\n");
             Ok(out)
         }
     }
@@ -242,7 +247,7 @@ async fn run_loop(
 
             // 后置沉淀要用原文做兜底，而 handle_text 会接管 text，先留一份。
             let settle_text = text.clone();
-            let (reply, is_fallback, pending_memory) = match tokio::time::timeout(
+            let (messages, is_fallback, pending_memory) = match tokio::time::timeout(
                 Duration::from_secs(super::AI_DEADLINE_SECS),
                 handle_text(
                     chat.clone(),
@@ -263,11 +268,12 @@ async fn run_loop(
                             settle_text,
                         )
                     });
-                    (out.reply, false, pending)
+                    // 逐条发送：整段 join 成一首发出去等于退回单条长回复。
+                    (out.messages, false, pending)
                 }
                 Ok(Err(e)) => {
                     tracing::error!(error = %e, "对话失败");
-                    ("刚才走神了，再发一次试试。".to_string(), true, None)
+                    (vec![FALLBACK_REPLY.to_string()], true, None)
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -275,44 +281,47 @@ async fn run_loop(
                         deadline_secs = super::AI_DEADLINE_SECS,
                         "单轮对话超时，放弃本轮，继续轮询"
                     );
-                    ("刚才走神了，再发一次试试。".to_string(), true, None)
+                    (vec![FALLBACK_REPLY.to_string()], true, None)
                 }
             };
 
-            if let Err(e) = protocol::send_text(
-                client,
-                &base,
-                sess,
-                &msg.from_user_id,
-                &msg.context_token,
-                &reply,
-            )
-            .await
-            {
-                tracing::error!(error = %e, "回复发送失败");
-            } else {
+            // 逐条投递，条与条之间留真人打字节奏。
+            let mut sent_any = false;
+            for (i, one) in messages.iter().enumerate() {
+                if i > 0 {
+                    tokio::time::sleep(super::pacing_delay(i)).await;
+                }
+                match protocol::send_text(
+                    client,
+                    &base,
+                    sess,
+                    &msg.from_user_id,
+                    &msg.context_token,
+                    one,
+                )
+                .await
+                {
+                    Ok(()) => sent_any = true,
+                    Err(e) => {
+                        tracing::error!(error = %e, index = i, "回复发送失败");
+                        break;
+                    }
+                }
+            }
+
+            if sent_any {
+                tracing::info!(
+                    from = %msg.from_user_id,
+                    is_fallback,
+                    sent = messages.len(),
+                    "回复已发送，进入后置处理"
+                );
                 // 回复已送达，再后台补记忆沉淀：判定/事实化要调 LLM，不能占用户等待时间。
                 if let Some((session_id, user_message_id, text)) = pending_memory {
                     let chat = chat.clone();
                     tokio::task::spawn_blocking(move || {
                         let _ = chat.settle_memory(&session_id, &user_message_id, &text);
                     });
-                }
-                if !is_fallback {
-                    // 正常回复发送成功：按语境决定是否像机器人一样接着补几句。
-                    // 延续判断同样要调 LLM，套同一个看门狗，避免拖死轮询。
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(super::AI_DEADLINE_SECS),
-                        crate::core::intent::continuation::after_reply(
-                            chat.clone(),
-                            session.clone(),
-                            tracker.clone(),
-                            &super::ChannelsPusher,
-                            CHANNEL,
-                            &msg.from_user_id,
-                        ),
-                    )
-                    .await;
                 }
             }
         }
