@@ -1,8 +1,12 @@
 use super::*;
 
+/// 记录写入调用的桩：把 remember 的入参抄下来，才能断言派发确实传对了。
 struct Stub {
     now: String,
     recall: String,
+    writes: std::cell::RefCell<Vec<(String, MemoryKind, Option<String>)>>,
+    /// remember 的返回值（`Err` 文案即模拟写入失败）。
+    write_result: std::result::Result<WriteKind, String>,
 }
 
 impl ToolContext for Stub {
@@ -12,12 +16,25 @@ impl ToolContext for Stub {
     fn recall(&self, _query: &str) -> String {
         self.recall.clone()
     }
+    fn remember(
+        &self,
+        content: &str,
+        kind: MemoryKind,
+        supersedes: Option<&str>,
+    ) -> std::result::Result<WriteKind, String> {
+        self.writes
+            .borrow_mut()
+            .push((content.to_string(), kind, supersedes.map(str::to_string)));
+        self.write_result.clone()
+    }
 }
 
 fn stub() -> Stub {
     Stub {
         now: "2026-10-04 20:15".to_string(),
         recall: "· 喜欢手冲".to_string(),
+        writes: std::cell::RefCell::new(Vec::new()),
+        write_result: Ok(WriteKind::Created),
     }
 }
 
@@ -94,18 +111,207 @@ fn 未知工具被拒绝而不是panic() {
 }
 
 #[test]
-fn 三个工具的schema都能序列化() {
+fn remember_写入并回填确认() {
+    let ctx = stub();
+    let out = dispatch(
+        &call(
+            REMEMBER,
+            serde_json::json!({ "kind": "trait", "content": "  用户现在住在上海  " }),
+        ),
+        &ctx,
+    );
+
+    assert_eq!(out, ToolOutcome::Filled(REMEMBER_ACK_NEW.to_string()));
+    let writes = ctx.writes.borrow();
+    assert_eq!(writes.len(), 1);
+    // 首尾空白必须裁掉：落库的是记忆内容，多余空白会污染相似度比较。
+    assert_eq!(writes[0].0, "用户现在住在上海");
+    assert_eq!(writes[0].1, MemoryKind::Trait);
+    assert_eq!(writes[0].2, None, "未传 supersedes 时不应凭空造一个");
+}
+
+/// kind 是必填的：它决定寿命，缺了就只能靠"默认永久"兜底，那正是过去
+/// 「下周要考试」被存成永久事实的原因。宁可拒绝，也不能缺省写入。
+#[test]
+fn remember_缺kind被拒绝() {
+    for args in [
+        serde_json::json!({ "content": "用户喜欢手冲" }),
+        serde_json::json!({ "kind": "  ", "content": "用户喜欢手冲" }),
+        serde_json::json!({ "kind": "core", "content": "用户喜欢手冲" }),
+        serde_json::json!({ "kind": "记忆", "content": "用户喜欢手冲" }),
+    ] {
+        let ctx = stub();
+        let out = dispatch(&call(REMEMBER, args), &ctx);
+        assert!(
+            matches!(out, ToolOutcome::Rejected(m) if m.contains("kind")),
+            "缺 kind / 非法 kind 应被明确拒绝"
+        );
+        assert!(ctx.writes.borrow().is_empty(), "被拒绝时不应写入");
+    }
+}
+
+/// 枚举的四种值都要能被解析到——schema 里列出来的，dispatch 就必须认。
+#[test]
+fn remember_四个kind都能解析() {
+    for (raw, expect) in [
+        ("trait", MemoryKind::Trait),
+        ("preference", MemoryKind::Preference),
+        ("routine", MemoryKind::Routine),
+        ("plan", MemoryKind::Plan),
+        // 模型偶尔会跟着上文的中文名走，大小写也要兜住。
+        ("Routine", MemoryKind::Routine),
+    ] {
+        let ctx = stub();
+        let out = dispatch(
+            &call(
+                REMEMBER,
+                serde_json::json!({ "kind": raw, "content": "用户午休时间是 12 点到 2 点" }),
+            ),
+            &ctx,
+        );
+        assert_eq!(out, ToolOutcome::Filled(REMEMBER_ACK_NEW.to_string()));
+        assert_eq!(ctx.writes.borrow()[0].1, expect);
+    }
+}
+
+#[test]
+fn remember_取代旧记忆时透传id() {
+    let ctx = Stub {
+        write_result: Ok(WriteKind::Revised),
+        ..stub()
+    };
+    let out = dispatch(
+        &call(
+            REMEMBER,
+            serde_json::json!({
+                "kind": "trait",
+                "content": "用户现在住在上海",
+                "supersedes": " m-42 ",
+            }),
+        ),
+        &ctx,
+    );
+
+    assert_eq!(out, ToolOutcome::Filled(REMEMBER_ACK_REVISED.to_string()));
+    assert_eq!(ctx.writes.borrow()[0].2.as_deref(), Some("m-42"));
+}
+
+/// 空串 supersedes 应当按"没传"处理：模型偶尔会填个空串，
+/// 直接当 id 传下去会让写入报"记忆不存在"，白白浪费一轮。
+#[test]
+fn remember_空白supersedes按未传处理() {
+    let ctx = stub();
+    dispatch(
+        &call(
+            REMEMBER,
+            serde_json::json!({ "kind": "preference", "content": "用户喜欢手冲", "supersedes": "   " }),
+        ),
+        &ctx,
+    );
+    assert_eq!(ctx.writes.borrow()[0].2, None);
+}
+
+#[test]
+fn remember_缺内容被拒绝() {
+    for args in [
+        serde_json::json!({ "kind": "trait" }),
+        serde_json::json!({ "kind": "trait", "content": "  " }),
+    ] {
+        let ctx = stub();
+        let out = dispatch(&call(REMEMBER, args), &ctx);
+        assert!(matches!(out, ToolOutcome::Rejected(_)));
+        assert!(ctx.writes.borrow().is_empty(), "被拒绝时不应写入");
+    }
+}
+
+#[test]
+fn remember_超长被拒绝而不是截断() {
+    let ctx = stub();
+    let long = "字".repeat(REMEMBER_MAX_CHARS + 1);
+    let out = dispatch(
+        &call(
+            REMEMBER,
+            serde_json::json!({ "kind": "trait", "content": long }),
+        ),
+        &ctx,
+    );
+    assert!(matches!(out, ToolOutcome::Rejected(m) if m.contains("超过单条")));
+    assert!(ctx.writes.borrow().is_empty(), "超长不应写入");
+}
+
+/// 写入失败要如实回填，不能伪装成成功——模型据此才能改参数或干脆不记。
+#[test]
+fn remember_写入失败被拒绝() {
+    let ctx = Stub {
+        write_result: Err("要取代的记忆不存在：m-99".to_string()),
+        ..stub()
+    };
+    let out = dispatch(
+        &call(
+            REMEMBER,
+            serde_json::json!({
+                "kind": "trait",
+                "content": "用户现在住在上海",
+                "supersedes": "m-99",
+            }),
+        ),
+        &ctx,
+    );
+    assert!(matches!(out, ToolOutcome::Rejected(m) if m.contains("m-99")));
+}
+
+#[test]
+fn 四个工具的schema都能序列化() {
     for def in definitions() {
         // serde_json::Value 恒可序列化，这里真正要守的是工具名不重复——
         // 重名会让模型侧的注册表互相覆盖。
-        let name = def.function.name.clone();
+        let name = def.name.as_str();
         assert!(!name.is_empty());
         assert_eq!(
-            definitions().iter().filter(|d| d.function.name == name).count(),
+            definitions()
+                .iter()
+                .filter(|d| d.name.as_str() == name)
+                .count(),
             1,
             "工具名重复：{name}"
         );
-        assert!(def.function.description.is_some());
+        assert!(def.description.is_some());
+        assert!(def.schema.is_some(), "{name} 缺少参数 schema");
     }
-    assert_eq!(definitions().len(), 3);
+    assert_eq!(definitions().len(), 4);
+}
+
+/// 记忆写入的判据必须跟着工具定义一起下发，不能只躺在别处：
+/// 少了描述，模型就只能凭感觉决定记什么，记忆库会重新长回什么都收的样子。
+#[test]
+fn remember_描述里带准入三道闸() {
+    let def = definitions()
+        .into_iter()
+        .find(|d| d.name.as_str() == REMEMBER)
+        .expect("remember 应在工具目录里");
+    let desc = def.description.clone().unwrap_or_default();
+    for gate in ["关于用户本人", "自足", "泛泛而谈"] {
+        assert!(desc.contains(gate), "工具描述缺少准入判据 {gate}：{desc}");
+    }
+    // 四种类的含义和各自的寿命也必须在下发的描述里，不能只存在于 Rust 常量。
+    for kind in MemoryKind::ALL {
+        assert!(
+            desc.contains(kind.as_str()),
+            "工具描述缺少种类 {}：{desc}",
+            kind.as_str()
+        );
+    }
+    let schema = serde_json::to_string(def.schema.as_ref().expect("remember 应有 schema")).unwrap();
+    assert!(schema.contains("supersedes"), "schema 应声明 supersedes");
+    assert!(
+        schema.contains(r#""kind""#) && schema.contains(r#""required":["kind","content"]"#),
+        "schema 应把 kind 列为必填：{schema}"
+    );
+    for kind in MemoryKind::ALL {
+        assert!(
+            schema.contains(kind.as_str()),
+            "schema 的 kind 枚举应列出 {}：{schema}",
+            kind.as_str()
+        );
+    }
 }

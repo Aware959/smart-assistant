@@ -1,16 +1,15 @@
 //! 相对时间锚点的确定性到期推导。
 //!
 //! 用户消息里的"今天 / 明天 / 本周末 / 下周 / N 天后…"都是**相对当下时刻**的，
-//! 过了指称时刻就成旧闻。而 LLM 判定常把它们记成 `core`（永不过期），或套错
-//! TTL（`short` 7 天 / `intent` 90 天，都远长于"明天就过期"）。
+//! 过了指称时刻就成旧闻。而这些多半不是"关于对方是谁"的事实——它们只在窗口期内
+//! 有意义，写成核心事实就等于让一条过期新闻一直参与召回。
 //!
-//! 本模块在落库前做一道确定性守护：命中强时间锚词，就强制降级层级并给出精确
-//! 的 `expires_at`（覆盖层级 TTL），过期即不再被召回——既保留窗口期内的可用性，
-//! 又不让它沉淀成核心事实。
+//! 本模块在落库前做一道确定性守护：命中强时间锚词，就按锚点给出精确的 `expires_at`，
+//! 过期即不再被召回——既保留窗口期内的可用性，又不让它沉淀成长期事实。
 //!
 //! 只处理**强锚**（今天/明天/后天/本周末/下周/N天(后)等），**宁可漏不可错**：
-//! "每天 / 经常 / 每周一到周五"这类反复性表达不命中（它们是长期事实）；
-//! "改天 / 有空 / 以后再说"这类没有明确日期的未定之约也不命中（归原层级 TTL）。
+//! "每天 / 经常 / 每周一到周五"这类反复性表达不命中（它们靠种类的默认窗口兜底）；
+//! "改天 / 有空 / 以后再说"这类没有明确日期的未定之约也不命中。
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -35,56 +34,55 @@ const NEXT_MONTH: &[&str] = &["下个月", "下月"];
 
 /// 相对时间锚点的到期推导。
 ///
-/// 命中返回 `(强制层级, 到期时刻)`；未命中返回 `None`（保持原层级走 TTL 兜底）。
+/// 命中返回到期时刻；未命中返回 `None`（由 [`MemoryKind`](crate::db::memory::MemoryKind)
+/// 的默认窗口兜底）。
 ///
-/// 层级语义：`short` = 今日 / 即刻之类临时态；`intent` = 计划 / 意向（即将到来但会过去）。
+/// 只算时刻、不再返回"层级"：层级这套说法已经并进种类枚举，而到期时刻无论如何都要
+/// 单独算出来——一份没人读的层级字符串和一份没人能影响的 TTL 配置是同一类垃圾。
+///
 /// 到期时刻统一取「指称日结束」的下一个零点，保证当天仍可召回、次日即失效。
-pub(crate) fn temporal_anchor(content: &str) -> Option<(&'static str, DateTime<Utc>)> {
+pub(crate) fn temporal_anchor(content: &str) -> Option<DateTime<Utc>> {
     let now = Utc::now();
     let base = now.date_naive().and_hms_opt(0, 0, 0)?.and_utc();
 
     // 即刻类：几小时内作废。
     if IMMEDIATE.iter().any(|w| content.contains(w)) {
-        return Some(("short", now + Duration::hours(2)));
+        return Some(now + Duration::hours(2));
     }
     // 今天类：当日结束（次日零点）即失效。
     if TODAY.iter().any(|w| content.contains(w)) {
-        return Some(("short", base + Duration::days(1)));
+        return Some(base + Duration::days(1));
     }
     // 明天类：指称日结束（明天结束于再下一天零点）。
     if TOMORROW.iter().any(|w| content.contains(w)) {
-        return Some(("intent", base + Duration::days(2)));
+        return Some(base + Duration::days(2));
     }
     // 后天类。
     if DAY_AFTER.iter().any(|w| content.contains(w)) {
-        return Some(("intent", base + Duration::days(3)));
+        return Some(base + Duration::days(3));
     }
     // 周末类：涵盖本周末及其缓冲。
     if WEEKEND.iter().any(|w| content.contains(w)) {
-        return Some(("intent", base + Duration::days(4)));
+        return Some(base + Duration::days(4));
     }
     // 本周类：覆盖到本周结束。
     if THIS_WEEK.iter().any(|w| content.contains(w)) {
-        return Some(("intent", base + Duration::days(8)));
+        return Some(base + Duration::days(8));
     }
     // 下周类：覆盖"下周"全部。
     if NEXT_WEEK.iter().any(|w| content.contains(w)) {
-        return Some(("intent", base + Duration::days(10)));
+        return Some(base + Duration::days(10));
     }
     // 下月类。
     if NEXT_MONTH.iter().any(|w| content.contains(w)) {
-        return Some(("intent", base + Duration::days(40)));
+        return Some(base + Duration::days(40));
     }
     // 数字类：`N 天 / N 小时 / N 周 / N 个月 / N 年 +（后/内/之后/之内/以内/以后）`。
     numeric_anchor(content, now, base)
 }
 
-/// 解析「N + 时间单位 + 后缀」短语；命中返回 `(是否小时级, 到期时刻)`。
-fn numeric_anchor(
-    content: &str,
-    now: DateTime<Utc>,
-    base: DateTime<Utc>,
-) -> Option<(&'static str, DateTime<Utc>)> {
+/// 解析「N + 时间单位 + 后缀」短语；命中返回到期时刻。
+fn numeric_anchor(content: &str, now: DateTime<Utc>, base: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let chars: Vec<char> = content.chars().collect();
     let n = chars.len();
     let mut i = 0;
@@ -156,7 +154,7 @@ fn numeric_anchor(
         } else {
             base + Duration::minutes(num * minutes_per_unit + 24 * 60)
         };
-        return Some((if now_based { "short" } else { "intent" }, deadline));
+        return Some(deadline);
     }
     None
 }

@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::agent::{ChatInput, ChatOutput};
-use crate::core::memory::MemoryRecord;
+use crate::core::memory::{MemoryKind, MemoryRecord};
 use crate::core::schema::message::ChatMessage;
 
 /// 一条显式历史轮次（HTTP 入参）。
@@ -49,12 +49,14 @@ impl From<ChatRequest> for ChatInput {
 }
 
 /// 记忆视图（HTTP 出参）。
+///
+/// 不再输出 `tier`：它与 `memory_type` + `expires_at` 表达同一件事，留着只会让前端
+/// 拿到自相矛盾的两组值。
 #[derive(Debug, Serialize)]
 pub struct MemoryRecordDto {
     pub id: String,
     pub content: String,
-    pub memory_type: String,
-    pub tier: String,
+    pub memory_type: MemoryKind,
     pub expires_at: Option<String>,
     pub message_id: Option<String>,
     pub created_at: String,
@@ -67,7 +69,6 @@ impl From<MemoryRecord> for MemoryRecordDto {
             id: m.id,
             content: m.content,
             memory_type: m.memory_type,
-            tier: m.tier,
             expires_at: m.expires_at,
             message_id: m.message_id,
             created_at: m.created_at,

@@ -30,7 +30,6 @@ use chrono::{DateTime, Utc};
 
 use crate::config::Config;
 use crate::core::agent::Agent;
-use crate::core::intent::IntentTracker;
 use crate::core::session::{classify_inbound, InboundFreshness, Sessions};
 use crate::{ChatInput, ChatOutput};
 
@@ -53,28 +52,20 @@ pub(crate) fn base_info() -> serde_json::Value {
     serde_json::json!({ "channel_version": CHANNEL_VERSION })
 }
 
-/// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
-/// 先解析会话映射，再写主动状态追踪。
-/// `sent_at` 传**消息真实发出时刻**（报文 `create_time_ms`），不是接收时刻。
-/// 静默窗口从对方实际说话那一刻算起，缺时间戳才回退到接收时刻。
-fn touch_user_reply(
-    session: &Sessions,
-    tracker: &IntentTracker,
-    external_id: &str,
-    sent_at: Option<DateTime<Utc>>,
-) {
-    if let Err(e) = (|| {
-        let sid = session.resolve(CHANNEL, external_id)?;
-        tracker.touch_user_reply(CHANNEL, external_id, &sid, sent_at)
-    })() {
-        tracing::warn!(error = %e, "记录入站状态失败");
+/// 用户发来消息时解析/确认会话映射。
+///
+/// 主动开口的静默窗口不再由状态表维护——它直接取 `messages` 里最后一条用户消息的
+/// 真实发出时刻，所以这里只剩"确保映射存在"这一件事（否则该用户进不了候选集）。
+fn touch_user_reply(session: &Sessions, external_id: &str, _sent_at: Option<DateTime<Utc>>) {
+    if let Err(e) = session.resolve(CHANNEL, external_id) {
+        tracing::warn!(error = %e, "解析会话映射失败");
     }
 }
 
 /// 模型整轮没说任何话、或本轮失败/超时时的兜底话术。
 const FALLBACK_REPLY: &str = "刚才走神了，再发一次试试。";
 
-/// 命令类回执：没有后续记忆沉淀需求（`user_message_id` 为空即代表"无需沉淀"）。
+/// 命令类回执：没有用户输入，`user_message_id` 留空表示"本轮无消息来源"。
 fn plain_reply(reply: &str) -> ChatOutput {
     ChatOutput {
         session_id: String::new(),
@@ -87,7 +78,7 @@ fn plain_reply(reply: &str) -> ChatOutput {
 
 /// 处理一条用户文本消息，返回本轮对话结果。
 ///
-/// 只负责产出回复；记忆沉淀由调用方在回复送达之后另起后台任务（见 `run_loop`）。
+/// 只负责产出回复；记忆由模型在本轮内自行决定是否写入（`remember` 工具）。
 async fn handle_text(
     chat: Arc<Agent>,
     session: Arc<Sessions>,
@@ -136,7 +127,6 @@ enum PollResult {
 async fn run_loop(
     chat: Arc<Agent>,
     session: Arc<Sessions>,
-    tracker: Arc<IntentTracker>,
     client: &reqwest::Client,
     sess: &SavedSession,
 ) -> Result<PollResult, String> {
@@ -228,7 +218,7 @@ async fn run_loop(
                 .unwrap_or(InboundFreshness::Fresh);
             if freshness == InboundFreshness::TooOld {
                 tracing::info!(from = %msg.from_user_id, "消息已超时效，只入库不回复");
-                touch_user_reply(&session, &tracker, &msg.from_user_id, sent_at);
+                touch_user_reply(&session, &msg.from_user_id, sent_at);
                 if let Err(e) = session.archive_only(
                     CHANNEL,
                     &msg.from_user_id,
@@ -240,14 +230,12 @@ async fn run_loop(
                 continue;
             }
 
-            touch_user_reply(&session, &tracker, &msg.from_user_id, sent_at);
+            touch_user_reply(&session, &msg.from_user_id, sent_at);
             tracing::info!(from = %msg.from_user_id, ?freshness, "iLink 收到消息，开始处理");
 
             protocol::send_typing(client, &base, sess, &msg.context_token).await;
 
-            // 后置沉淀要用原文做兜底，而 handle_text 会接管 text，先留一份。
-            let settle_text = text.clone();
-            let (messages, is_fallback, pending_memory) = match tokio::time::timeout(
+            let (messages, is_fallback) = match tokio::time::timeout(
                 Duration::from_secs(super::AI_DEADLINE_SECS),
                 handle_text(
                     chat.clone(),
@@ -260,20 +248,12 @@ async fn run_loop(
             .await
             {
                 Ok(Ok(out)) => {
-                    // 有 user_message_id 才需要沉淀（命令类回执没有）。
-                    let pending = (!out.user_message_id.is_empty()).then(|| {
-                        (
-                            out.session_id.clone(),
-                            out.user_message_id.clone(),
-                            settle_text,
-                        )
-                    });
                     // 逐条发送：整段 join 成一首发出去等于退回单条长回复。
-                    (out.messages, false, pending)
+                    (out.messages, false)
                 }
                 Ok(Err(e)) => {
                     tracing::error!(error = %e, "对话失败");
-                    (vec![FALLBACK_REPLY.to_string()], true, None)
+                    (vec![FALLBACK_REPLY.to_string()], true)
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -281,7 +261,7 @@ async fn run_loop(
                         deadline_secs = super::AI_DEADLINE_SECS,
                         "单轮对话超时，放弃本轮，继续轮询"
                     );
-                    (vec![FALLBACK_REPLY.to_string()], true, None)
+                    (vec![FALLBACK_REPLY.to_string()], true)
                 }
             };
 
@@ -314,15 +294,8 @@ async fn run_loop(
                     from = %msg.from_user_id,
                     is_fallback,
                     sent = messages.len(),
-                    "回复已发送，进入后置处理"
+                    "回复已发送"
                 );
-                // 回复已送达，再后台补记忆沉淀：判定/事实化要调 LLM，不能占用户等待时间。
-                if let Some((session_id, user_message_id, text)) = pending_memory {
-                    let chat = chat.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let _ = chat.settle_memory(&session_id, &user_message_id, &text);
-                    });
-                }
             }
         }
     }
@@ -330,7 +303,7 @@ async fn run_loop(
 
 /// iLink 通道入口：仅在 `ILINK_ENABLED=1` 时启动（有 token 直连，无 token 扫码登录）。
 /// 需外显关闭时设 `ILINK_ENABLED=0`，即使已有会话文件也不会再连接。
-pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, tracker: Arc<IntentTracker>) {
+pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>) {
     let cfg = Config::get();
     if !cfg.ilink_enabled {
         tracing::info!("iLink 通道未启用（设置 ILINK_ENABLED=1 开启）");
@@ -377,15 +350,7 @@ pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, tracker: Arc<IntentTr
         }
 
         tracing::info!("iLink 通道已连接，开始长轮询");
-        match run_loop(
-            chat.clone(),
-            session.clone(),
-            tracker.clone(),
-            &client,
-            &sess,
-        )
-        .await
-        {
+        match run_loop(chat.clone(), session.clone(), &client, &sess).await {
             Ok(PollResult::Relogin) => {
                 // 会话过期：清掉旧凭证，下一轮重新扫码。
                 sess = SavedSession::default();

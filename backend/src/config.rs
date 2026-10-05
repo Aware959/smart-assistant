@@ -31,9 +31,6 @@ pub struct Config {
     pub llm_api_url: String,
     pub llm_api_key: String,
     pub llm_model: String,
-    /// 记忆提取专用模型：留空则复用 llm_model。推荐用更强的模型负责
-    /// 记忆判定/事实化，对话模型只管聊天（两者可分离）。
-    pub llm_extract_model: String,
     /// 结构化输出的请求模式：json_schema（默认，OpenAI/Gemini/本地 llama.cpp 系）
     /// 或 json_object（DeepSeek 等只支持宽松 JSON 模式的端点）。
     pub llm_structured_output: String,
@@ -41,16 +38,18 @@ pub struct Config {
     pub embedding_api_key: String,
     pub embedding_model: String,
     pub embedding_dim: usize,
-    /// 记忆召回的相似度阈值（欧氏距离，≤ 该值才入选；越严越少）。过放宽会
-    /// 把无关记忆每轮都注入提示词，过严会"失忆"。需随 embedding 模型微调。
-    pub memory_recall_threshold: f32,
-    /// 记忆去重阈值：新记忆与库中某条距离 ≤ 该值时视为同一事实，不新增、
-    /// 只刷新 updated_at。只有高度近似才算重复，避免误杀同主题的不同事实。
-    pub memory_dedup_threshold: f32,
-    /// 短期记忆（short）存活天数：如"身体不舒服"这类过期信息。
-    pub memory_short_ttl_days: i64,
-    /// 意向记忆（intent）存活天数：如"打算下个月去看电影"这类计划。
-    pub memory_intent_ttl_days: i64,
+    /// 记忆召回的**最低余弦相似度**（≥ 该值才入选，取值 0~1）。
+    ///
+    /// 单位是相似度而不是距离：调大更严更少，调小更宽。定这个值前先想清楚
+    /// 噪声的下场——把无关记忆塞进上下文，会让模型把不相关的事硬联系起来，
+    /// 比"没有记忆"更糟。需随 embedding 模型微调。
+    pub memory_recall_min_similarity: f32,
+    /// 记忆去重的**最低余弦相似度**（≥ 该值视为同一事实），必须严于召回阈值。
+    ///
+    /// 这是**兜底**，不是去重的主要手段——主要手段是模型自己判断并用 `supersedes`
+    /// 改写旧记忆。所以这里定得很紧：误杀一条的代价（悄悄丢掉一次纠正，
+    /// 而用户以为你记住了新说法）远大于放过一条近义重复的代价。
+    pub memory_dedup_min_similarity: f32,
     /// HTTPS 证书链文件（PEM）。留空时回退到运行目录 `certs/server.pem`。
     pub tls_cert: Option<String>,
     /// HTTPS 私钥文件（PEM）。留空时回退到运行目录 `certs/server.key`。
@@ -85,15 +84,10 @@ pub struct Config {
     /// 安静时段（本机时间，HH-HH 半开区间，如 "23-7" 表示 23:00~6:59 不主动；
     /// 起止相同视为全天不安静）。
     pub intent_quiet_hours: (u32, u32),
-    /// 每用户每天的主动消息上限。
-    pub intent_daily_limit: u32,
     /// 距用户最后一次说话超过多少小时后才可能被主动联系（避免打断热聊）。
     pub intent_min_silence_hours: i64,
     /// 距用户最后一次说话超过多少天还未回复则不再主动打扰（避免骚扰沉睡用户）。
     pub intent_max_idle_days: i64,
-    /// 每轮回复后最多连续追加的语句数：话题有延展性时 AI 会像真人一样接着说
-    /// （倾诉/吐槽/讨论进行中）；设为 0 关闭该能力。
-    pub intent_max_followups: u32,
     /// 追踪日志是否记录内容全文（召回记忆 / 提示词 / 回复 / 判定原文）。
     /// 缺省只记摘要（条数 / 字符数），避免默认把内容大量落盘。
     pub trace_content: bool,
@@ -107,16 +101,13 @@ impl Default for Config {
             llm_api_url: "http://127.0.0.1:1234/v1/completions".to_string(),
             llm_api_key: String::new(),
             llm_model: "qwen3.5-9b-uncensored-hauhaucs-aggressive".to_string(),
-            llm_extract_model: String::new(),
             llm_structured_output: "json_schema".to_string(),
             embedding_api_url: "http://127.0.0.1:1234/v1/embeddings".to_string(),
             embedding_api_key: String::new(),
             embedding_model: "text-embedding-embeddinggemma-300m".to_string(),
             embedding_dim: 768,
-            memory_recall_threshold: 0.9,
-            memory_dedup_threshold: 0.25,
-            memory_short_ttl_days: 7,
-            memory_intent_ttl_days: 90,
+            memory_recall_min_similarity: 0.79,
+            memory_dedup_min_similarity: 0.92,
             tls_cert: None,
             tls_key: None,
             web_dist: Some("../frontend/dist".to_string()),
@@ -133,10 +124,8 @@ impl Default for Config {
             intent_min_minutes: 45,
             intent_max_minutes: 180,
             intent_quiet_hours: (23, 7),
-            intent_daily_limit: 8,
             intent_min_silence_hours: 2,
             intent_max_idle_days: 7,
-            intent_max_followups: 3,
             trace_content: false,
         }
     }
@@ -155,7 +144,6 @@ impl Config {
             llm_api_key: std::env::var("LLM_API_KEY").unwrap_or_default(),
             llm_model: std::env::var("LLM_MODEL")
                 .unwrap_or_else(|_| "google/gemma-4-26b-a4b-qat".to_string()),
-            llm_extract_model: std::env::var("LLM_EXTRACT_MODEL").unwrap_or_default(),
             llm_structured_output: std::env::var("LLM_STRUCTURED_OUTPUT")
                 .unwrap_or_else(|_| "json_schema".to_string()),
             embedding_api_url: std::env::var("EMBEDDING_API_URL")
@@ -167,22 +155,14 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(768),
-            memory_recall_threshold: std::env::var("MEMORY_RECALL_THRESHOLD")
+            memory_recall_min_similarity: std::env::var("MEMORY_RECALL_MIN_SIMILARITY")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(0.9),
-            memory_dedup_threshold: std::env::var("MEMORY_DEDUP_THRESHOLD")
+                .unwrap_or(0.79),
+            memory_dedup_min_similarity: std::env::var("MEMORY_DEDUP_MIN_SIMILARITY")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(0.25),
-            memory_short_ttl_days: std::env::var("MEMORY_SHORT_TTL_DAYS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(7),
-            memory_intent_ttl_days: std::env::var("MEMORY_INTENT_TTL_DAYS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(90),
+                .unwrap_or(0.92),
             tls_cert: std::env::var("SMART_ASSISTANT_TLS_CERT").ok(),
             tls_key: std::env::var("SMART_ASSISTANT_TLS_KEY").ok(),
             web_dist: std::env::var("SMART_ASSISTANT_WEB_DIST")
@@ -236,10 +216,6 @@ impl Config {
                     .unwrap_or_default()
                     .as_str(),
             ),
-            intent_daily_limit: std::env::var("INTENT_DAILY_LIMIT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(8),
             intent_min_silence_hours: std::env::var("INTENT_MIN_SILENCE_HOURS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -248,10 +224,6 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(7),
-            intent_max_followups: std::env::var("INTENT_MAX_FOLLOWUPS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3),
             trace_content: std::env::var("TRACE_CONTENT")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),

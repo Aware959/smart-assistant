@@ -1,6 +1,7 @@
 use smart_assistant::config::Config;
 use smart_assistant::db;
 use smart_assistant::db::memory as db_memory;
+use smart_assistant::db::memory::MemoryKind;
 
 /// 按当前配置的 embedding 维度生成测试向量。
 fn vector(dim: usize, start: usize) -> Vec<f32> {
@@ -31,22 +32,10 @@ fn store_and_search_memory() {
 
     let d = dim();
     let v: Vec<f32> = vector(d, 0);
-    let m1 = db_memory::Memory::new(
-        "关于小明的事实".into(),
-        "user".into(),
-        "core".into(),
-        None,
-        None,
-    );
+    let m1 = db_memory::Memory::new("关于小明的事实".into(), MemoryKind::Trait, None, None);
     db_memory::create(&db, &m1, &v).unwrap();
 
-    let m2 = db_memory::Memory::new(
-        "另一个记忆".into(),
-        "user".into(),
-        "core".into(),
-        None,
-        None,
-    );
+    let m2 = db_memory::Memory::new("另一个记忆".into(), MemoryKind::Preference, None, None);
     let v2: Vec<f32> = vector(d, d);
     db_memory::create(&db, &m2, &v2).unwrap();
 
@@ -59,35 +48,33 @@ fn store_and_search_memory() {
 }
 
 #[test]
-fn update_and_delete_memory() {
+fn revise_and_delete_memory() {
     let db = db::Database::in_memory().unwrap();
 
     let v: Vec<f32> = vector(dim(), 0);
-    let m = db_memory::Memory::new("待更新".into(), "user".into(), "core".into(), None, None);
+    let m = db_memory::Memory::new("待更新".into(), MemoryKind::Trait, None, None);
     db_memory::create(&db, &m, &v).unwrap();
 
-    db_memory::update(&db, &m.id, "已更新", &v).unwrap();
+    db_memory::revise(
+        &db,
+        &m.id,
+        "已更新",
+        MemoryKind::Routine,
+        Some("2099-01-01T00:00:00+00:00"),
+        &v,
+    )
+    .unwrap();
     let updated = db_memory::get(&db, &m.id).unwrap();
     assert_eq!(updated.content, "已更新");
+    assert_eq!(
+        updated.memory_type,
+        MemoryKind::Routine,
+        "revise 应把种类一起改掉"
+    );
 
     db_memory::delete(&db, &m.id).unwrap();
     let result = db_memory::list(&db, 10).unwrap();
     assert!(result.is_empty());
-}
-
-#[test]
-fn memory_extraction_falls_back_to_raw_text() {
-    use smart_assistant::core::memory::user_memory_extraction::MemoryExtraction;
-
-    // 事实化内容缺失（未生成或生成失败）时，落库文本应回退到用户原文。
-    let extraction = MemoryExtraction {
-        is_memory: true,
-        memory_content: None,
-        memory_type: "fact".to_string(),
-        tier: "core".to_string(),
-        relation: "neutral".to_string(),
-    };
-    assert_eq!(extraction.content_or("我最喜欢蓝色了"), "我最喜欢蓝色了");
 }
 
 #[test]
@@ -160,13 +147,7 @@ fn db_management_roundtrip() {
     );
 
     let d = dim();
-    let m = db_memory::Memory::new(
-        "小明是产品的负责人".into(),
-        "fact".into(),
-        "core".into(),
-        None,
-        None,
-    );
+    let m = db_memory::Memory::new("小明是产品的负责人".into(), MemoryKind::Trait, None, None);
     db_memory::create(&db, &m, &vector(d, 10)).unwrap();
 
     db_memory::delete(&db, &m.id).unwrap();

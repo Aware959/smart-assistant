@@ -3,7 +3,7 @@
 //! 每个外部对话拥有独立 session，多轮上下文互不串扰；映射持久化在
 //! `channel_sessions` 表中，重启进程后继续沿用。
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::db::session::Session;
 use crate::db::Database;
@@ -75,6 +75,57 @@ pub fn list_mappings(db: &Database) -> Result<Vec<(String, String, String)>> {
         .map_err(Into::into)
 }
 
+/// 一个外部对话的主动开口时间账本：**由消息表派生**，不另存状态。
+///
+/// 这两个时刻不是"需要被维护的账"，而是"消息本身的属性"——之前专门建
+/// `intent_state` 表存它们，等于把 `messages` 里已有的事实抄一份，改成直接查即可，
+/// 且抄写路径一旦漏掉（换通道、删会话、重放）就会和真实时间线漂移。
+#[derive(Debug, Clone)]
+pub struct ProactiveRow {
+    pub channel: String,
+    pub external_id: String,
+    pub session_id: String,
+    /// 最近一条**用户**消息时刻（真实发出时刻，非接收时刻）；从未说过话则为 None。
+    pub last_user_at: Option<DateTime<Utc>>,
+    /// 最近一条 **assistant** 消息时刻；从未发过则为 None。
+    ///
+    /// 不区分"回复"与"主动开口"：防连环轰炸只需要"上一次说话距今多久"。
+    pub last_assistant_at: Option<DateTime<Utc>>,
+}
+
+/// 列出全部外部对话及其消息时间账本（有会话映射即候选，未说过话的时间戳为 None）。
+///
+/// 每个映射两次索引查找（`idx_messages_session_time`），只在主动引擎每轮评估时调用一次。
+pub fn list_proactive_rows(db: &Database) -> Result<Vec<ProactiveRow>> {
+    let mut stmt = db.conn().prepare(
+        "SELECT cs.channel,
+                cs.external_id,
+                cs.session_id,
+                (SELECT MAX(m.created_at) FROM messages m
+                  WHERE m.session_id = cs.session_id AND m.role = 'user'),
+                (SELECT MAX(m.created_at) FROM messages m
+                  WHERE m.session_id = cs.session_id AND m.role = 'assistant')
+         FROM channel_sessions cs",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ProactiveRow {
+            channel: r.get(0)?,
+            external_id: r.get(1)?,
+            session_id: r.get(2)?,
+            last_user_at: parse_ts(r.get(3)?),
+            last_assistant_at: parse_ts(r.get(4)?),
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn parse_ts(s: Option<String>) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&s?)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+
 fn touch(db: &Database, channel: &str, external_id: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     db.conn().execute(
@@ -108,3 +159,7 @@ pub fn set_cursor(db: &Database, channel: &str, cursor: &str) -> Result<()> {
 fn cursor_key(channel: &str) -> String {
     format!("channel_cursor:{channel}")
 }
+
+#[cfg(test)]
+#[path = "channel_tests.rs"]
+mod channel_tests;

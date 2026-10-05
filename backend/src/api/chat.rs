@@ -85,12 +85,6 @@ async fn handle_chat_stream(
             .chat_stream(&input, |message| {
                 let _ = tx.unbounded_send(SseMsg::Delta(message.to_string()));
             })
-            // 回复正文已随增量流给客户端；这里再补记忆沉淀，失败只降级、不改已交付的回复。
-            .map(|mut out| {
-                out.memory =
-                    state.settle_memory(&out.session_id, &out.user_message_id, &input.message);
-                out
-            })
             .map_err(|e| e.to_string());
         let _ = tx.unbounded_send(SseMsg::Done(Box::new(outcome)));
     });
@@ -158,15 +152,6 @@ async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: Arc<Agen
                     let outcome = state
                         .chat_stream(&input, |message| {
                             let _ = tx.unbounded_send(SseMsg::Delta(message.to_string()));
-                        })
-                        // 回复正文已随增量流给客户端；这里再补记忆沉淀，失败只降级。
-                        .map(|mut out| {
-                            out.memory = state.settle_memory(
-                                &out.session_id,
-                                &out.user_message_id,
-                                &input.message,
-                            );
-                            out
                         })
                         .map_err(|e| e.to_string());
                     let _ = tx.unbounded_send(SseMsg::Done(Box::new(outcome)));

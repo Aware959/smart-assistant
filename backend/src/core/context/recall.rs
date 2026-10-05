@@ -1,7 +1,7 @@
 //! 记忆召回 → 上下文片段。
 //!
 //! 只消费记忆能力的具体实现（[`crate::core::memory::Store`]）；召回已按
-//! `memory_recall_threshold` 过滤、剔除过期条目，由记忆能力层负责。
+//! `memory_recall_min_similarity` 过滤、剔除过期条目，由记忆能力层负责。
 //! 这里只做"取"与两种渲染形态的组装。
 
 use crate::core::memory::MemoryHit;
@@ -16,11 +16,24 @@ pub(crate) fn fetch(memory: &Store, query: &str, limit: usize) -> Result<Vec<Mem
     memory.search(query, limit)
 }
 
-/// 渲染成纯内容多行文本（主动决策阅读用，不带列表前缀）。
+/// 渲染成纯内容多行文本（主动决策阅读用，不带列表前缀、不带 id）。
 pub(crate) fn plain_lines(memory_hits: &[MemoryHit]) -> String {
     memory_hits
         .iter()
         .map(|hit| hit.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 渲染成带 id 的多行文本（`recall_memory` 工具回填用）。
+///
+/// **必须带 id**：`remember` 的 `supersedes` 要指向被取代的那条，模型唯一的
+/// 拿到 id 的途径就是召回结果。id 用完整 uuid 而非短码——省下的那几个字符
+/// 不值得换来"撞 id 就改错记忆"的风险。
+pub(crate) fn id_lines(memory_hits: &[MemoryHit]) -> String {
+    memory_hits
+        .iter()
+        .map(|hit| format!("[{}] {}", hit.id, hit.content))
         .collect::<Vec<_>>()
         .join("\n")
 }

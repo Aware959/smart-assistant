@@ -1,6 +1,6 @@
 /// 记忆向量库维护工具：与主程序（server / cli）完全解耦。
 ///
-/// 主程序检测到向量签名变更（embedding_dim / embedding_model）时**不会**自动重建，
+/// 主程序检测到向量签名变更（embedding_dim / embedding_model / 距离度量）时**不会**自动重建，
 /// 只会提醒；是否需要重建由该工具决定并执行。
 ///
 /// 用法：
@@ -35,11 +35,12 @@ fn print_status(status: &db::VecStatus) {
         status.stored_model.as_deref().unwrap_or("未记录")
     );
     println!(
-        "  向量表实际维度: {}",
+        "  向量表实际签名: dim = {} , metric = {}",
         status
             .actual_dim
             .map(|d| d.to_string())
-            .unwrap_or_else(|| "表不存在".into())
+            .unwrap_or_else(|| "表不存在".into()),
+        status.actual_metric.as_deref().unwrap_or("表不存在")
     );
     println!("  memories 记录 : {} 条", status.memory_count);
     println!("  memory_vectors: {} 条", status.vector_count);

@@ -19,16 +19,6 @@ pub fn turn_span() -> tracing::Span {
     )
 }
 
-/// 新建一次记忆沉淀的追踪 span（与对话共享 session / user_message_id，便于关联）。
-pub fn settle_span(session_id: &str, user_message_id: &str) -> tracing::Span {
-    tracing::info_span!(
-        "settle_memory",
-        trace_id = %uuid::Uuid::new_v4(),
-        session_id,
-        user_message_id,
-    )
-}
-
 /// 生成一个 `trace_id`（异步路径不便跨 `await` 持有 span 时，直接用字段带上）。
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()

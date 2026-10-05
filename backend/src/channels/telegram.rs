@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::core::agent::Agent;
-use crate::core::intent::IntentTracker;
 use crate::core::session::{classify_inbound, InboundFreshness, Sessions};
 use crate::{ChatInput, ChatOutput};
 
@@ -208,29 +207,20 @@ pub(crate) async fn push_send(chat_id: i64, text: &str) -> Result<(), String> {
     send_text(&client, &api_base(&token), chat_id, text).await
 }
 
-/// 用户发来消息时记录"对方刚说话"（供主动引擎做频率控制）。
+/// 用户发来消息时解析/确认会话映射。
 ///
-/// `sent_at` 传**消息真实发出时刻**（报文 `date`），不是接收时刻——静默窗口必须
-/// 从对方实际说话那一刻算起，否则离线几小时后补收的消息会把窗口错误归零。
-/// 先解析会话映射，再写主动状态追踪。
-fn touch_user_reply(
-    session: &Sessions,
-    tracker: &IntentTracker,
-    external_id: &str,
-    sent_at: Option<DateTime<Utc>>,
-) {
-    if let Err(e) = (|| {
-        let sid = session.resolve(CHANNEL, external_id)?;
-        tracker.touch_user_reply(CHANNEL, external_id, &sid, sent_at)
-    })() {
-        tracing::warn!(error = %e, "记录入站状态失败");
+/// 主动开口的静默窗口不再由状态表维护——它直接取 `messages` 里最后一条用户消息的
+/// 真实发出时刻，所以这里只剩"确保映射存在"这一件事（否则该用户进不了候选集）。
+fn touch_user_reply(session: &Sessions, external_id: &str, _sent_at: Option<DateTime<Utc>>) {
+    if let Err(e) = session.resolve(CHANNEL, external_id) {
+        tracing::warn!(error = %e, "解析会话映射失败");
     }
 }
 
 /// 模型整轮没说任何话、或本轮失败/超时时的兜底话术。
 const FALLBACK_REPLY: &str = "刚才走神了，再发一次试试。";
 
-/// 命令类回执：没有后续记忆沉淀需求（`user_message_id` 为空即代表"无需沉淀"）。
+/// 命令类回执：没有用户输入，`user_message_id` 留空表示"本轮无消息来源"。
 fn plain_reply(reply: &str) -> ChatOutput {
     ChatOutput {
         session_id: String::new(),
@@ -243,7 +233,7 @@ fn plain_reply(reply: &str) -> ChatOutput {
 
 /// 处理一条 TG 文本消息，返回本轮对话结果（None 表示无需回复）。
 ///
-/// 只负责产出回复；记忆沉淀由调用方在回复送达之后另起后台任务（见 `run_loop`）。
+/// 只负责产出回复；记忆由模型在本轮内自行决定是否写入（`remember` 工具）。
 async fn handle_text(
     chat: Arc<Agent>,
     session: Arc<Sessions>,
@@ -296,14 +286,14 @@ async fn handle_text(
 
 /// 长轮询入口。token 为空时直接返回，由 server 入口决定是否调用。
 /// 异常退出后自动重连（启动期网络抖动不再导致永久掉线）。
-pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, tracker: Arc<IntentTracker>) {
+pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>) {
     let token = Config::get().telegram_bot_token.trim().to_string();
     if token.is_empty() {
         return;
     }
     loop {
-        match run_loop(chat.clone(), session.clone(), tracker.clone(), &token).await {
-            Ok(()) => break, // run_loop 正常情况下永不返回
+        match run_loop(chat.clone(), session.clone(), &token).await {
+            Ok(()) => break,
             Err(e) => {
                 tracing::error!(error = %e, "telegram 轮询异常退出，60s 后重连");
                 tokio::time::sleep(Duration::from_secs(60)).await;
@@ -312,12 +302,7 @@ pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, tracker: Arc<IntentTr
     }
 }
 
-async fn run_loop(
-    chat: Arc<Agent>,
-    session: Arc<Sessions>,
-    tracker: Arc<IntentTracker>,
-    token: &str,
-) -> Result<(), String> {
+async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Result<(), String> {
     let client = build_client()?;
     let base = api_base(token);
 
@@ -424,7 +409,7 @@ async fn run_loop(
                 .unwrap_or(InboundFreshness::Fresh);
             if freshness == InboundFreshness::TooOld {
                 tracing::info!(chat_id, "消息已超时效，只入库不回复");
-                touch_user_reply(&session, &tracker, &chat_id.to_string(), sent_at);
+                touch_user_reply(&session, &chat_id.to_string(), sent_at);
                 if let Err(e) = session.archive_only(
                     CHANNEL,
                     &chat_id.to_string(),
@@ -442,14 +427,14 @@ async fn run_loop(
                 "收到消息，开始处理（进入 AI 流水线前）"
             );
 
-            touch_user_reply(&session, &tracker, &chat_id.to_string(), sent_at);
+            touch_user_reply(&session, &chat_id.to_string(), sent_at);
 
             send_typing(&client, &base, chat_id).await;
             let handle_started = std::time::Instant::now();
 
             // 本轮产出的是**一组独立消息**（模型自己决定说几句），逐条发送。
             // 整段 join 成一首发出去等于退回单条长回复，整个改造就白做了。
-            let (next_messages, is_fallback, pending_memory) = match tokio::time::timeout(
+            let (next_messages, is_fallback) = match tokio::time::timeout(
                 Duration::from_secs(super::AI_DEADLINE_SECS),
                 handle_text(chat.clone(), session.clone(), chat_id, &text, user_time),
             )
@@ -460,17 +445,15 @@ async fn run_loop(
                         chat_id,
                         elapsed_ms = handle_started.elapsed().as_millis() as u64,
                         messages = out.messages.len(),
+                        memory_written = out.memory.is_some(),
                         "handle_text 返回（回复生产阶段完成）"
                     );
-                    // 有 user_message_id 才需要沉淀（命令类回执没有）。
-                    let pending = (!out.user_message_id.is_empty())
-                        .then(|| (out.session_id.clone(), out.user_message_id.clone()));
-                    (out.messages, false, pending)
+                    (out.messages, false)
                 }
                 Ok(Ok(None)) => continue,
                 Ok(Err(e)) => {
                     tracing::error!(error = %e, "对话失败");
-                    (vec![FALLBACK_REPLY.to_string()], true, None)
+                    (vec![FALLBACK_REPLY.to_string()], true)
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -478,7 +461,7 @@ async fn run_loop(
                         deadline_secs = super::AI_DEADLINE_SECS,
                         "单轮对话超时，放弃本轮，继续轮询"
                     );
-                    (vec![FALLBACK_REPLY.to_string()], true, None)
+                    (vec![FALLBACK_REPLY.to_string()], true)
                 }
             };
 
@@ -504,18 +487,8 @@ async fn run_loop(
                     chat_id,
                     is_fallback,
                     sent = next_messages.len(),
-                    "回复已发送，进入后置处理"
+                    "回复已发送"
                 );
-                // 回复已送达，再后台补记忆沉淀：判定/事实化要调 LLM，不能占用户等待时间。
-                if let Some((session_id, user_message_id)) = pending_memory {
-                    let chat = chat.clone();
-                    let text = text.clone();
-                    tokio::task::spawn_blocking(move || {
-                        tracing::debug!(session_id = %session_id, "记忆沉淀(settle_memory)开始");
-                        let _ = chat.settle_memory(&session_id, &user_message_id, &text);
-                        tracing::debug!(session_id = %session_id, "记忆沉淀(settle_memory)结束");
-                    });
-                }
             }
         }
     }

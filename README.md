@@ -2,7 +2,7 @@
 
 本地优先的对话式记忆/知识助手。核心是一个 Rust 内核（`backend/`），web 与 Android 只是它的两种消费形态：
 
-- **backend/**：Rust 内核（对话 + 记忆分层 + 语义检索 + 主动陪伴），可选的桌面调试 API（Axum）
+- **backend/**：Rust 内核（对话工具循环 + 长期记忆 + 语义检索 + 主动开口），可选的桌面调试 API（Axum）
 - **frontend/**：Web 端（Vite + React），直接消费 HTTP / SSE 接口
 - **android/**：Android 端（占位；UniFFI 导出暂已移除，待内核与对话稳定后再接）
 

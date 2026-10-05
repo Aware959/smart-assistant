@@ -8,7 +8,7 @@ use std::sync::Arc;
 use chrono::Datelike;
 
 use crate::core::context::{self, AgentContext};
-use crate::core::memory::{MemoryRecord, Store};
+use crate::core::memory::{MemoryKind, MemoryRecord, Store};
 use crate::core::schema::message::ChatMessage;
 use crate::core::self_profile::Profile;
 use crate::core::session::Sessions;
@@ -31,7 +31,7 @@ pub struct ChatInput {
     pub user_time: Option<String>,
 }
 
-/// 对话输出：一轮对话的结果（会话 / 回复 / 来源消息 / 沉淀记忆）。
+/// 对话输出：一轮对话的结果（会话 / 回复 / 来源消息 / 本轮写入的记忆）。
 #[derive(Debug, Clone)]
 pub struct ChatOutput {
     pub session_id: String,
@@ -42,12 +42,13 @@ pub struct ChatOutput {
     /// 通道必须按这个列表逐条发送——把 `reply` 整段发出去等于退回单条长回复，
     /// 整个"一句一句回"就白改了。`reply` 只是它的便捷视图。
     pub messages: Vec<String>,
-    /// 本条用户消息的 id：宿主在回复交付后调用 `settle_memory` 时用它关联记忆来源。
+    /// 本条用户消息的 id（记忆的来源消息 id 即指向它）。
     pub user_message_id: String,
-    /// 本轮沉淀出的记忆。
+    /// 本轮写入的记忆，取**最后一条**。
     ///
-    /// `chat_stream` 返回时**恒为 None**——记忆沉淀已后置到回复交付之后，由宿主调用
-    /// `settle_memory` 拿到结果后自行填充（响应结构因此保持不变）。
+    /// 模型一轮里可能写不止一条（写了新事实又改写了旧的），而这里只带一条出来，
+    /// 所以取最后写的——那通常是它对当前话题做完的最后一次修正。记忆库才是真源，
+    /// 这个字段只用于让宿主展示"我记住了什么"。
     pub memory: Option<MemoryRecord>,
 }
 
@@ -114,7 +115,10 @@ impl Agent {
     /// 3. 循环：流式生成 → 有工具则执行并回填、无工具则结束；
     /// 4. 每条 `send_message` 的文本即时回调 `on_message` 并单独入库。
     ///
-    /// **记忆沉淀不在本函数里**，见 [`Self::settle_memory`]。
+    /// **记忆写入也在这个循环里**（`remember` 工具），不再有回复交付后的旁路步骤。
+    /// 模型看得见整段对话，所以"这句话值不值得记、指的是哪件旧事"只有它能判断；
+    /// 而写入失败也只是回填一次"没记住"，不会连累这轮回复——这本来就是记忆该有的
+    /// 失败姿态，只是过去它挂在对话主流程之外、每条消息都要跑一遍判定。
     pub fn chat_stream<F>(&self, input: &ChatInput, mut on_message: F) -> Result<ChatOutput>
     where
         F: FnMut(&str) + Send,
@@ -212,8 +216,12 @@ impl Agent {
 
         // 4. 工具循环。
         let tools = crate::llm::tool::definitions();
+        // 写入过的记忆留给 ChatOutput 回报宿主；工具上下文是共享引用，
+        // 所以这里用内部可变性收集，不能靠 &mut。
         let tool_ctx = TurnTools {
             memory: self.memory.as_ref(),
+            user_message_id: user_message.id.as_str(),
+            written: std::cell::RefCell::new(Vec::new()),
         };
         let llm_phase = std::time::Instant::now();
         let mut delivered: Vec<String> = Vec::new();
@@ -397,98 +405,17 @@ impl Agent {
             "对话完成"
         );
 
+        // 本轮写入的最后一条记忆（若有）。取在 return 之前，
+        // 让借用先结束——否则 ChatOutput 会带着 Ref 活到函数尾。
+        let last_memory = tool_ctx.written.borrow().last().cloned();
+
         Ok(ChatOutput {
             session_id: session.id,
             reply,
             messages: delivered,
             user_message_id: user_message.id,
-            // 记忆沉淀被后置（见 settle_memory），由宿主在回复交付后填充。
-            memory: None,
+            memory: last_memory,
         })
-    }
-
-    /// 记忆沉淀（回复交付后的独立一步）：判定 → 落库。
-    ///
-    /// **为什么单独一步**：判定要调 LLM、沉淀要调 embedding，两者都可能慢、也可能失败。
-    /// 挂在 [`Self::chat_stream`] 上会拉长首字延迟，失败还会让用户拿不到回复。后置之后
-    /// 宿主的调用时序变成"回复已送达 → 后台沉淀"，记忆链路彻底不参与对话体验。
-    ///
-    /// 任何环节失败都只记 warn 并返回 `None`——记忆是辅助能力。
-    /// `user_message_id` 为空表示来源不可关联（记忆照常落库，只是 `message_id` 为空）。
-    pub fn settle_memory(
-        &self,
-        session_id: &str,
-        user_message_id: &str,
-        text: &str,
-    ) -> Option<MemoryRecord> {
-        let span = crate::utils::trace::settle_span(session_id, user_message_id);
-        let _enter = span.enter();
-        tracing::info!(session_id, "记忆沉淀：判定阶段开始");
-        tracing::info!(
-            target: "trace",
-            stage = "extract_start",
-            text = %crate::utils::trace::Text(text),
-            "记忆沉淀：判定开始"
-        );
-        let extraction = match self.memory.extract(text) {
-            Ok(extraction) => extraction,
-            Err(e) => {
-                tracing::warn!(error = %e, "记忆判定失败，跳过本轮记忆沉淀");
-                return None;
-            }
-        };
-        tracing::info!(
-            session_id,
-            is_memory = extraction.is_memory,
-            memory_type = %extraction.memory_type,
-            tier = %extraction.tier,
-            "记忆沉淀：判定完成"
-        );
-        tracing::info!(
-            target: "trace",
-            stage = "extract_done",
-            is_memory = extraction.is_memory,
-            memory_type = %extraction.memory_type,
-            tier = %extraction.tier,
-            relation = %extraction.relation,
-            content = %crate::utils::trace::Text(extraction.content.as_deref().unwrap_or("")),
-            "记忆判定完成"
-        );
-
-        if !extraction.is_memory {
-            return None;
-        }
-
-        // 事实化失败时回退原文（content_or 的兜底）。
-        let content = extraction.content_or(text);
-        let message_id = (!user_message_id.is_empty()).then_some(user_message_id);
-        let store_started = std::time::Instant::now();
-        match self.memory.store(
-            content,
-            &extraction.memory_type,
-            &extraction.tier,
-            message_id,
-        ) {
-            Ok(record) => {
-                tracing::info!(
-                    session_id,
-                    store_ms = store_started.elapsed().as_millis() as u64,
-                    "记忆沉淀：落库完成"
-                );
-                tracing::info!(
-                    target: "trace",
-                    stage = "store_done",
-                    memory_id = %record.id,
-                    content = %crate::utils::trace::Text(&record.content),
-                    "记忆落库完成"
-                );
-                Some(record)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "记忆沉淀失败，本轮回复不受影响");
-                None
-            }
-        }
     }
 }
 
@@ -506,9 +433,17 @@ const MAX_TOOL_ITER: usize = 8;
 /// 没有副作用，所以这里直接结束比继续等更划算。
 const MAX_MUTE_ROUNDS: u32 = 2;
 
-/// 一轮对话内的只读工具执行环境。
+/// 一轮对话内的工具执行环境。
+///
+/// 只读工具与 `remember` 共用这一个对象：`remember` 要写状态，所以这里带上了本轮
+/// 用户消息 id（作为记忆的来源）；只读工具用不到它，但让两条路径共用一份上下文
+/// 比拆成两个对象少一层分发。
 struct TurnTools<'a> {
     memory: &'a Store,
+    /// 本条用户消息 id：记忆的 `message_id` 指向它。
+    user_message_id: &'a str,
+    /// 本轮写入的记忆，最后一条随 `ChatOutput` 回报宿主。
+    written: std::cell::RefCell<Vec<MemoryRecord>>,
 }
 
 impl crate::llm::tool::ToolContext for TurnTools<'_> {
@@ -539,6 +474,8 @@ impl crate::llm::tool::ToolContext for TurnTools<'_> {
 
     /// 按需记忆召回。失败或无命中都回填明确说明，让模型知道"查过了、没有"，
     /// 而不是拿到一个空串后误以为没查过。
+    ///
+    /// 回填**带 id**：模型要改写一条旧记忆时，唯一的 id 来源就是召回结果。
     fn recall(&self, query: &str) -> String {
         let started = std::time::Instant::now();
         match context::fetch_recall(self.memory, query, context::RECALL_LIMIT) {
@@ -549,7 +486,7 @@ impl crate::llm::tool::ToolContext for TurnTools<'_> {
                     ms = started.elapsed().as_millis() as u64,
                     "recall_memory 工具执行完成"
                 );
-                let body = context::plain_lines(&hits);
+                let body = context::id_lines(&hits);
                 if body.trim().is_empty() {
                     "没有检索到相关记忆。".to_string()
                 } else {
@@ -559,6 +496,47 @@ impl crate::llm::tool::ToolContext for TurnTools<'_> {
             Err(e) => {
                 tracing::warn!(error = %e, "recall_memory 工具执行失败");
                 format!("记忆检索失败：{e}")
+            }
+        }
+    }
+
+    /// 模型主动写入一条记忆。
+    ///
+    /// 失败在这里被吞成 `Err(String)`：记忆是辅助能力，一条记不住不该把整轮对话
+    /// 拖失败。`dispatch` 会把错误文案回填给模型，让它下轮自己改正。
+    fn remember(
+        &self,
+        content: &str,
+        kind: MemoryKind,
+        supersedes: Option<&str>,
+    ) -> std::result::Result<crate::core::memory::WriteKind, String> {
+        let started = std::time::Instant::now();
+        let message_id = (!self.user_message_id.is_empty()).then_some(self.user_message_id);
+        match self.memory.store(content, kind, supersedes, message_id) {
+            Ok(outcome) => {
+                tracing::info!(
+                    memory_id = %outcome.memory.id,
+                    kind = ?outcome.kind,
+                    memory_type = ?outcome.memory.memory_type,
+                    superseded = supersedes.unwrap_or(""),
+                    content = %crate::utils::trace::Text(&outcome.memory.content),
+                    ms = started.elapsed().as_millis() as u64,
+                    "remember 工具写入完成"
+                );
+                tracing::info!(
+                    target: "trace",
+                    stage = "memory_written",
+                    memory_id = %outcome.memory.id,
+                    kind = ?outcome.kind,
+                    content = %crate::utils::trace::Text(&outcome.memory.content),
+                    "记忆写入完成"
+                );
+                self.written.borrow_mut().push(outcome.memory.clone());
+                Ok(outcome.kind)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "remember 工具写入失败");
+                Err(e.to_string())
             }
         }
     }

@@ -34,7 +34,6 @@ async fn main() {
         tokio::spawn(smart_assistant::channels::telegram::run(
             app.chat.clone(),
             app.session.clone(),
-            app.tracker.clone(),
         ));
     }
 
@@ -44,7 +43,6 @@ async fn main() {
         tokio::spawn(smart_assistant::channels::ilink::run(
             app.chat.clone(),
             app.session.clone(),
-            app.tracker.clone(),
         ));
     }
 
@@ -55,7 +53,6 @@ async fn main() {
         tokio::spawn(smart_assistant::core::intent::run(
             app.chat.clone(),
             app.session.clone(),
-            app.tracker.clone(),
             Arc::new(smart_assistant::channels::ChannelsPusher),
         ));
     }

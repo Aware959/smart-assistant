@@ -11,10 +11,9 @@ fn base_today() -> DateTime<Utc> {
         .and_utc()
 }
 
-/// 断言命中：层级正确、到期时刻落在 `[lo, hi]` 闭区间（跨午夜容差 ±1 天）。
-fn assert_anchor(content: &str, expect_tier: &str, lo: DateTime<Utc>, hi: DateTime<Utc>) {
-    let (tier, deadline) = temporal_anchor(content).unwrap_or_else(|| panic!("应命中：{content}"));
-    assert_eq!(tier, expect_tier, "层级不符：{content}");
+/// 断言命中：到期时刻落在 `[lo, hi]` 闭区间（跨午夜容差 ±1 天）。
+fn assert_anchor(content: &str, lo: DateTime<Utc>, hi: DateTime<Utc>) {
+    let deadline = temporal_anchor(content).unwrap_or_else(|| panic!("应命中：{content}"));
     assert!(
         deadline >= lo - Duration::days(1) && deadline <= hi + Duration::days(1),
         "到期时刻 {deadline} 不在预期区间 [{lo}, {hi}]：{content}"
@@ -24,9 +23,9 @@ fn assert_anchor(content: &str, expect_tier: &str, lo: DateTime<Utc>, hi: DateTi
 #[test]
 fn immediate_words_expire_in_hours() {
     let now = Utc::now();
-    assert_anchor("对方待会儿去开会", "short", now, now + Duration::hours(2));
-    assert_anchor("稍后联系", "short", now, now + Duration::hours(2));
-    assert_anchor("马上去拿快递", "short", now, now + Duration::hours(2));
+    assert_anchor("对方待会儿去开会", now, now + Duration::hours(2));
+    assert_anchor("稍后联系", now, now + Duration::hours(2));
+    assert_anchor("马上去拿快递", now, now + Duration::hours(2));
 }
 
 #[test]
@@ -34,19 +33,16 @@ fn today_anchors_expire_at_end_of_day() {
     let base = base_today();
     assert_anchor(
         "对方今天要上班",
-        "short",
         base + Duration::days(1),
         base + Duration::days(1),
     );
     assert_anchor(
         "今晚加班",
-        "short",
         base + Duration::days(1),
         base + Duration::days(1),
     );
     assert_anchor(
         "对方今天去医院",
-        "short",
         base + Duration::days(1),
         base + Duration::days(1),
     );
@@ -57,13 +53,11 @@ fn tomorrow_anchors_expire_after_tomorrow() {
     let base = base_today();
     assert_anchor(
         "对方明天要见面",
-        "intent",
         base + Duration::days(2),
         base + Duration::days(2),
     );
     assert_anchor(
         "明晚有个聚会",
-        "intent",
         base + Duration::days(2),
         base + Duration::days(2),
     );
@@ -74,7 +68,6 @@ fn day_after_expire_after_day_after() {
     let base = base_today();
     assert_anchor(
         "后天答辩",
-        "intent",
         base + Duration::days(3),
         base + Duration::days(3),
     );
@@ -85,25 +78,21 @@ fn weekend_this_week_next_week_next_month() {
     let base = base_today();
     assert_anchor(
         "对方周末要回老家",
-        "intent",
         base + Duration::days(4),
         base + Duration::days(4),
     );
     assert_anchor(
         "这周要交周报",
-        "intent",
         base + Duration::days(8),
         base + Duration::days(8),
     );
     assert_anchor(
         "对方下周要考试",
-        "intent",
         base + Duration::days(10),
         base + Duration::days(10),
     );
     assert_anchor(
         "下个月出差",
-        "intent",
         base + Duration::days(40),
         base + Duration::days(40),
     );
@@ -113,22 +102,19 @@ fn weekend_this_week_next_week_next_month() {
 fn numeric_horizons_are_resolved() {
     let now = Utc::now();
     let base = base_today();
-    assert_anchor("对方 2 小时后下班", "short", now, now + Duration::hours(2));
+    assert_anchor("对方 2 小时后下班", now, now + Duration::hours(2));
     assert_anchor(
         "三天后见面",
-        "intent",
         base + Duration::days(4),
         base + Duration::days(4),
     );
     assert_anchor(
         "对方两周后考试",
-        "intent",
         base + Duration::days(15),
         base + Duration::days(15),
     );
     assert_anchor(
         "一个月后体检",
-        "intent",
         base + Duration::days(31),
         base + Duration::days(31),
     );

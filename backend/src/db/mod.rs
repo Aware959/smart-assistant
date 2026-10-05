@@ -1,8 +1,6 @@
 pub mod channel;
-pub mod intent;
 pub mod memory;
 pub mod message;
-pub mod relations;
 pub mod self_profile;
 pub mod session;
 
@@ -10,7 +8,9 @@ mod meta;
 mod schema;
 mod vec;
 
-pub use vec::{ensure_vec_extension, inspect_vec, rebuild_vector_table, VecStatus};
+pub use vec::VecStatus;
+
+use vec::{inspect_vec, rebuild_vector_table};
 
 use rusqlite::Connection;
 

@@ -16,8 +16,10 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 
-use super::{ConversationSession, MessageTurn, StoredMessage};
+use crate::core::intent::{filter, IntentCandidate};
 use crate::db::message::Message as DbMessage;
+
+use super::{ConversationSession, MessageTurn, StoredMessage};
 use crate::db::{lock_db, Database};
 use crate::error::Result;
 
@@ -276,6 +278,16 @@ impl Sessions {
     }
 
     // ---------- 通道映射（原 SessionMap 端口） ----------
+
+    /// 主动开口候选（静默足够久、且距上次 assistant 发言已过间隔门槛）。
+    ///
+    /// 时间账本直接由 `messages` 派生，不再有独立状态表：候选人从 `channel_sessions`
+    /// 取（有会话映射即候选），静默起点取该会话最后一条用户消息的**真实发出时刻**。
+    /// 判定规则见 [`crate::core::intent::filter::filter_eligible`]。
+    pub fn proactive_candidates(&self, now: DateTime<Utc>) -> Result<Vec<IntentCandidate>> {
+        let rows = crate::db::channel::list_proactive_rows(&lock_db(&self.db))?;
+        Ok(filter::filter_eligible(rows, now))
+    }
 
     // ---------- 拉取游标（离线积压续传） ----------
 
