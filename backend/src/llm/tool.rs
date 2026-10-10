@@ -2,8 +2,9 @@
 //!
 //! 分三类，职责完全不同：
 //!
-//! - **输出工具** [`SEND_MESSAGE`]：唯一对外出口。模型想说的话只能走这里，
-//!   调用即投递，返回给模型的确认文本不参与任何判断。
+//! - **输出工具** [`SEND_MESSAGE`] / [`SEND_DICE`] / [`SEND_STICKER`]：对外出口。
+//!   模型想让用户看到的东西只能走这三条，调用即投递，返回给模型的确认文本不参与
+//!   任何判断。三者是并列的三种形态——正文、服务端渲染的骰子、贴纸，都算"说话"。
 //! - **只读工具** [`GET_NOW`] / [`RECALL_MEMORY`]：只取上下文，不改状态。
 //!   调用结果回填给模型继续推理。
 //! - **写入工具** [`REMEMBER`]：模型主动沉淀一条长期记忆。改状态，但改的是
@@ -17,15 +18,24 @@ use genai::chat::Tool;
 
 use crate::core::memory::{MemoryKind, WriteKind};
 use crate::core::schema::message::ChatCall;
+use crate::core::sticker::StickerCatalog;
 
 /// 对外输出工具：模型调用它即向用户投递一条消息。
 pub const SEND_MESSAGE: &str = "send_message";
+/// 对外输出工具：模型调用它即向用户投递一枚动画骰子。
+pub const SEND_DICE: &str = "send_dice";
+/// 对外输出工具：模型调用它即向用户投递一张贴纸（表情包）。
+pub const SEND_STICKER: &str = "send_sticker";
 /// 只读工具：取当前本地时间。
 pub const GET_NOW: &str = "get_now";
 /// 只读工具：按改写后的 query 检索长期记忆。
 pub const RECALL_MEMORY: &str = "recall_memory";
 /// 写入工具：沉淀一条长期记忆。
 pub const REMEMBER: &str = "remember";
+
+/// Telegram `sendDice` 支持的基座 emoji（服务端渲染，无需素材）。
+/// 与 Bot API 文档一致：🎲 骰子 / 🎯 飞镖 / 🏀 篮球 / ⚽ 足球 / 🎳 保龄球 / 🎰 老虎机。
+pub const DICE_EMOJIS: [&str; 6] = ["🎲", "🎯", "🏀", "⚽", "🎳", "🎰"];
 
 /// 单条消息的长度上限（超出即拒绝，防止模型把整段话塞进一次调用）。
 pub const SEND_MESSAGE_MAX_CHARS: usize = 200;
@@ -38,6 +48,10 @@ pub const REMEMBER_MAX_CHARS: usize = 200;
 pub enum ToolOutcome {
     /// 输出工具产出的对外文本（已按上限裁剪）。
     Sent(String),
+    /// 输出工具产出的非文本片段：一枚动画骰子（`emoji` 为其基座）。
+    SentDice(String),
+    /// 输出工具产出的非文本片段：一张贴纸（其 `file_id`）。
+    SentSticker(String),
     /// 只读工具产出的回填文本。
     Filled(String),
     /// 调用非法（未知工具名 / 参数不合约），回填给模型让它自行纠正。
@@ -58,17 +72,40 @@ pub trait ToolContext {
         kind: MemoryKind,
         supersedes: Option<&str>,
     ) -> std::result::Result<WriteKind, String>;
+    /// 当前可用的贴纸选择键。空 = 没有贴纸能力，`send_sticker` 不该被下发。
+    ///
+    /// 默认空实现：没有贴纸的宿主（测试桩、未拉过目录）不必实现它。
+    fn sticker_keys(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// 选择键取 `file_id`。键不存在或无目录时返回 `None`，由调用方回填可选项。
+    fn sticker_file_id(&self, key: &str) -> Option<String> {
+        let _ = key;
+        None
+    }
 }
 
 /// 全部工具的 schema 定义。每次请求都带上，不做动态裁剪——
-/// 四个工具的描述都很短，条件裁剪省下的 token 不值得换来"模型不知道工具存在"的风险。
-pub fn definitions() -> Vec<Tool> {
-    vec![
-        send_message_tool(),
-        get_now_tool(),
-        recall_memory_tool(),
-        remember_tool(),
-    ]
+/// 各工具的描述都很短，条件裁剪省下的 token 不值得换来"模型不知道工具存在"的风险。
+///
+/// **唯一例外是 `send_sticker`**：它的参数枚举就是贴纸目录里的键，没拉过目录时
+/// 无从声明；此时整个工具不下发，模型也就不会去调一个必然失败的调用。
+pub fn definitions(stickers: &StickerCatalog) -> Vec<Tool> {
+    let mut defs = vec![send_message_tool(), send_dice_tool()];
+    if !stickers.is_empty() {
+        defs.push(send_sticker_tool(&stickers.keys()));
+    }
+    defs.extend([get_now_tool(), recall_memory_tool(), remember_tool()]);
+    defs
+}
+
+/// 主动开口路径的工具集：去掉 `remember`。
+///
+/// 主动路径没有新的用户输入可沉淀——`remember` 的来源消息 id 为空，写出来的记忆
+/// 会是一条无源事实，且"从自己单方面的推断里记用户的事"本就不该发生。其余三个
+/// 工具照旧：说话走 `send_message`，需要时可按需查时间、查记忆。
+pub fn proactive_definitions() -> Vec<Tool> {
+    vec![send_message_tool(), get_now_tool(), recall_memory_tool()]
 }
 
 fn send_message_tool() -> Tool {
@@ -87,6 +124,53 @@ fn send_message_tool() -> Tool {
                 }
             },
             "required": ["text"],
+            "additionalProperties": false
+        }))
+}
+
+fn send_dice_tool() -> Tool {
+    Tool::new(SEND_DICE)
+        .with_description(
+            "向用户发一枚动画骰子（Telegram 会播放动画，带随机点数）。\
+             用在轻松、想逗一下或打赌的场景，是调节气氛的小动作，偶尔用一次就好，别频繁发。\
+             emoji 决定动画形象：🎲骰子 / 🎯飞镖 / 🏀篮球 / ⚽足球 / 🎳保龄球 / 🎰老虎机，缺省是 🎲。",
+        )
+        .with_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "emoji": {
+                    "type": "string",
+                    "enum": DICE_EMOJIS,
+                    "description": "骰子基座 emoji，只能是 🎲🎯🏀⚽🎳🎰 之一，缺省 🎲"
+                }
+            },
+            "required": [],
+            "additionalProperties": false
+        }))
+}
+
+/// 贴纸工具。`keys` 就是当前目录里的全部选择键，同时进描述与参数 `enum`——
+/// 模型看到的可选项和 dispatch 认的可选项必须是同一份，两处各写一份必然走样。
+fn send_sticker_tool(keys: &[String]) -> Tool {
+    Tool::new(SEND_STICKER)
+        .with_description(format!(
+            "发一张表情包贴纸给用户——这是你表达情绪最顺手的办法，很多时候一张图比一句话更贴切。\
+             只要对方的话带出一丁点情绪（开心、害羞、撒娇、委屈、生气、无语、被逗到），就顺手发一张；\
+             正常的聊天里你几乎每隔一两轮就会发一张，别老是只用文字。\
+             key 只能从下面列出的键里选，别的值发不出去：{}。\
+             一次回复顶多发一张，别连着刷屏。",
+            keys.join(" ")
+        ))
+        .with_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "enum": keys,
+                    "description": "贴纸的选择键，只能是上面列出的键之一"
+                }
+            },
+            "required": ["key"],
             "additionalProperties": false
         }))
 }
@@ -201,6 +285,42 @@ pub fn dispatch(call: &ChatCall, ctx: &dyn ToolContext) -> ToolOutcome {
             }
             None => ToolOutcome::Rejected("缺少参数 text".to_string()),
         },
+        SEND_DICE => {
+            // emoji 缺省为 🎲；显式给了就按白名单校验——Telegram 只认这六个，
+            // 传别的会在服务端报错，不如在这里拒绝并让模型改。
+            let emoji = call
+                .arg_str("emoji")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DICE_EMOJIS[0]);
+            if DICE_EMOJIS.contains(&emoji) {
+                ToolOutcome::SentDice(emoji.to_string())
+            } else {
+                ToolOutcome::Rejected(format!(
+                    "不支持的 emoji「{emoji}」，只能是 {} 之一",
+                    DICE_EMOJIS.join(" ")
+                ))
+            }
+        }
+        SEND_STICKER => {
+            // 键是模型可枚举的有限集合，非法键必须在这里挡下并把可选项回填，
+            // 让它一次就能改对，而不是拿 file_id 去 Telegram 撞一次服务端错误。
+            let Some(key) = call.arg_str("key").map(str::trim).filter(|s| !s.is_empty()) else {
+                return ToolOutcome::Rejected("缺少参数 key".to_string());
+            };
+            match ctx.sticker_file_id(key) {
+                Some(file_id) => ToolOutcome::SentSticker(file_id),
+                None => {
+                    let keys = ctx.sticker_keys();
+                    let hint = if keys.is_empty() {
+                        "当前没有可用贴纸".to_string()
+                    } else {
+                        keys.join(" ")
+                    };
+                    ToolOutcome::Rejected(format!("没有「{key}」这张贴纸，可用的 key：{hint}"))
+                }
+            }
+        }
         GET_NOW => ToolOutcome::Filled(ctx.now()),
         RECALL_MEMORY => match call.arg_str("query") {
             Some(q) if !q.trim().is_empty() => ToolOutcome::Filled(ctx.recall(q.trim())),
@@ -254,6 +374,15 @@ fn parse_kind(raw: Option<&str>) -> Option<MemoryKind> {
 ///
 /// 刻意极短：这段文本会进入下一轮 prompt，啰嗦会被模型模仿成对用户的废话。
 pub const SEND_MESSAGE_ACK: &str = "已发送";
+
+/// `send_dice` 成功投递后回填给模型的确认文本。与 [`SEND_MESSAGE_ACK`] 同样极短。
+pub const SEND_DICE_ACK: &str = "已发送";
+
+/// `send_sticker` 成功投递后回填给模型的确认文本。
+///
+/// 刻意不带上是哪张贴纸：键本身已在模型的这次调用里，回填一遍只会让它接着
+/// 向用户解释"我刚发了一张 XX"。
+pub const SEND_STICKER_ACK: &str = "已发送";
 
 /// `remember` 新增一条记忆后的回填文本。同样极短，且不复述内容——
 /// 让模型把自己的话再抄一遍进下一轮 prompt，只会诱发它接着解释"我记住了…"。

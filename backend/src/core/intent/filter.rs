@@ -3,7 +3,8 @@
 //! 本模块只保留领域规则——过滤逻辑与候选映射；SQL 层
 //! （[`crate::db::channel::list_proactive_rows`]）只负责按消息时间线取行，不做业务判断。
 //!
-//! 规则全是机械门槛，不写进提示词：是否开口由 LLM 结合对话自行判断（见 [`crate::core::intent::speak`]）。
+//! 规则全是机械门槛，不写进提示词：是否开口由 LLM 结合对话自行判断
+//! （见 [`crate::core::agent::Agent::proactive_stream`]）。
 
 use chrono::{DateTime, Duration, Utc};
 

@@ -52,6 +52,7 @@ cargo run --bin sa-link         # 通道守护（Telegram 长轮询 + 主动开�
 cargo run --bin sa-cli [-- "一句话"]
 cargo run --bin sa-mem -- check          # 巡检向量签名（只读）
 cargo run --bin sa-mem -- rebuild [--force]  # 重建向量表
+cargo run --bin sa-sticker -- fetch <包名>    # 拉取 Telegram 贴纸包生成表情包目录（写 sticker_catalog.json）
 ```
 
 以下命令属于非主线的 Web / iLink 端，主线开发期间不要用来做验证：

@@ -20,6 +20,9 @@
 /backend/ilink_session.json
 /backend/logs
 
+# 贴纸目录（file_id 为当前 bot 专属，换 bot 即失效，属本地缓存）
+/backend/sticker_catalog.json
+
 # 编辑器
 .vscode/
 .idea/

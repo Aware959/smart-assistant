@@ -31,7 +31,7 @@ use chrono::{DateTime, Utc};
 use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::session::{classify_inbound, InboundFreshness, Sessions};
-use crate::{ChatInput, ChatOutput};
+use crate::{ChatInput, ChatOutput, Reply};
 
 const CHANNEL: &str = "ilink";
 pub(crate) const DEFAULT_BASE: &str = "https://ilinkai.weixin.qq.com";
@@ -71,6 +71,7 @@ fn plain_reply(reply: &str) -> ChatOutput {
         session_id: String::new(),
         reply: reply.to_string(),
         messages: vec![reply.to_string()],
+        rich: vec![Reply::Text(reply.to_string())],
         user_message_id: String::new(),
         memory: None,
     }

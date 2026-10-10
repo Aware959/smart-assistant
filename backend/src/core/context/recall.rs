@@ -16,15 +16,6 @@ pub(crate) fn fetch(memory: &Store, query: &str, limit: usize) -> Result<Vec<Mem
     memory.search(query, limit)
 }
 
-/// 渲染成纯内容多行文本（主动决策阅读用，不带列表前缀、不带 id）。
-pub(crate) fn plain_lines(memory_hits: &[MemoryHit]) -> String {
-    memory_hits
-        .iter()
-        .map(|hit| hit.content.clone())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// 渲染成带 id 的多行文本（`recall_memory` 工具回填用）。
 ///
 /// **必须带 id**：`remember` 的 `supersedes` 要指向被取代的那条，模型唯一的

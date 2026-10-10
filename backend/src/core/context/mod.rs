@@ -13,8 +13,10 @@ pub(crate) mod prompt;
 pub(crate) mod recall;
 
 pub(crate) use history::{fetch as fetch_history, USER_OFFSET_MINUTES};
-pub(crate) use prompt::{persona_block, system_prompt};
-pub(crate) use recall::{fetch as fetch_recall, id_lines, plain_lines, RECALL_LIMIT};
+pub(crate) use prompt::{
+    local_time_text, proactive_system_prompt, proactive_user_prompt, system_prompt,
+};
+pub(crate) use recall::{fetch as fetch_recall, id_lines, RECALL_LIMIT};
 
 use crate::core::memory::MemoryHit;
 use crate::core::schema::message::ChatMessage;

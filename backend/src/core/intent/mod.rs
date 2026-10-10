@@ -1,14 +1,16 @@
 //! 意图判定引擎：由 AI 侧决定"此刻是否开口 / 是否续话"，像真人一样不规律地主动联系。
 //!
 //! 频率控制（随机间隔 + 安静时段 + 静默/流失/最近 assistant 间隔门槛）：见 [`pace`] 与
-//! [`filter`]；开口决策（LLM）：见 [`speak`]；通道派发：见 [`sender`]。
+//! [`filter`]；开口决策（走与对话同一套工具循环，见 [`crate::core::agent::Agent::proactive_stream`]）；
+//! 通道派发：见 [`sender`]。
 //!
 //! 候选状态不落独立状态表：直接从 `channel_sessions` + `messages` 时间线派生
 //! （见 [`crate::db::channel::list_proactive_rows`]），因此进程重启也不会丢状态。
 //!
-//! **不再有 continuation 模块**：对话里的"多回几句"改由模型自己在一次响应里并行
-//! 调用多个 `send_message` 决定（见 [`crate::llm::tool`] 与 [`crate::core::agent`]），
-//! 不再由后置状态机在回复送达后追加。主动开口能力不受影响，仍在 [`speak`]。
+//! **开口决策不再是一次性的 JSON 判定**：过去用一次 `complete` 让模型吐出
+//! "说不说 + 说什么"，固定召回几条记忆、也拿不到当前时间。现在改为复用对话的
+//! 工具循环——模型能按需 `recall_memory`、能调 `get_now`，提示词里也直接注入了当前
+//! 时间与最后一次互动时刻；默认沉默靠主动路径的专属提示词约束。
 //!
 //! 与通道的关系：Telegram 长连通后可随时推送；iLink 依赖用户最近入站刷新的
 //! `context_token`（窗口约束见 [`crate::channels`]），窗口内不可推的用户在决策前
@@ -17,7 +19,6 @@
 pub mod filter;
 pub mod pace;
 pub mod sender;
-pub mod speak;
 
 use std::sync::Arc;
 
@@ -59,12 +60,12 @@ pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, pusher: Arc<ChannelsP
         let idle = pace::next_sleep();
         tracing::debug!(next_in_secs = idle.as_secs(), "等待下一轮意图判定");
         tokio::time::sleep(idle).await;
-        run_once(chat.as_ref(), session.as_ref(), pusher.as_ref()).await;
+        run_once(chat.clone(), session.as_ref(), pusher.as_ref()).await;
     }
 }
 
 /// 单轮评估：筛出可开口的候选，逐个询问 LLM 是否开口，至多说出一条。
-async fn run_once(chat: &Agent, session: &Sessions, pusher: &ChannelsPusher) {
+async fn run_once(chat: Arc<Agent>, session: &Sessions, pusher: &ChannelsPusher) {
     let round_start = std::time::Instant::now();
     // 竞态兜底：等待期间可能恰好跨入安静时段。
     if pace::in_quiet_hours(chrono::Local::now()) {
@@ -97,76 +98,64 @@ async fn run_once(chat: &Agent, session: &Sessions, pusher: &ChannelsPusher) {
         if !sender::pushable(pusher, cand) {
             continue;
         }
-        let Some(text) = propose(chat, cand).await else {
+        let messages = propose(chat.clone(), cand).await;
+        if messages.is_empty() {
             continue;
-        };
+        }
         tracing::info!(user = %cand.external_id, elapsed_ms = round_start.elapsed().as_millis() as u64, "意图判定：决策开口，准备派发");
-        sender::dispatch(session, pusher, cand, &text).await;
+        sender::dispatch(pusher, cand, &messages).await;
         tracing::info!(user = %cand.external_id, elapsed_ms = round_start.elapsed().as_millis() as u64, "意图判定：派发完成");
         return;
     }
 }
 
-/// 先组装上下文，再问 LLM 要不要开口；返回待发送的内容（不开口则为 None）。
-async fn propose(chat: &Agent, cand: &IntentCandidate) -> Option<String> {
+/// 走对话同一套工具循环做开口决策：返回待发送的消息（决定不开口则为空）。
+///
+/// 上下文（最近历史 / 当前时间 / 最后互动时刻）由 [`Agent::proactive_stream`] 内部
+/// 组装；记忆不再预召回，改由模型按需调 `recall_memory`。
+async fn propose(chat: Arc<Agent>, cand: &IntentCandidate) -> Vec<String> {
     let trace_id = crate::utils::trace::new_id();
     let step_start = std::time::Instant::now();
-    // 上下文片段统一经主线 Agent 方法获取（组装逻辑在 core::context，内部各自持锁、用完即释放）。
-    // 切勿在持锁守卫期间调用这些方法——它们会再锁同一把非重入的
-    // std Mutex，意图引擎整个挂死，进而拖垮全进程。
-    let recent = chat.recent_history_text(&cand.session_id, 8);
-    let rec = {
-        // 没有"当前消息"，用最近对话文本的前 200 字符做召回 query。
-        let query = recent.chars().take(200).collect::<String>();
-        if query.trim().is_empty() {
-            String::new()
-        } else {
-            chat.recall_text(&query, 3)
-        }
-    };
-    tracing::info!(
-        user = %cand.external_id,
-        elapsed_ms = step_start.elapsed().as_millis() as u64,
-        rec_chars = rec.chars().count(),
-        "意图判定：上下文组装完成（recent/recall）"
-    );
     tracing::info!(
         target: "trace",
         stage = "intent_context",
         trace_id = %trace_id,
         user = %cand.external_id,
         session_id = %cand.session_id,
-        recent = %crate::utils::trace::Text(&recent),
-        recalled = %crate::utils::trace::Text(&rec),
-        "意图判定：上下文组装完成"
+        "意图判定：开始决策"
     );
 
     // LLM 调用是同步阻塞的（genai 全局 runtime），挪到阻塞线程池避免卡住异步任务。
-    let llm = chat.chat_llm();
-    let profile = chat.profile_block();
-    let decision =
-        tokio::task::spawn_blocking(move || speak::decide(&llm, &profile, &recent, &rec))
-            .await
-            .unwrap_or_default();
+    let session_id = cand.session_id.clone();
+    let now = chrono::Utc::now();
+    let last_user = cand.last_user_reply_at;
+    let last_assistant = cand.last_assistant_at;
+    let messages = tokio::task::spawn_blocking(move || {
+        chat.proactive_stream(&session_id, now, last_user, last_assistant, |_| {})
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "主动决策任务 join 失败，本轮不开口");
+        Ok(Vec::new())
+    })
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "主动决策调用失败，本轮不开口");
+        Vec::new()
+    });
 
     tracing::info!(
         target: "trace",
         stage = "intent_decision",
         trace_id = %trace_id,
         user = %cand.external_id,
-        speak = decision.speak,
-        reason = decision.reason.as_deref().unwrap_or(""),
-        message = %crate::utils::trace::Text(decision.message.as_deref().unwrap_or("")),
+        messages = messages.len(),
         "意图判定：决策完成"
     );
-
-    if !decision.speak {
-        if let Some(reason) = &decision.reason {
-            tracing::debug!(user = %cand.external_id, reason, "LLM 判断本轮不开口");
-        }
-        tracing::info!(user = %cand.external_id, elapsed_ms = step_start.elapsed().as_millis() as u64, "意图判定：决策完成（不开口）");
-        return None;
-    }
-    tracing::info!(user = %cand.external_id, elapsed_ms = step_start.elapsed().as_millis() as u64, "意图判定：决策完成（开口）");
-    decision.message
+    tracing::info!(
+        user = %cand.external_id,
+        elapsed_ms = step_start.elapsed().as_millis() as u64,
+        messages = messages.len(),
+        "意图判定：决策完成"
+    );
+    messages
 }

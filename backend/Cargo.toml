@@ -30,6 +30,12 @@ path = "src/bin/sa-cli.rs"
 name = "sa-mem"
 path = "src/bin/sa-mem.rs"
 
+# 贴纸目录维护工具：拉取公开贴纸包生成选择键 → file_id（依赖 telegram）
+[[bin]]
+name = "sa-sticker"
+path = "src/bin/sa-sticker.rs"
+required-features = ["telegram"]
+
 [dependencies]
 # SQLite
 rusqlite = { version = "0.37", features = ["bundled", "vtab", "backup"] }

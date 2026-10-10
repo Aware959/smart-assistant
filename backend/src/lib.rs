@@ -26,7 +26,7 @@ pub mod utils;
 #[cfg(feature = "desktop")]
 pub mod api;
 
-pub use crate::core::agent::{Agent, ChatInput, ChatOutput};
+pub use crate::core::agent::{Agent, ChatInput, ChatOutput, Reply};
 pub use crate::core::app::App;
 pub use crate::core::intent::IntentCandidate;
 pub use crate::core::memory::{MemoryHit, MemoryRecord};

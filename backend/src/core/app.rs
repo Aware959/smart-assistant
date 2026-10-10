@@ -39,11 +39,22 @@ impl App {
         let llm = Arc::new(crate::llm::chat::Llm);
         let memory = Arc::new(crate::core::memory::Store::new(db.clone()));
         let profile = Arc::new(crate::core::self_profile::Profile::new(db));
+        // 贴纸目录是文件不是状态：装配时读一次，之后 `sa-sticker fetch` 拉的新目录
+        // 要重启进程才生效。文件不存在 = 没拉过 = 贴纸能力关闭，不是错误。
+        let stickers = crate::core::sticker::StickerCatalog::load_default();
+        if !stickers.is_empty() {
+            tracing::info!(
+                set = %stickers.set,
+                n = stickers.stickers.len(),
+                "贴纸目录已加载"
+            );
+        }
         let chat = Arc::new(crate::core::agent::Agent::new(
             session.clone(),
             llm,
             memory,
             profile,
+            stickers,
         ));
         Ok(Self { chat, session })
     }

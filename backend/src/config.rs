@@ -64,6 +64,9 @@ pub struct Config {
     pub telegram_allowed_ids: Vec<i64>,
     /// Telegram API 代理（如 http://127.0.0.1:7890）。留空则依次尝试 HTTPS_PROXY / ALL_PROXY。
     pub telegram_proxy: Option<String>,
+    /// 贴纸（表情包）目录 JSON 文件：模型可见的选择键 → Telegram `file_id`。
+    /// 由 `sa-sticker fetch` 生成；文件不存在即视为"没有贴纸能力"。
+    pub sticker_catalog_file: String,
     /// 启用微信 iLink 通道（硬开关）：`1` 才连接（有 token 直连，无 token 则扫码登录）；`0`/缺省不启动。
     pub ilink_enabled: bool,
     /// 微信 iLink bot_token（扫码后自动写入会话文件；也可手动设置跳过扫码）。
@@ -115,6 +118,7 @@ impl Default for Config {
             telegram_enabled: true,
             telegram_allowed_ids: Vec::new(),
             telegram_proxy: None,
+            sticker_catalog_file: "sticker_catalog.json".to_string(),
             ilink_enabled: false,
             ilink_bot_token: String::new(),
             ilink_session_file: "ilink_session.json".to_string(),
@@ -181,6 +185,8 @@ impl Config {
                 })
                 .unwrap_or_default(),
             telegram_proxy: std::env::var("TELEGRAM_PROXY").ok(),
+            sticker_catalog_file: std::env::var("STICKER_CATALOG_FILE")
+                .unwrap_or_else(|_| "sticker_catalog.json".to_string()),
             ilink_enabled: std::env::var("ILINK_ENABLED")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),

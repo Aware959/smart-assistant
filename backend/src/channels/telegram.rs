@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::session::{classify_inbound, InboundFreshness, Sessions};
-use crate::{ChatInput, ChatOutput};
+use crate::{ChatInput, ChatOutput, Reply};
 
 const CHANNEL: &str = "telegram";
 /// Telegram 单条消息文本上限（字符）。
@@ -44,15 +44,45 @@ struct Update {
 struct TgMessage {
     #[serde(default)]
     text: Option<String>,
+    /// 贴纸消息：没有 `text`，内容在这一段里。目前只取 `emoji` 作可读标签。
+    #[serde(default)]
+    sticker: Option<TgSticker>,
     chat: TgChat,
     /// 消息发出时刻（Unix 秒，服务端收到即记），等于用户按下发送的世界时刻。
     #[serde(default)]
     date: Option<i64>,
 }
 
+/// 入站贴纸（只取生成可读文本用得上的字段）。
+#[derive(Debug, Deserialize)]
+struct TgSticker {
+    #[serde(default)]
+    emoji: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct TgChat {
     id: i64,
+}
+
+/// `getStickerSet` 返回的贴纸包（只要生成目录用得上的几个字段）。
+#[derive(Debug, Deserialize)]
+struct StickerSet {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    stickers: Vec<StickerItem>,
+}
+
+/// 贴纸包里的一张贴纸。`emoji` 是 Telegram 给的标签，这里被当作模型的选择键。
+#[derive(Debug, Deserialize)]
+struct StickerItem {
+    #[serde(default)]
+    file_id: String,
+    #[serde(default)]
+    emoji: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -188,6 +218,95 @@ async fn send_text(
     Ok(())
 }
 
+/// 发一次「一个动作 + 一枚 JSON 载荷」的请求（`sendDice` / `sendSticker` …）。
+///
+/// 这类请求除了端点与载荷，重试与错误分类完全同构，故收在一处：传输层错误、
+/// 429 限流、5xx、响应被截断退避重投，4xx 与 `ok:false` 属确定性拒绝立即放弃。
+async fn send_action(
+    client: &reqwest::Client,
+    what: &str,
+    url: &str,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    with_send_retry(&format!("telegram/{what}"), SEND_RETRY, |_| async move {
+        let resp = client
+            .post(url)
+            .timeout(Duration::from_secs(30))
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| SendErr::Retryable {
+                reason: format!("发送 {what} 失败: {e}"),
+                retry_after: None,
+            })?;
+
+        let status = resp.status();
+        let body = match resp.json::<SendResponse>().await {
+            Ok(b) => b,
+            Err(e) if status.is_success() => {
+                return Err(SendErr::Retryable {
+                    reason: format!("解析响应失败: {e}"),
+                    retry_after: None,
+                });
+            }
+            Err(_) => SendResponse::default(),
+        };
+
+        if !status.is_success() || !body.ok {
+            let reason = body
+                .description
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or_else(|| status.to_string());
+            if status_retryable(status.as_u16()) {
+                return Err(SendErr::Retryable {
+                    reason: format!("服务端 {status}: {reason}"),
+                    // 限流按服务端给的秒数等，别把余下几次重投全耗在 429 上。
+                    retry_after: body
+                        .parameters
+                        .and_then(|p| p.retry_after)
+                        .map(Duration::from_secs),
+                });
+            }
+            return Err(SendErr::Fatal(format!("发送被拒绝({status}): {reason}")));
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// 发一枚动画骰子（Telegram 服务端渲染，无素材上传）。
+async fn send_dice(
+    client: &reqwest::Client,
+    base: &str,
+    chat_id: i64,
+    emoji: &str,
+) -> Result<(), String> {
+    send_action(
+        client,
+        "sendDice",
+        &format!("{base}/sendDice"),
+        &serde_json::json!({ "chat_id": chat_id, "emoji": emoji }),
+    )
+    .await
+}
+
+/// 发一张贴纸。`file_id` 来自 [`crate::core::sticker::StickerCatalog`]，
+/// 只在当前 bot 有效——目录过期（换 bot / 包被删）由服务端拒绝，这里如实上抛。
+async fn send_sticker(
+    client: &reqwest::Client,
+    base: &str,
+    chat_id: i64,
+    file_id: &str,
+) -> Result<(), String> {
+    send_action(
+        client,
+        "sendSticker",
+        &format!("{base}/sendSticker"),
+        &serde_json::json!({ "chat_id": chat_id, "sticker": file_id }),
+    )
+    .await
+}
+
 async fn send_typing(client: &reqwest::Client, base: &str, chat_id: i64) {
     let _ = client
         .post(format!("{base}/sendChatAction"))
@@ -207,6 +326,70 @@ pub(crate) async fn push_send(chat_id: i64, text: &str) -> Result<(), String> {
     send_text(&client, &api_base(&token), chat_id, text).await
 }
 
+/// 贴纸包名做 query 编码。Telegram 的名字实际只含 `[A-Za-z0-9_-]`，
+/// 这里仍然逐字节编码，免得一个意外字符把请求打成 400 且看不出原因。
+fn encode_set_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for b in name.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 拉取一个公开贴纸包，生成**当前 bot 可用**的贴纸目录。
+///
+/// 这是 `sa-sticker fetch` 的网络侧。`file_id` 是 bot 专属的——同一张贴纸换个
+/// bot 就发不出去——所以目录只能由当前 bot 现场拉，不能从别处拷一份静态数据来用。
+pub async fn fetch_sticker_set(name: &str) -> Result<crate::core::sticker::StickerCatalog, String> {
+    let token = Config::get().telegram_bot_token.trim().to_string();
+    if token.is_empty() {
+        return Err("未配置 TELEGRAM_BOT_TOKEN，无法拉取贴纸包".to_string());
+    }
+    let client = build_client()?;
+    let base = api_base(&token);
+    let resp: ApiResponse<StickerSet> = api_get(
+        &client,
+        &format!("{base}/getStickerSet?name={}", encode_set_name(name)),
+    )
+    .await?;
+    if !resp.ok {
+        return Err(format!(
+            "getStickerSet 失败：{}",
+            resp.description.unwrap_or_default()
+        ));
+    }
+    let set = resp
+        .result
+        .ok_or_else(|| "getStickerSet 未返回贴纸包".to_string())?;
+    let StickerSet {
+        name: set_name,
+        title,
+        stickers,
+    } = set;
+    let pairs: Vec<(String, String)> = stickers
+        .into_iter()
+        .filter(|s| !s.file_id.is_empty())
+        .map(|s| (s.emoji.unwrap_or_default(), s.file_id))
+        .collect();
+    if pairs.is_empty() {
+        return Err(format!("贴纸包 {name} 里没有取到任何贴纸"));
+    }
+    // 服务端给的 name 是权威值；拿不到就退回入参，总得有个 set 字段可读。
+    let set_name = if set_name.trim().is_empty() {
+        name.to_string()
+    } else {
+        set_name
+    };
+    Ok(crate::core::sticker::StickerCatalog::from_set(
+        &set_name,
+        title.trim(),
+        &pairs,
+    ))
+}
+
 /// 用户发来消息时解析/确认会话映射。
 ///
 /// 主动开口的静默窗口不再由状态表维护——它直接取 `messages` 里最后一条用户消息的
@@ -214,6 +397,31 @@ pub(crate) async fn push_send(chat_id: i64, text: &str) -> Result<(), String> {
 fn touch_user_reply(session: &Sessions, external_id: &str, _sent_at: Option<DateTime<Utc>>) {
     if let Err(e) = session.resolve(CHANNEL, external_id) {
         tracing::warn!(error = %e, "解析会话映射失败");
+    }
+}
+
+/// 从一条入站消息里取出交给模型的文本。
+///
+/// Telegram 把非文本消息放进各自的字段（`sticker` / `photo` / `voice` …），没有
+/// `text`。目前只认**贴纸**：转成一句可读的占位描述，让模型知道"对方发来一张
+/// 表情包"，而不是整条被丢掉。其余非文本类型暂不处理——返回 None 即忽略。
+/// 这跟出站侧 [`Reply::Sticker`] 的投影是对称的。
+fn inbound_text(message: &TgMessage) -> Option<String> {
+    if let Some(text) = message.text.as_deref() {
+        if !text.trim().is_empty() {
+            return Some(text.to_string());
+        }
+    }
+    let emoji = message
+        .sticker
+        .as_ref()
+        .and_then(|s| s.emoji.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match emoji {
+        Some(e) => Some(format!("[对方发来一张表情包 {e}]")),
+        None if message.sticker.is_some() => Some("[对方发来一张表情包]".to_string()),
+        None => None,
     }
 }
 
@@ -226,6 +434,7 @@ fn plain_reply(reply: &str) -> ChatOutput {
         session_id: String::new(),
         reply: reply.to_string(),
         messages: vec![reply.to_string()],
+        rich: vec![Reply::Text(reply.to_string())],
         user_message_id: String::new(),
         memory: None,
     }
@@ -273,11 +482,16 @@ async fn handle_text(
             .await
             .map_err(|e| format!("对话任务失败: {e}"))??;
             // 模型可能整轮只调只读工具、没说任何话；`reply` 已被拼成空串。
-            // 逐条发送用 `messages`，两者必须同步兜底，否则会出现"发了 (空回复)"
+            // 逐条发送用 `rich`，文本投影 `messages` 同步兜底，否则会出现"发了 (空回复)"
             // 而 `reply` 还是空的不一致状态。
-            if out.messages.iter().all(|m| m.trim().is_empty()) {
-                out.messages = vec![FALLBACK_REPLY.to_string()];
+            if out
+                .rich
+                .iter()
+                .all(|r| r.projection().trim().is_empty())
+            {
+                out.rich = vec![Reply::Text(FALLBACK_REPLY.to_string())];
             }
+            out.messages = out.rich.iter().map(Reply::projection).collect();
             out.reply = out.messages.join("\n");
             Ok(Some(out))
         }
@@ -392,10 +606,9 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                 tracing::info!(chat_id, "未在白名单，忽略");
                 continue;
             }
-            let Some(text) = message.text else { continue };
-            if text.trim().is_empty() {
+            let Some(text) = inbound_text(&message) else {
                 continue;
-            }
+            };
             let user_time = super::ts_to_rfc3339(message.date);
             let sent_at = user_time.as_deref().and_then(|s| {
                 DateTime::parse_from_rfc3339(s)
@@ -448,12 +661,12 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                         memory_written = out.memory.is_some(),
                         "handle_text 返回（回复生产阶段完成）"
                     );
-                    (out.messages, false)
+                    (out.rich, false)
                 }
                 Ok(Ok(None)) => continue,
                 Ok(Err(e)) => {
                     tracing::error!(error = %e, "对话失败");
-                    (vec![FALLBACK_REPLY.to_string()], true)
+                    (vec![Reply::Text(FALLBACK_REPLY.to_string())], true)
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -461,19 +674,26 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                         deadline_secs = super::AI_DEADLINE_SECS,
                         "单轮对话超时，放弃本轮，继续轮询"
                     );
-                    (vec![FALLBACK_REPLY.to_string()], true)
+                    (vec![Reply::Text(FALLBACK_REPLY.to_string())], true)
                 }
             };
 
             // 逐条投递：条与条之间留真人打字节奏，并在每次发送前刷新打字态
             //（工具轮不产消息时模型在想，首条之前可能已经等了很久）。
             let mut sent_any = false;
-            for (i, one) in next_messages.iter().enumerate() {
+            for (i, reply) in next_messages.iter().enumerate() {
                 if i > 0 {
                     tokio::time::sleep(super::pacing_delay(i)).await;
                 }
                 send_typing(&client, &base, chat_id).await;
-                match send_text(&client, &base, chat_id, one).await {
+                let result = match reply {
+                    Reply::Text(text) => send_text(&client, &base, chat_id, text).await,
+                    Reply::Dice { emoji } => send_dice(&client, &base, chat_id, emoji).await,
+                    Reply::Sticker { file_id } => {
+                        send_sticker(&client, &base, chat_id, file_id).await
+                    }
+                };
+                match result {
                     Ok(()) => sent_any = true,
                     Err(e) => {
                         tracing::error!(error = %e, chat_id, index = i, "回复发送失败");
@@ -493,3 +713,7 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
         }
     }
 }
+
+#[cfg(test)]
+#[path = "telegram_tests.rs"]
+mod telegram_tests;

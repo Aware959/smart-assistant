@@ -5,13 +5,12 @@
 
 use std::sync::Arc;
 
-use chrono::Datelike;
-
 use crate::core::context::{self, AgentContext};
 use crate::core::memory::{MemoryKind, MemoryRecord, Store};
 use crate::core::schema::message::ChatMessage;
 use crate::core::self_profile::Profile;
 use crate::core::session::Sessions;
+use crate::core::sticker::StickerCatalog;
 use crate::error::Result;
 use crate::llm::chat::Llm;
 
@@ -31,6 +30,44 @@ pub struct ChatInput {
     pub user_time: Option<String>,
 }
 
+/// 一条投递给用户的回复片段。
+///
+/// 文本只是其中一种形态。把"回复"建模成有序片段列表，通道才能表达骰子、贴纸
+/// 这类**非文本输出**；[`ChatOutput::messages`] 仍是它的纯文本投影，供只需文本的
+/// 宿主（CLI、Web、iLink）使用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    /// 一条文本消息。
+    Text(String),
+    /// 一枚 Telegram 动画骰子（服务端渲染，无需素材）。`emoji` 为基座 emoji。
+    Dice { emoji: String },
+    /// 一张贴纸（表情包）。`file_id` 来自 [`crate::core::sticker::StickerCatalog`]，
+    /// 选择键不进片段——键可能被手改，历史里留键反而会在重拉目录后指向别的图。
+    Sticker { file_id: String },
+}
+
+impl Reply {
+    /// 纯文本投影：文本原样，非文本给一个人类与模型都能读懂的占位描述。
+    ///
+    /// 用于历史入库与 [`ChatOutput::messages`] / [`ChatOutput::reply`]——
+    /// 让不识别非文本的宿主与后续轮次的模型至少知道"这里发生过什么"。
+    pub fn projection(&self) -> String {
+        match self {
+            Reply::Text(text) => text.clone(),
+            Reply::Dice { emoji } => format!("[发了骰子 {emoji}]"),
+            Reply::Sticker { .. } => "[发了一个表情包]".to_string(),
+        }
+    }
+
+    /// 若为文本片段则返回其内容。
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Reply::Text(text) => Some(text),
+            Reply::Dice { .. } | Reply::Sticker { .. } => None,
+        }
+    }
+}
+
 /// 对话输出：一轮对话的结果（会话 / 回复 / 来源消息 / 本轮写入的记忆）。
 #[derive(Debug, Clone)]
 pub struct ChatOutput {
@@ -41,7 +78,13 @@ pub struct ChatOutput {
     ///
     /// 通道必须按这个列表逐条发送——把 `reply` 整段发出去等于退回单条长回复，
     /// 整个"一句一句回"就白改了。`reply` 只是它的便捷视图。
+    /// 这是 [`Self::rich`] 的**纯文本投影**，不识别非文本的宿主用它即可。
     pub messages: Vec<String>,
+    /// 本轮投递的**有序原始片段**（含文本与非文本），顺序即投递顺序。
+    ///
+    /// 能表达非文本输出的通道（Telegram）按这个列表投递；`messages` 是它的
+    /// 文本投影。两者长度可能不同（一个骰子不是一条文本消息）。
+    pub rich: Vec<Reply>,
     /// 本条用户消息的 id（记忆的来源消息 id 即指向它）。
     pub user_message_id: String,
     /// 本轮写入的记忆，取**最后一条**。
@@ -58,45 +101,36 @@ pub struct Agent {
     llm: Arc<Llm>,
     memory: Arc<Store>,
     profile: Arc<Profile>,
+    /// 贴纸目录。装配时加载一次：拉新目录要重启进程才生效（目录是文件不是状态）。
+    stickers: StickerCatalog,
 }
 
 impl Agent {
-    /// 用具体会话适配器与两个能力组件构造内核。
+    /// 用具体会话适配器与能力组件构造内核。
     pub fn new(
         conversation: Arc<Sessions>,
         llm: Arc<Llm>,
         memory: Arc<Store>,
         profile: Arc<Profile>,
+        stickers: StickerCatalog,
     ) -> Self {
         Self {
             conversation,
             llm,
             memory,
             profile,
+            stickers,
         }
     }
 
-    /// 暴露 LLM 能力（主动陪伴等周边编排复用同一具体实现）。
-    pub(crate) fn chat_llm(&self) -> Arc<Llm> {
-        self.llm.clone()
-    }
-
-    /// 自我属性人设区块文本（主动决策 / 延续判断复用同一人设数据源）。
+    /// 自我属性人设区块文本（主动决策复用同一人设数据源）。
     pub(crate) fn profile_block(&self) -> String {
         self.profile.block()
     }
 
-    /// 最近 `limit` 条对话的渲染文本（延续判断等只需历史的场景，避免白跑一次召回）。
+    /// 最近 `limit` 条对话的渲染文本（主动决策只需历史的场景，避免白跑一次召回）。
     pub(crate) fn recent_history_text(&self, session_id: &str, limit: usize) -> String {
         context::recent_history_text(self.conversation.as_ref(), session_id, limit)
-    }
-
-    /// 记忆召回的纯文本渲染（主动决策阅读用，失败静默为空）。
-    pub(crate) fn recall_text(&self, query: &str, limit: usize) -> String {
-        match context::fetch_recall(self.memory.as_ref(), query, limit) {
-            Ok(hits) => context::plain_lines(&hits),
-            Err(_) => String::new(),
-        }
     }
 
     /// 对话主入口（工具循环 + 流式投递）。
@@ -119,7 +153,7 @@ impl Agent {
     /// 模型看得见整段对话，所以"这句话值不值得记、指的是哪件旧事"只有它能判断；
     /// 而写入失败也只是回填一次"没记住"，不会连累这轮回复——这本来就是记忆该有的
     /// 失败姿态，只是过去它挂在对话主流程之外、每条消息都要跑一遍判定。
-    pub fn chat_stream<F>(&self, input: &ChatInput, mut on_message: F) -> Result<ChatOutput>
+    pub fn chat_stream<F>(&self, input: &ChatInput, on_message: F) -> Result<ChatOutput>
     where
         F: FnMut(&str) + Send,
     {
@@ -135,6 +169,7 @@ impl Agent {
                 session_id: input.session_id.clone().unwrap_or_default(),
                 reply: String::new(),
                 messages: Vec::new(),
+                rich: Vec::new(),
                 user_message_id: String::new(),
                 memory: None,
             });
@@ -215,47 +250,139 @@ impl Agent {
         );
 
         // 4. 工具循环。
-        let tools = crate::llm::tool::definitions();
-        // 写入过的记忆留给 ChatOutput 回报宿主；工具上下文是共享引用，
+        let tools = crate::llm::tool::definitions(&self.stickers);
+        let (delivered, last_memory) =
+            self.run_tool_loop(&session.id, &user_message.id, messages, &tools, on_message)?;
+
+        // 对话路径一条消息都没产出 = 失败。主动路径的"空"是"决定不开口"，
+        // 所以那条判据留在各自的入口，不放进共用的循环里。
+        if delivered.is_empty() {
+            return Err(crate::error::SqlError::Config(
+                "模型未产出任何可发送的消息".to_string(),
+            ));
+        }
+        // `messages`/`reply` 是 `rich` 的文本投影：非文本片段（骰子）在这里被
+        // 渲染成占位描述，让不识别它的宿主与后续轮次模型仍有迹可循。
+        let messages: Vec<String> = delivered.iter().map(Reply::projection).collect();
+        let reply = messages.join("\n");
+
+        self.conversation.touch_session(&session.id)?;
+
+        span.record("user_message_id", user_message.id.as_str());
+        tracing::info!(
+            target: "trace",
+            stage = "done",
+            user_message_id = %user_message.id,
+            messages = delivered.len(),
+            total_ms = turn_started.elapsed().as_millis() as u64,
+            "对话完成"
+        );
+
+        Ok(ChatOutput {
+            session_id: session.id,
+            reply,
+            messages,
+            rich: delivered,
+            user_message_id: user_message.id,
+            memory: last_memory,
+        })
+    }
+
+    /// 主动开口主入口（定时触发，没有用户消息）。
+    ///
+    /// 与 [`Self::chat_stream`] 共用同一套工具循环，区别只在：提示词换成主动版本、
+    /// 消息里注入当前时间与最后一次互动时刻、工具集去掉 `remember`、**空投递是正常
+    /// 结果**（模型决定不开口）。产出的每条消息仍由 [`emit`] 落库并回调——因此调用方
+    /// 只需把返回的消息按通道推出去，历史已在内核里写好。
+    ///
+    /// 返回 `Ok(vec![])` 表示"决定不开口"；`Err` 表示这一轮决策因异常中断（调用方
+    /// 同样按不开口处理即可）。
+    pub fn proactive_stream<F>(
+        &self,
+        session_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+        last_user_reply_at: Option<chrono::DateTime<chrono::Utc>>,
+        last_assistant_at: Option<chrono::DateTime<chrono::Utc>>,
+        on_message: F,
+    ) -> Result<Vec<String>>
+    where
+        F: FnMut(&str) + Send,
+    {
+        let recent = self.recent_history_text(session_id, PROACTIVE_HISTORY_TURNS);
+        let profile = self.profile_block();
+        let system = context::proactive_system_prompt(&profile);
+        let user =
+            context::proactive_user_prompt(&recent, now, last_user_reply_at, last_assistant_at);
+        let messages = vec![ChatMessage::system(system), ChatMessage::user(user)];
+        tracing::info!(
+            target: "trace",
+            stage = "proactive_prompt",
+            session_id,
+            n = messages.len(),
+            "主动决策：提示词已组装"
+        );
+
+        let tools = crate::llm::tool::proactive_definitions();
+        let (delivered, _) = self.run_tool_loop(session_id, "", messages, &tools, on_message)?;
+        // 主动路径的工具集不含 `send_dice` / `send_sticker`，故这里只可能是文本；仍走
+        // 投影以保持统一口径（若将来给主动路径放开非文本，这里改回 `Vec<Reply>` 即可）。
+        Ok(delivered.into_iter().map(|r| r.projection()).collect())
+    }
+
+    /// 工具循环：流式生成 → 有工具调用则执行并回填、无工具调用则结束。
+    ///
+    /// 对话与主动两条路径共用这一份。返回 `(本轮投递的消息, 最后写入的记忆)`；
+    /// "空投递算不算失败"由调用方决定（对话算，主动不算）。
+    fn run_tool_loop<F>(
+        &self,
+        session_id: &str,
+        user_message_id: &str,
+        mut messages: Vec<ChatMessage>,
+        tools: &[genai::chat::Tool],
+        mut on_message: F,
+    ) -> Result<(Vec<Reply>, Option<MemoryRecord>)>
+    where
+        F: FnMut(&str) + Send,
+    {
+        // 写入过的记忆留给调用方回报宿主；工具上下文是共享引用，
         // 所以这里用内部可变性收集，不能靠 &mut。
         let tool_ctx = TurnTools {
             memory: self.memory.as_ref(),
-            user_message_id: user_message.id.as_str(),
+            user_message_id,
+            stickers: &self.stickers,
             written: std::cell::RefCell::new(Vec::new()),
         };
         let llm_phase = std::time::Instant::now();
-        let mut delivered: Vec<String> = Vec::new();
+        let mut delivered: Vec<Reply> = Vec::new();
         // 连续多少轮只调只读工具、一次都没说话。防止模型在工具上来回打转不说话。
         let mut mute_rounds = 0u32;
 
         for iter in 1..=MAX_TOOL_ITER {
-            let session_id = session.id.clone();
             // 直接正文**不在这里下发**：模型绕过工具写正文时，`complete_stream_with_tools`
             // 只在确认整轮无工具调用后才回调一次，而那一次的正文由下面的 `emit` 统一
             // 投递+入库。若把它也接到 `on_message`，同一条正文会被下发两次（这里一次、
             // emit 一次），而这里这条还没进 `delivered`、也没入库。
             let mut on_delta = |_piece: &str| {};
-            let outcome =
-                match self
-                    .llm
-                    .complete_stream_with_tools(&messages, &tools, &mut on_delta)
-                {
-                    Ok(o) => o,
-                    Err(e) => {
-                        // 最后一轮失败且一条都没发出去才算失败；已经发过消息就按已发送的收尾。
-                        if delivered.is_empty() {
-                            return Err(e);
-                        }
-                        tracing::warn!(
-                            session = %session_id,
-                            iter,
-                            error = %e,
-                            delivered = delivered.len(),
-                            "工具循环中断，按已投递消息收尾"
-                        );
-                        break;
+            let outcome = match self
+                .llm
+                .complete_stream_with_tools(&messages, tools, &mut on_delta)
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    // 最后一轮失败且一条都没发出去才算失败；已经发过消息就按已发送的收尾。
+                    if delivered.is_empty() {
+                        return Err(e);
                     }
-                };
+                    tracing::warn!(
+                        session = %session_id,
+                        iter,
+                        error = %e,
+                        delivered = delivered.len(),
+                        "工具循环中断，按已投递消息收尾"
+                    );
+                    break;
+                }
+            };
 
             // 终止判据：本轮没有任何工具调用。
             if !outcome.has_tool_calls() {
@@ -264,8 +391,8 @@ impl Agent {
                         &mut on_message,
                         &mut delivered,
                         self.conversation.as_ref(),
-                        &session_id,
-                        &outcome.text,
+                        session_id,
+                        Reply::Text(outcome.text.clone()),
                     )?;
                 }
                 tracing::info!(
@@ -326,13 +453,47 @@ impl Agent {
                             &mut on_message,
                             &mut delivered,
                             self.conversation.as_ref(),
-                            &session_id,
-                            &text,
+                            session_id,
+                            Reply::Text(text),
                         )?;
                         spoke = true;
                         messages.push(ChatMessage::tool_result(
                             call,
                             crate::llm::tool::SEND_MESSAGE_ACK,
+                        ));
+                    }
+                    crate::llm::tool::ToolOutcome::SentDice(emoji) => {
+                        tracing::info!(
+                            session = %session_id,
+                            emoji = %emoji,
+                            "send_dice 已投递"
+                        );
+                        emit(
+                            &mut on_message,
+                            &mut delivered,
+                            self.conversation.as_ref(),
+                            session_id,
+                            Reply::Dice { emoji },
+                        )?;
+                        spoke = true;
+                        messages.push(ChatMessage::tool_result(
+                            call,
+                            crate::llm::tool::SEND_DICE_ACK,
+                        ));
+                    }
+                    crate::llm::tool::ToolOutcome::SentSticker(file_id) => {
+                        tracing::info!(session = %session_id, "send_sticker 已投递");
+                        emit(
+                            &mut on_message,
+                            &mut delivered,
+                            self.conversation.as_ref(),
+                            session_id,
+                            Reply::Sticker { file_id },
+                        )?;
+                        spoke = true;
+                        messages.push(ChatMessage::tool_result(
+                            call,
+                            crate::llm::tool::SEND_STICKER_ACK,
                         ));
                     }
                     crate::llm::tool::ToolOutcome::Filled(text) => {
@@ -384,38 +545,12 @@ impl Agent {
         }
 
         let llm_ms = llm_phase.elapsed().as_millis() as u64;
-        tracing::info!(session = %session.id, llm_ms, "对话阶段：工具循环完成");
-
-        if delivered.is_empty() {
-            return Err(crate::error::SqlError::Config(
-                "模型未产出任何可发送的消息".to_string(),
-            ));
-        }
-        let reply = delivered.join("\n");
-
-        self.conversation.touch_session(&session.id)?;
-
-        span.record("user_message_id", user_message.id.as_str());
-        tracing::info!(
-            target: "trace",
-            stage = "done",
-            user_message_id = %user_message.id,
-            messages = delivered.len(),
-            total_ms = turn_started.elapsed().as_millis() as u64,
-            "对话完成"
-        );
+        tracing::info!(session = %session_id, llm_ms, "工具循环完成");
 
         // 本轮写入的最后一条记忆（若有）。取在 return 之前，
-        // 让借用先结束——否则 ChatOutput 会带着 Ref 活到函数尾。
+        // 让借用先结束——否则返回值会带着 Ref 活到函数尾。
         let last_memory = tool_ctx.written.borrow().last().cloned();
-
-        Ok(ChatOutput {
-            session_id: session.id,
-            reply,
-            messages: delivered,
-            user_message_id: user_message.id,
-            memory: last_memory,
-        })
+        Ok((delivered, last_memory))
     }
 }
 
@@ -433,6 +568,12 @@ const MAX_TOOL_ITER: usize = 8;
 /// 没有副作用，所以这里直接结束比继续等更划算。
 const MAX_MUTE_ROUNDS: u32 = 2;
 
+/// 主动决策读入的最近对话轮数。
+///
+/// 主动路径要判断"此刻该不该开口"，看的是最近聊到哪了，不需要跨天铺陈；
+/// 且它由定时器驱动、频率远高于对话，读太多历史纯属浪费上下文。
+const PROACTIVE_HISTORY_TURNS: usize = 8;
+
 /// 一轮对话内的工具执行环境。
 ///
 /// 只读工具与 `remember` 共用这一个对象：`remember` 要写状态，所以这里带上了本轮
@@ -442,34 +583,17 @@ struct TurnTools<'a> {
     memory: &'a Store,
     /// 本条用户消息 id：记忆的 `message_id` 指向它。
     user_message_id: &'a str,
+    /// 贴纸目录：`send_sticker` 的键 → `file_id` 校验全靠它。
+    stickers: &'a StickerCatalog,
     /// 本轮写入的记忆，最后一条随 `ChatOutput` 回报宿主。
     written: std::cell::RefCell<Vec<MemoryRecord>>,
 }
 
 impl crate::llm::tool::ToolContext for TurnTools<'_> {
-    /// 当地时间。刻意复用历史日界的同一偏移常量——"今天"的起点和"现在几点"
-    /// 必须用同一个时区，否则会出现"今天还没开始但已经下午三点"的矛盾。
+    /// 当地时间。复用 [`context::local_time_text`]——"今天"的起点和"现在几点"
+    /// 必须用同一个时区与同一套格式。
     fn now(&self) -> String {
-        let offset = context::USER_OFFSET_MINUTES;
-        let local = chrono::Utc::now() + chrono::Duration::minutes(offset);
-        const WEEKDAYS: [&str; 7] = [
-            "星期一",
-            "星期二",
-            "星期三",
-            "星期四",
-            "星期五",
-            "星期六",
-            "星期日",
-        ];
-        let weekday = WEEKDAYS[local.weekday().num_days_from_monday() as usize];
-        let hour = local.format("%H:%M").to_string();
-        format!(
-            "{} {} {weekday} (UTC{:+03}:{:02})",
-            local.format("%Y-%m-%d"),
-            hour,
-            offset / 60,
-            offset.abs() % 60
-        )
+        context::local_time_text(chrono::Utc::now())
     }
 
     /// 按需记忆召回。失败或无命中都回填明确说明，让模型知道"查过了、没有"，
@@ -540,32 +664,52 @@ impl crate::llm::tool::ToolContext for TurnTools<'_> {
             }
         }
     }
+
+    /// 可用贴纸键。目录为空即"没拉过"，模型侧连工具都不会拿到。
+    fn sticker_keys(&self) -> Vec<String> {
+        self.stickers.keys()
+    }
+
+    fn sticker_file_id(&self, key: &str) -> Option<String> {
+        self.stickers.file_id(key).map(str::to_string)
+    }
 }
 
-/// 投递一条消息：先归一化空白，再回调宿主，最后单独入库。
+/// 投递一个回复片段：先归一化空白，再回调宿主，最后单独入库。
 ///
-/// **每条消息单独落一行**是刻意的——多条 assistant 消息连续入库，正是"一句一句回"
-/// 在时间线上的真实形态，也让后续按轮次回顾时不会把它们粘成一大段。
+/// **每个片段单独落一行**是刻意的——多条 assistant 消息连续入库，正是"一句一句回"
+/// 在时间线上的真实形态，也让后续按轮次回顾时不会把它们粘成一大段。非文本片段
+/// （骰子）以 [`Reply::projection`] 的占位描述入库，保证历史里留有痕迹。
 fn emit<F>(
     on_message: &mut F,
-    delivered: &mut Vec<String>,
+    delivered: &mut Vec<Reply>,
     conversation: &Sessions,
     session_id: &str,
-    text: &str,
+    reply: Reply,
 ) -> Result<()>
 where
     F: FnMut(&str) + Send,
 {
-    let text = crate::utils::textflow::flatten(text);
-    if text.trim().is_empty() {
+    // 文本要归一化空白；非文本按其投影入库（投影已是稳定文本，无需再折叠）。
+    let (reply, record) = match reply {
+        Reply::Text(text) => {
+            let text = crate::utils::textflow::flatten(&text);
+            (Reply::Text(text.clone()), text)
+        }
+        other => {
+            let record = other.projection();
+            (other, record)
+        }
+    };
+    if record.trim().is_empty() {
         return Ok(());
     }
     // 顺序刻意是「先入库、再回调」：回调要跨同步边界投递到通道（异步发送），
     // 期间可能被取消或超时；先落库能保证「发出去过」和「记下来过」一致，
     // 不会出现用户收到消息但时间线里查无此行的空洞。
-    conversation.add_message(session_id, "assistant", &text)?;
-    on_message(&text);
-    delivered.push(text);
+    conversation.add_message(session_id, "assistant", &record)?;
+    on_message(&record);
+    delivered.push(reply);
     Ok(())
 }
 
