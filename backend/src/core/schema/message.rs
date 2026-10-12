@@ -8,8 +8,10 @@
 //! 注意与 [`crate::core::session::MessageTurn`] 的区别：后者是**已持久化**的
 //! 消息（多一个 `created_at`），本类型只表达"内容 + 说话人"。
 
+use serde::{Deserialize, Serialize};
+
 /// 模型发起的一次工具调用（`genai::chat::ToolCall` 的内核镜像，不依赖 provider 类型）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatCall {
     /// 本次调用的稳定 id，回填结果时用于配对。
     pub call_id: String,

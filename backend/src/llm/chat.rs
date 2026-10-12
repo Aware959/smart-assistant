@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use genai::chat::{
     ChatMessage as GenaiChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ChatStreamEvent,
-    JsonSpec, StopReason, Tool, ToolCall as GenaiToolCall, ToolResponse,
+    JsonSpec, StopReason, Tool, ToolCall as GenaiToolCall, ToolChoice, ToolResponse,
 };
 
 use crate::config::Config;
@@ -157,8 +157,14 @@ impl StreamOutcome {
 /// 带工具的一轮流式对话。
 ///
 /// 与 [`complete_stream`] 的差别是返回值和工具支持：正文走 `send_message`
-/// 的工具参数，`on_delta` 只在模型**绕过工具直接写正文**时才会被调用
-/// （兜底路径，见 [`crate::core::agent`]）。
+/// 的工具参数，`on_delta` 只在模型**绕过工具直接写正文**时才会被调用；而调用方
+/// （见 [`crate::core::agent`] 的 `run_tool_loop`）按约定丢弃这类正文，故不会外发。
+///
+/// `tool_choice` 是 provider 原生工具选择（`None` = 默认 auto）。带工具的对话里它是
+/// 治本手段：实测本仓的 `DeepSeek-V4.1-Flash` 在"必须回一条"的语境下**经常不调工具、
+/// 直接把回话写进 content**（同一上下文 auto 下 0/3 命中，`Required` 下 3/3 命中）。
+/// 提示词是软约束，挡不住这种行为；靠 `tool_choice = Required` 在协议层兜住——调用方
+/// 只在"还没产出任何消息"时这样传，一旦说上话就放开，避免模型无法收尾。
 ///
 /// 工具调用必须依赖 `End` 事件里的 `captured_tool_calls()`：流式过程中
 /// `ToolCallChunk.fn_arguments` 是**逐片到达的半截 JSON 字符串**，直接解析必然失败；
@@ -166,6 +172,7 @@ impl StreamOutcome {
 pub fn complete_stream_with_tools<F>(
     messages: &[ChatMessage],
     tools: &[Tool],
+    tool_choice: Option<ToolChoice>,
     mut on_delta: F,
 ) -> Result<StreamOutcome>
 where
@@ -178,6 +185,7 @@ where
         capture_tool_calls: Some(true),
         capture_reasoning_content: Some(true),
         max_tokens: Some(STREAM_MAX_TOKENS),
+        tool_choice,
         ..Default::default()
     };
 
@@ -256,11 +264,12 @@ where
         );
 
         let text = flat.finish().to_string();
-        // 收尾统一裁定直接正文：只在整轮无工具调用时才下发。
+        // 收尾裁定直接正文：只在整轮无工具调用时才交给 `on_delta`。
         //
         // 有工具调用时正文是模型的"自言自语"，不是给用户看的话（探针里
         // content 与 send_message 同轮出现时，content 是前言铺垫、正文在参数里），
-        // 下发它会让用户收到一段与工具消息重复的突兀开场。
+        // 交给调用方只会让用户收到一段与工具消息重复的突兀开场。调用方
+        // （`run_tool_loop`）另有约定：即便无工具调用，也丢弃正文。
         let dropped_text = !tool_calls.is_empty() && !text.trim().is_empty();
         if dropped_text {
             tracing::warn!(
@@ -308,20 +317,22 @@ impl Llm {
         messages: &[ChatMessage],
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> Result<String> {
-        let outcome = crate::llm::chat::complete_stream_with_tools(messages, &[], on_delta)?;
+        let outcome = crate::llm::chat::complete_stream_with_tools(messages, &[], None, on_delta)?;
         if outcome.text.is_empty() {
             return Err(SqlError::Config("LLM 流式返回内容为空".to_string()));
         }
         Ok(outcome.text)
     }
 
-    /// 带工具的流式对话，返回正文与本轮工具调用。
+    /// 带工具的流式对话，返回正文与本轮工具调用。`tool_choice` 见
+    /// [`crate::llm::chat::complete_stream_with_tools`]。
     pub fn complete_stream_with_tools(
         &self,
         messages: &[ChatMessage],
         tools: &[Tool],
+        tool_choice: Option<ToolChoice>,
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> Result<StreamOutcome> {
-        crate::llm::chat::complete_stream_with_tools(messages, tools, on_delta)
+        crate::llm::chat::complete_stream_with_tools(messages, tools, tool_choice, on_delta)
     }
 }

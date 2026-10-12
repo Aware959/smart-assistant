@@ -235,6 +235,28 @@ impl Sessions {
         Ok(StoredMessage { id: m.id })
     }
 
+    /// 追加一条带工具字段的消息（工具往返：assistant 轮的工具调用列表、或 tool 结果
+    /// 的调用 id 与工具名）。沿用 `role='assistant'` + `tool_call_id` 标记工具结果，
+    /// 不新增 `'tool'` 角色（避免改动 messages 的 role CHECK 约束）。
+    pub fn add_message_full(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        meta: &crate::db::message::ToolMeta,
+    ) -> Result<StoredMessage> {
+        let m = crate::db::message::create_full(
+            &lock_db(&self.db),
+            session_id,
+            role,
+            content,
+            chrono::Utc::now(),
+            meta,
+        )?;
+        self.reflect_message(session_id, m.clone())?;
+        Ok(StoredMessage { id: m.id })
+    }
+
     /// 取某个时点之后的全部消息（时间正序）。
     pub fn messages_since(
         &self,
@@ -356,6 +378,9 @@ fn turn_from(m: &DbMessage) -> MessageTurn {
         role: m.role.clone(),
         content: m.content.clone(),
         created_at: m.created_at.clone(),
+        tool_calls: m.tool_calls.clone(),
+        tool_call_id: m.tool_call_id.clone(),
+        tool_name: m.tool_name.clone(),
     }
 }
 

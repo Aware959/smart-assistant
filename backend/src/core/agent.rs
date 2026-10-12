@@ -249,10 +249,17 @@ impl Agent {
             "提示词与消息已组装"
         );
 
-        // 4. 工具循环。
+        // 4. 工具循环。对话路径必须产出一条消息：没产出前由循环在协议层强制
+        // 模型调工具（见 [`ToolPolicy`]），空投递仍交给下面的判据报错兜底。
         let tools = crate::llm::tool::definitions(&self.stickers);
-        let (delivered, last_memory) =
-            self.run_tool_loop(&session.id, &user_message.id, messages, &tools, on_message)?;
+        let (delivered, last_memory) = self.run_tool_loop(
+            &session.id,
+            &user_message.id,
+            messages,
+            &tools,
+            ToolPolicy::MustReply,
+            on_message,
+        )?;
 
         // 对话路径一条消息都没产出 = 失败。主动路径的"空"是"决定不开口"，
         // 所以那条判据留在各自的入口，不放进共用的循环里。
@@ -323,7 +330,14 @@ impl Agent {
         );
 
         let tools = crate::llm::tool::proactive_definitions();
-        let (delivered, _) = self.run_tool_loop(session_id, "", messages, &tools, on_message)?;
+        let (delivered, _) = self.run_tool_loop(
+            session_id,
+            "",
+            messages,
+            &tools,
+            ToolPolicy::MayStaySilent,
+            on_message,
+        )?;
         // 主动路径的工具集不含 `send_dice` / `send_sticker`，故这里只可能是文本；仍走
         // 投影以保持统一口径（若将来给主动路径放开非文本，这里改回 `Vec<Reply>` 即可）。
         Ok(delivered.into_iter().map(|r| r.projection()).collect())
@@ -331,14 +345,18 @@ impl Agent {
 
     /// 工具循环：流式生成 → 有工具调用则执行并回填、无工具调用则结束。
     ///
-    /// 对话与主动两条路径共用这一份。返回 `(本轮投递的消息, 最后写入的记忆)`；
-    /// "空投递算不算失败"由调用方决定（对话算，主动不算）。
+    /// 对话与主动两条路径共用这一份。`tool_policy` 决定"还没产出用户可见消息时"要不要
+    /// 在**协议层**强制模型调工具——见 [`ToolPolicy`]，这是治"模型绕过工具直接写正文"的
+    /// 手段，不是提示词软约束。
+    ///
+    /// 返回 `(本轮投递的消息, 最后写入的记忆)`；"空投递算不算失败"仍由调用方决定。
     fn run_tool_loop<F>(
         &self,
         session_id: &str,
         user_message_id: &str,
         mut messages: Vec<ChatMessage>,
         tools: &[genai::chat::Tool],
+        tool_policy: ToolPolicy,
         mut on_message: F,
     ) -> Result<(Vec<Reply>, Option<MemoryRecord>)>
     where
@@ -358,15 +376,26 @@ impl Agent {
         let mut mute_rounds = 0u32;
 
         for iter in 1..=MAX_TOOL_ITER {
-            // 直接正文**不在这里下发**：模型绕过工具写正文时，`complete_stream_with_tools`
-            // 只在确认整轮无工具调用后才回调一次，而那一次的正文由下面的 `emit` 统一
-            // 投递+入库。若把它也接到 `on_message`，同一条正文会被下发两次（这里一次、
-            // emit 一次），而这里这条还没进 `delivered`、也没入库。
+            // 协议层工具选择：对话路径在"一条消息都还没发出"前强制模型调工具。
+            // 实测本仓的 DeepSeek-V4.1-Flash 在同一上下文里 auto 下 0/3 会直接写正文、
+            // `Required` 下 3/3 走 send_message，软提示拦不住。一旦说上话（delivered 非空）
+            // 就放开，让模型能自然收尾；没有工具可选时不能传（provider 会拒绝）。
+            let tool_choice = match tool_policy {
+                ToolPolicy::MustReply if delivered.is_empty() && !tools.is_empty() => {
+                    Some(genai::chat::ToolChoice::Required)
+                }
+                _ => None,
+            };
+            // 直接正文**整体丢弃**：给用户看的话只能由 `send_message` 工具产出。模型绕过
+            // 工具写的正文（旁白 / 铺垫）既不在这里下发，也不在收尾入库——所以这个
+            // `on_delta` 是空实现，流式增量同样不外发。
             let mut on_delta = |_piece: &str| {};
-            let outcome = match self
-                .llm
-                .complete_stream_with_tools(&messages, tools, &mut on_delta)
-            {
+            let outcome = match self.llm.complete_stream_with_tools(
+                &messages,
+                tools,
+                tool_choice,
+                &mut on_delta,
+            ) {
                 Ok(o) => o,
                 Err(e) => {
                     // 最后一轮失败且一条都没发出去才算失败；已经发过消息就按已发送的收尾。
@@ -385,15 +414,19 @@ impl Agent {
             };
 
             // 终止判据：本轮没有任何工具调用。
+            //
+            // 正文一律丢弃、不下发不入库：模型绕过 `send_message` 直接写进 content 的原话
+            // （多为内心旁白 / 开场铺垫）不是给用户看的话。没有工具调用又没说话，就是
+            // "这一轮不开口"，正常结束（对话路径的空投递由调用方判为失败）。
             if !outcome.has_tool_calls() {
                 if !outcome.text.trim().is_empty() {
-                    emit(
-                        &mut on_message,
-                        &mut delivered,
-                        self.conversation.as_ref(),
-                        session_id,
-                        Reply::Text(outcome.text.clone()),
-                    )?;
+                    tracing::warn!(
+                        session = %session_id,
+                        iter,
+                        chars = outcome.text.chars().count(),
+                        forced = matches!(tool_policy, ToolPolicy::MustReply) && delivered.is_empty(),
+                        "模型绕过工具直接写了正文，按约定丢弃（不投递、不入库）"
+                    );
                 }
                 tracing::info!(
                     target: "trace",
@@ -416,12 +449,26 @@ impl Agent {
                 ?outcome.stop_reason,
                 "本轮模型产出"
             );
+            // 工具往返落库（顺序保证 genai 协议合法，见 `emit` 注释）：先 assistant
+            // 调用行（含 tool_calls JSON），再逐个工具结果行，投递文本延后到迭代末尾。
+            let tool_calls_json = serde_json::to_string(&outcome.tool_calls).ok();
             messages.push(ChatMessage::assistant_calls(
                 outcome.text.clone(),
                 outcome.tool_calls.clone(),
             ));
+            self.conversation.add_message_full(
+                session_id,
+                "assistant",
+                &outcome.text,
+                &crate::db::message::ToolMeta {
+                    tool_calls: tool_calls_json,
+                    tool_call_id: None,
+                    tool_name: None,
+                },
+            )?;
 
             let mut spoke = false;
+            let mut delivered_records: Vec<String> = Vec::new();
             for call in &outcome.tool_calls {
                 // 工具入参逐条落日志：出问题第一反应就是"模型到底调了什么、传了什么"，
                 // 而参数正文只存在于工具调用里——不记就永远无法事后核对。
@@ -449,13 +496,22 @@ impl Agent {
                             chars = text.chars().count(),
                             "send_message 已投递"
                         );
-                        emit(
-                            &mut on_message,
-                            &mut delivered,
-                            self.conversation.as_ref(),
+                        // 工具结果先落库（role=assistant + tool_call_id 标记），
+                        // 投递文本由 emit 回调后收集、迭代末尾统一落库。
+                        self.conversation.add_message_full(
                             session_id,
-                            Reply::Text(text),
+                            "assistant",
+                            crate::llm::tool::SEND_MESSAGE_ACK,
+                            &crate::db::message::ToolMeta {
+                                tool_calls: None,
+                                tool_call_id: Some(call.call_id.clone()),
+                                tool_name: Some(call.fn_name.clone()),
+                            },
                         )?;
+                        let record = emit(&mut on_message, &mut delivered, Reply::Text(text))?;
+                        if !record.is_empty() {
+                            delivered_records.push(record);
+                        }
                         spoke = true;
                         messages.push(ChatMessage::tool_result(
                             call,
@@ -468,13 +524,20 @@ impl Agent {
                             emoji = %emoji,
                             "send_dice 已投递"
                         );
-                        emit(
-                            &mut on_message,
-                            &mut delivered,
-                            self.conversation.as_ref(),
+                        self.conversation.add_message_full(
                             session_id,
-                            Reply::Dice { emoji },
+                            "assistant",
+                            crate::llm::tool::SEND_DICE_ACK,
+                            &crate::db::message::ToolMeta {
+                                tool_calls: None,
+                                tool_call_id: Some(call.call_id.clone()),
+                                tool_name: Some(call.fn_name.clone()),
+                            },
                         )?;
+                        let record = emit(&mut on_message, &mut delivered, Reply::Dice { emoji })?;
+                        if !record.is_empty() {
+                            delivered_records.push(record);
+                        }
                         spoke = true;
                         messages.push(ChatMessage::tool_result(
                             call,
@@ -483,13 +546,21 @@ impl Agent {
                     }
                     crate::llm::tool::ToolOutcome::SentSticker(file_id) => {
                         tracing::info!(session = %session_id, "send_sticker 已投递");
-                        emit(
-                            &mut on_message,
-                            &mut delivered,
-                            self.conversation.as_ref(),
+                        self.conversation.add_message_full(
                             session_id,
-                            Reply::Sticker { file_id },
+                            "assistant",
+                            crate::llm::tool::SEND_STICKER_ACK,
+                            &crate::db::message::ToolMeta {
+                                tool_calls: None,
+                                tool_call_id: Some(call.call_id.clone()),
+                                tool_name: Some(call.fn_name.clone()),
+                            },
                         )?;
+                        let record =
+                            emit(&mut on_message, &mut delivered, Reply::Sticker { file_id })?;
+                        if !record.is_empty() {
+                            delivered_records.push(record);
+                        }
                         spoke = true;
                         messages.push(ChatMessage::tool_result(
                             call,
@@ -497,6 +568,16 @@ impl Agent {
                         ));
                     }
                     crate::llm::tool::ToolOutcome::Filled(text) => {
+                        self.conversation.add_message_full(
+                            session_id,
+                            "assistant",
+                            &text,
+                            &crate::db::message::ToolMeta {
+                                tool_calls: None,
+                                tool_call_id: Some(call.call_id.clone()),
+                                tool_name: Some(call.fn_name.clone()),
+                            },
+                        )?;
                         messages.push(ChatMessage::tool_result(call, text));
                     }
                     crate::llm::tool::ToolOutcome::Rejected(reason) => {
@@ -506,12 +587,27 @@ impl Agent {
                             reason = %reason,
                             "工具调用被拒绝"
                         );
-                        messages.push(ChatMessage::tool_result(
-                            call,
-                            format!("调用失败：{reason}"),
-                        ));
+                        let content = format!("调用失败：{reason}");
+                        self.conversation.add_message_full(
+                            session_id,
+                            "assistant",
+                            &content,
+                            &crate::db::message::ToolMeta {
+                                tool_calls: None,
+                                tool_call_id: Some(call.call_id.clone()),
+                                tool_name: Some(call.fn_name.clone()),
+                            },
+                        )?;
+                        messages.push(ChatMessage::tool_result(call, content));
                     }
                 }
+            }
+
+            // 投递文本延后到工具结果之后落库，保证协议顺序
+            // `assistant(调用) → tool(结果)… → assistant(投递文本)`。
+            for record in &delivered_records {
+                self.conversation
+                    .add_message(session_id, "assistant", record)?;
             }
 
             mute_rounds = if spoke { 0 } else { mute_rounds + 1 };
@@ -567,6 +663,20 @@ const MAX_TOOL_ITER: usize = 8;
 /// 防的是模型在 `get_now` / `recall_memory` 上来回打转却不说人话。只读工具
 /// 没有副作用，所以这里直接结束比继续等更划算。
 const MAX_MUTE_ROUNDS: u32 = 2;
+
+/// 工具循环的"产出要求"策略：对话与主动两条路径的唯一区别。
+///
+/// 它管的不是提示词，而是**协议层**的工具选择（`tool_choice`）：模型绕过工具、把回话
+/// 写进 `content` 是这套输出的主要失败模式，而软提示拦不住（实测同一上下文 auto 下
+/// 0/3 命中、`Required` 下 3/3 命中）。所以"必须产出"这件事要落到 API 契约上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolPolicy {
+    /// 对话：用户发了话，必须先产出一条消息。在产出前用 `tool_choice = Required`
+    /// 堵死"直接写正文"，产出后放开让模型自然收尾。空投递仍由调用方判为失败。
+    MustReply,
+    /// 主动：允许沉默。"一个工具都不调"就是"决定不开口"，是正常结果，不干预。
+    MayStaySilent,
+}
 
 /// 主动决策读入的最近对话轮数。
 ///
@@ -675,18 +785,18 @@ impl crate::llm::tool::ToolContext for TurnTools<'_> {
     }
 }
 
-/// 投递一个回复片段：先归一化空白，再回调宿主，最后单独入库。
+/// 投递一个回复片段：归一化空白、回调宿主、记入本轮投递列表，返回入库用的文本。
 ///
 /// **每个片段单独落一行**是刻意的——多条 assistant 消息连续入库，正是"一句一句回"
 /// 在时间线上的真实形态，也让后续按轮次回顾时不会把它们粘成一大段。非文本片段
 /// （骰子）以 [`Reply::projection`] 的占位描述入库，保证历史里留有痕迹。
-fn emit<F>(
-    on_message: &mut F,
-    delivered: &mut Vec<Reply>,
-    conversation: &Sessions,
-    session_id: &str,
-    reply: Reply,
-) -> Result<()>
+///
+/// 注意：本函数**只负责投递与回调**，不再落库——落库由调用方在迭代末尾统一做。
+/// 原因见 [`run_tool_loop`]：genai 要求 assistant 的工具调用必须紧跟其 tool 结果，
+/// 而一次响应可能并行吐出多条 `send_message`；若每条投递在分发时就地落库，工具结果
+/// 行与投递文本会交错，重建出的历史会破坏协议顺序。故工具结果先落、投递文本延后到
+/// 迭代末尾落，保证库里顺序恒为 `assistant(调用) → tool(结果)… → assistant(投递文本)`。
+fn emit<F>(on_message: &mut F, delivered: &mut Vec<Reply>, reply: Reply) -> Result<String>
 where
     F: FnMut(&str) + Send,
 {
@@ -702,15 +812,11 @@ where
         }
     };
     if record.trim().is_empty() {
-        return Ok(());
+        return Ok(String::new());
     }
-    // 顺序刻意是「先入库、再回调」：回调要跨同步边界投递到通道（异步发送），
-    // 期间可能被取消或超时；先落库能保证「发出去过」和「记下来过」一致，
-    // 不会出现用户收到消息但时间线里查无此行的空洞。
-    conversation.add_message(session_id, "assistant", &record)?;
     on_message(&record);
     delivered.push(reply);
-    Ok(())
+    Ok(record)
 }
 
 /// 将 RFC3339 字符串解析为 UTC 时刻（解析失败视为未提供，回退接收时刻）。

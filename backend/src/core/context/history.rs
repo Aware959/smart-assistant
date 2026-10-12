@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::core::schema::message::ChatMessage;
+use crate::core::schema::message::{ChatCall, ChatMessage};
 use crate::core::session::MessageTurn;
 use crate::core::session::Sessions;
 use crate::error::Result;
@@ -66,8 +66,8 @@ pub(crate) fn fetch_recent(
 ) -> Result<Vec<ChatMessage>> {
     Ok(conversation
         .recent_messages(session_id, limit)?
-        .into_iter()
-        .map(|m| ChatMessage::new(m.role.clone(), m.content))
+        .iter()
+        .map(turn_to_chat)
         .collect())
 }
 
@@ -84,9 +84,30 @@ pub(crate) fn build_day_history(turns: &[MessageTurn]) -> Result<Vec<ChatMessage
         if compact && idx >= DAY_KEEP_HEAD && idx < tail_start {
             continue;
         }
-        out.push(ChatMessage::new(m.role.clone(), m.content.clone()));
+        out.push(turn_to_chat(m));
     }
     Ok(out)
+}
+
+/// 把一条持久化历史轮次还原成发给模型的 [`ChatMessage`]，拼回工具调用上下文。
+///
+/// genai 要求 assistant 轮的工具调用必须紧跟对应的 tool 结果；工具结果在库里沿用
+/// `role='assistant'` + `tool_call_id` 标记（避免改动 messages 的 role CHECK 约束），
+/// 这里据 `tool_call_id` 非空还原成 `role='tool'`，据 `tool_calls` 的 JSON 还原工具调用列表。
+fn turn_to_chat(turn: &MessageTurn) -> ChatMessage {
+    let mut msg = ChatMessage::new(turn.role.clone(), turn.content.clone());
+    if let Some(json) = &turn.tool_calls {
+        if let Ok(calls) = serde_json::from_str::<Vec<ChatCall>>(json) {
+            msg.tool_calls = calls;
+        }
+    }
+    msg.tool_call_id = turn.tool_call_id.clone();
+    msg.tool_name = turn.tool_name.clone();
+    // tool 结果行：库里 role 仍是 assistant，按 tool_call_id 还原协议角色。
+    if msg.tool_call_id.is_some() {
+        msg.role = "tool".to_string();
+    }
+    msg
 }
 
 #[cfg(test)]
@@ -102,6 +123,9 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             created_at: created_at.to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
         }
     }
 
@@ -173,5 +197,47 @@ mod tests {
         let local = start + Duration::minutes(EAST8_OFFSET);
         assert_eq!(local.hour(), DAY_START_HOUR);
         assert_eq!(local.minute(), 0);
+    }
+
+    #[test]
+    fn turn_to_chat_restores_tool_roundtrip() {
+        // assistant 轮携带工具调用列表，应还原成 role='assistant' + tool_calls。
+        let calls = serde_json::to_string(&vec![crate::core::schema::message::ChatCall::new(
+            "c1",
+            "recall_memory",
+            serde_json::json!({"q": "爱好"}),
+        )])
+        .unwrap();
+        let assistant = turn("assistant", "稍等", &rfc(Utc::now()));
+        let assistant = MessageTurn {
+            tool_calls: Some(calls),
+            ..assistant
+        };
+        let a = turn_to_chat(&assistant);
+        assert_eq!(a.role, "assistant");
+        assert_eq!(a.tool_calls.len(), 1);
+        assert_eq!(a.tool_calls[0].fn_name, "recall_memory");
+
+        // 工具结果行：库里 role='assistant' + tool_call_id 非空，应还原成 role='tool'。
+        let result = MessageTurn {
+            role: "assistant".to_string(),
+            content: "数据".to_string(),
+            created_at: rfc(Utc::now()),
+            tool_calls: None,
+            tool_call_id: Some("c1".to_string()),
+            tool_name: Some("recall_memory".to_string()),
+        };
+        let r = turn_to_chat(&result);
+        assert_eq!(r.role, "tool");
+        assert_eq!(r.tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(r.tool_name.as_deref(), Some("recall_memory"));
+        assert!(r.tool_calls.is_empty());
+
+        // 普通消息不受影响。
+        let plain = turn("user", "在吗", &rfc(Utc::now()));
+        let p = turn_to_chat(&plain);
+        assert_eq!(p.role, "user");
+        assert!(p.tool_calls.is_empty());
+        assert!(p.tool_call_id.is_none());
     }
 }

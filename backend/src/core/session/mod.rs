@@ -32,4 +32,10 @@ pub struct MessageTurn {
     pub content: String,
     /// RFC3339 时刻。
     pub created_at: String,
+    /// assistant 轮的工具调用列表（JSON 数组），空表示无。
+    pub tool_calls: Option<String>,
+    /// 工具结果行：`tool_call_id` 非空时表示这是某次工具调用的结果。
+    pub tool_call_id: Option<String>,
+    /// 工具结果对应的工具名。
+    pub tool_name: Option<String>,
 }

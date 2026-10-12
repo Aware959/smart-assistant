@@ -3,12 +3,17 @@
 //! 迁移默认**只做增量**（新增表/列）：memories / messages / sessions 一旦落库即永久
 //! 保留；旧版残留的表（如图谱时代的 entities/relations）不删除，只是不再读写。
 //!
-//! 例外有两处：
+//! 例外：
 //! - v12：为了给 `memories.memory_type` 加 CHECK 约束，必须整表重建（SQLite 不支持
 //!   ALTER TABLE ADD CONSTRAINT）。它是**保数据的重建**——单事务、搬迁前后校验行数、
 //!   中途失败自动回滚，且逐行保留 content / created_at / updated_at。
 //! - v13：DROP `intent_state`。这张表存的每个值都能从 `messages` 推出来，删掉不丢信息。
 //!   任何新增的重建都要照 v12 的标准写。
+//! - v15：DROP COLUMN `messages.intent`。该列是"每日主动配额"方案（v14）加进来的，方案
+//!   回退后没有任何代码读写它（值全 0），用删列迁移清掉残留。
+//! - v16：messages 增量补三列 `tool_calls` / `tool_call_id` / `tool_name`，持久化工具调用
+//!   上下文。工具结果沿用 `role='assistant'` + `tool_call_id` 标记（不新增 `'tool'` 角色，
+//!   避免改 CHECK 约束触发整表重建）。
 
 use rusqlite::Connection;
 
@@ -16,7 +21,7 @@ use crate::db::{meta, vec};
 use crate::error::{Result, SqlError};
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 13;
+pub(crate) const SCHEMA_VERSION: i64 = 16;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -41,7 +46,10 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             role       TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
             content    TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            tool_calls TEXT,
+            tool_call_id TEXT,
+            tool_name TEXT
         );
 
         CREATE TABLE IF NOT EXISTS memories (
@@ -128,9 +136,9 @@ pub(crate) fn stored_version(conn: &Connection) -> Result<Option<String>> {
 /// memories（content / created_at / updated_at）、messages、sessions 一旦落库即永久保留；
 /// 旧版残留的表（如图谱时代的 entities/relations）不删除，只是不再读写。
 ///
-/// 两处例外：[`rebuild_memories_with_kind`]（v12）为 `memory_type` 加 CHECK 约束而整表
+/// 三处例外：[`rebuild_memories_with_kind`]（v12）为 `memory_type` 加 CHECK 约束而整表
 /// 重建（保数据重建：单事务 + 行数校验 + 失败回滚）；v13 删掉 `intent_state`——它的每个
-/// 值都能从 `messages` 推出来，删掉不丢信息。
+/// 值都能从 `messages` 推出来，删掉不丢信息；v15 删掉 `messages.intent` 残留列。
 fn migrate(conn: &Connection) -> Result<()> {
     let version = meta::get(conn, KEY_SCHEMA_VERSION)?
         .and_then(|v| v.parse::<i64>().ok())
@@ -238,6 +246,31 @@ fn migrate(conn: &Connection) -> Result<()> {
         // 这是本文件第二次 DROP 表——与 entities / relations 不同，intent_state 从未被
         // 任何业务逻辑读作真值来源，删掉不丢信息。
         conn.execute_batch("DROP TABLE IF EXISTS intent_state;")?;
+    }
+
+    if version < 15 {
+        // v15：删掉 `messages.intent` 残留列。
+        // 该列是"每日主动配额"方案在 v14 加进来的，方案整体回退后没有任何代码读写
+        // 它（值全为 0），从真实库清干净。新版库的 CREATE TABLE 本来就不带这一列，
+        // 这里只服务带残留列的老库——表/列不存在时跳过（SQLite DROP COLUMN 需
+        // 3.35+，随附版本满足）。
+        if column_exists(conn, "messages", "intent")? {
+            conn.execute_batch("ALTER TABLE messages DROP COLUMN intent;")?;
+            tracing::info!("迁移 v15：删除 messages.intent 残留列");
+        }
+    }
+
+    if version < 16 {
+        // v16：messages 增三列以持久化工具调用上下文（assistant 轮的工具调用
+        // 列表、tool 结果的调用 id 与工具名），让跨轮 / 重启后的历史能完整拼回
+        // 工具往返。沿用 `role='assistant'` + `tool_call_id` 标记工具结果，而非
+        // 新增 `'tool'` 角色——后者要改动 role 的 CHECK 约束，而 SQLite 不支持
+        // ALTER TABLE ADD CONSTRAINT，只能整表重建（v12 那套保数据重建有风险且
+        // 收益仅在于 DB 里角色名更直白）。工具结果靠 `tool_call_id` 非空来识别，
+        // 加载历史时再还原成 genai 需要的 role='tool'。三列可空、纯增量补列。
+        add_column_if_missing(conn, "messages", "tool_calls", "TEXT")?;
+        add_column_if_missing(conn, "messages", "tool_call_id", "TEXT")?;
+        add_column_if_missing(conn, "messages", "tool_name", "TEXT")?;
     }
 
     if version >= SCHEMA_VERSION {
@@ -643,6 +676,97 @@ mod tests {
             )
             .unwrap();
         assert_eq!(content, "别丢");
+    }
+
+    /// v15：删掉 `messages.intent` 残留列（某次方案在 v14 加列、回退后没删）。
+    /// 列删干净，消息一条不少；无该列的老库（从未加过）迁移也不报错。
+    #[test]
+    fn v15_drops_leftover_intent_column() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                 id         TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 role       TEXT NOT NULL,
+                 content    TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 intent     INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO messages (id, session_id, role, content, created_at, intent) VALUES
+                 ('m1', 's1', 'user',      '在吗', '2026-01-01T09:00:00+00:00', 0),
+                 ('m2', 's1', 'assistant', '在的', '2026-01-01T09:00:05+00:00', 1);
+             INSERT INTO meta (key, value) VALUES ('schema_version', '14');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(
+            !column_exists(&conn, "messages", "intent").unwrap(),
+            "intent 列应被 v15 删掉"
+        );
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, 2, "messages 一条不能少");
+    }
+
+    /// v16：messages 增量补 `tool_calls` / `tool_call_id` / `tool_name` 三列，旧消息不丢，
+    /// 工具结果行（role='assistant' + tool_call_id 标记）可正常落库。
+    #[test]
+    fn v16_adds_tool_columns_to_messages() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                 id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
+                 content TEXT NOT NULL, created_at TEXT NOT NULL
+             );
+             INSERT INTO messages VALUES ('m1','s1','user','在吗','2026-01-01T09:00:00+00:00');
+             INSERT INTO messages VALUES ('m2','s1','assistant','在的','2026-01-01T09:00:05+00:00');
+             INSERT INTO meta (key, value) VALUES ('schema_version','15');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert_eq!(
+            meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
+            SCHEMA_VERSION.to_string()
+        );
+        // 三列已补，可空。
+        assert!(
+            column_exists(&conn, "messages", "tool_calls").unwrap(),
+            "tool_calls 应已补列"
+        );
+        assert!(
+            column_exists(&conn, "messages", "tool_call_id").unwrap(),
+            "tool_call_id 应已补列"
+        );
+        assert!(
+            column_exists(&conn, "messages", "tool_name").unwrap(),
+            "tool_name 应已补列"
+        );
+        // 旧消息一条不少。
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 2, "旧消息不能丢");
+        // 工具结果行可落库（role='assistant' + tool_call_id 标记，沿用避免改 role CHECK）。
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at, tool_call_id, tool_name)
+             VALUES ('t1','s1','assistant','结果','2026-01-01T09:00:06+00:00','c1','recall_memory')",
+            [],
+        )
+        .unwrap();
+        let (cid, name): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT tool_call_id, tool_name FROM messages WHERE id='t1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cid.as_deref(), Some("c1"));
+        assert_eq!(name.as_deref(), Some("recall_memory"));
     }
 
     /// v11：旧库（带历史单列索引）迁移后换成 (session_id, created_at) 复合索引，

@@ -81,6 +81,10 @@ pub struct Config {
     /// 意图判定总开关。
     pub intent_enabled: bool,
     /// 主动开口的随机间隔最小值（分钟）。
+    ///
+    /// 频率由这段间隔（配合 [`Self::intent_max_minutes`]）硬约束一次，再由
+    /// `PROACTIVE_RULES` 在每次机会里判断"这轮到底开不开口"——所以这个区间是流量的
+    /// 上限手段，宁长勿短。
     pub intent_min_minutes: i64,
     /// 主动开口的随机间隔最大值（分钟）。
     pub intent_max_minutes: i64,
@@ -125,8 +129,8 @@ impl Default for Config {
             ilink_allowed_ids: Vec::new(),
             ilink_context_max_age_hours: 12,
             intent_enabled: false,
-            intent_min_minutes: 45,
-            intent_max_minutes: 180,
+            intent_min_minutes: 90,
+            intent_max_minutes: 360,
             intent_quiet_hours: (23, 7),
             intent_min_silence_hours: 2,
             intent_max_idle_days: 7,

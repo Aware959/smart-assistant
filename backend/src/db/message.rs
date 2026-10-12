@@ -11,6 +11,24 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub created_at: String,
+    /// assistant 轮携带的工具调用列表（JSON 数组），持久化工具往返用。
+    pub tool_calls: Option<String>,
+    /// `role='assistant'` 且 `tool_call_id` 非空时，表示这是某次工具调用的结果，
+    /// 加载历史时还原为 genai 的 role='tool'。
+    pub tool_call_id: Option<String>,
+    /// 工具结果对应的工具名（部分 provider 回填结果时要求）。
+    pub tool_name: Option<String>,
+}
+
+/// 工具相关字段（工具往返持久化用），可整体为空。
+#[derive(Debug, Clone, Default)]
+pub struct ToolMeta {
+    /// assistant 轮的工具调用列表（JSON 数组）。
+    pub tool_calls: Option<String>,
+    /// 工具结果行的调用 id（非空即代表该消息是某次工具调用的结果）。
+    pub tool_call_id: Option<String>,
+    /// 工具结果对应的工具名。
+    pub tool_name: Option<String>,
 }
 
 impl Message {
@@ -21,6 +39,9 @@ impl Message {
             role,
             content,
             created_at: Utc::now().to_rfc3339(),
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
         }
     }
 }
@@ -37,39 +58,57 @@ pub fn create_at(
     content: &str,
     at: chrono::DateTime<Utc>,
 ) -> Result<Message> {
+    create_full(db, session_id, role, content, at, &ToolMeta::default())
+}
+
+/// 带工具字段落库：工具往返（assistant 轮的工具调用列表、tool 结果的调用 id 与工具名）。
+///
+/// `meta.tool_calls` 为 `assistant` 轮的工具调用 JSON 数组；`meta.tool_call_id` /
+/// `meta.tool_name` 为工具结果行使用（结果沿用 `role='assistant'` + `tool_call_id`
+/// 标记，避免改动 messages 的 role CHECK 约束）。三者均可空。
+pub fn create_full(
+    db: &Database,
+    session_id: &str,
+    role: &str,
+    content: &str,
+    at: chrono::DateTime<Utc>,
+    meta: &ToolMeta,
+) -> Result<Message> {
     let message = Message {
         id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
         role: role.to_string(),
         content: content.to_string(),
         created_at: at.to_rfc3339(),
+        tool_calls: meta.tool_calls.clone(),
+        tool_call_id: meta.tool_call_id.clone(),
+        tool_name: meta.tool_name.clone(),
     };
     db.conn().execute(
-        "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO messages (id, session_id, role, content, created_at, tool_calls, tool_call_id, tool_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             message.id,
             message.session_id,
             message.role,
             message.content,
-            message.created_at
+            message.created_at,
+            message.tool_calls,
+            message.tool_call_id,
+            message.tool_name
         ],
     )?;
     Ok(message)
 }
 
+/// 所有列名（含工具字段），各 SELECT 共用以保证列序一致。
+const COLS: &str = "id, session_id, role, content, created_at, tool_calls, tool_call_id, tool_name";
+
 pub fn get(db: &Database, id: &str) -> Result<Option<Message>> {
     let mut stmt = db
         .conn()
-        .prepare("SELECT id, session_id, role, content, created_at FROM messages WHERE id = ?1")?;
-    let mut rows = stmt.query_map([id], |row| {
-        Ok(Message {
-            id: row.get(0)?,
-            session_id: row.get(1)?,
-            role: row.get(2)?,
-            content: row.get(3)?,
-            created_at: row.get(4)?,
-        })
-    })?;
+        .prepare(&format!("SELECT {COLS} FROM messages WHERE id = ?1"))?;
+    let mut rows = stmt.query_map([id], map_message_row)?;
     if let Some(row) = rows.next() {
         Ok(Some(row?))
     } else {
@@ -85,11 +124,10 @@ pub fn list_by_session(db: &Database, session_id: &str, limit: usize) -> Result<
 /// 取某会话在 `since`（UTC，含）之后的消息，按时间正序。
 /// created_at 统一以 `to_rfc3339()` 落库，文本序即时间序。
 pub fn list_since(db: &Database, session_id: &str, since: DateTime<Utc>) -> Result<Vec<Message>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT id, session_id, role, content, created_at
-         FROM messages WHERE session_id = ?1 AND created_at >= ?2
-         ORDER BY created_at ASC, rowid ASC",
-    )?;
+    let mut stmt = db.conn().prepare(&format!(
+        "SELECT {COLS} FROM messages WHERE session_id = ?1 AND created_at >= ?2
+         ORDER BY created_at ASC, rowid ASC"
+    ))?;
     let rows = stmt.query_map(
         rusqlite::params![session_id, since.to_rfc3339()],
         map_message_row,
@@ -105,11 +143,10 @@ pub fn list_recent(db: &Database, session_id: &str, limit: usize) -> Result<Vec<
 
 /// 一次性读出某会话全部消息（按时间正序），供内存运行时启动/首碰水合。
 pub fn list_all(db: &Database, session_id: &str) -> Result<Vec<Message>> {
-    let mut stmt = db.conn().prepare(
-        "SELECT id, session_id, role, content, created_at
-         FROM messages WHERE session_id = ?1
-         ORDER BY created_at ASC, rowid ASC",
-    )?;
+    let mut stmt = db.conn().prepare(&format!(
+        "SELECT {COLS} FROM messages WHERE session_id = ?1
+         ORDER BY created_at ASC, rowid ASC"
+    ))?;
     let rows = stmt.query_map([session_id], map_message_row)?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
@@ -142,8 +179,7 @@ fn list_range(db: &Database, session_id: &str, limit: usize, recent: bool) -> Re
         ("ASC", "ASC")
     };
     let sql = format!(
-        "SELECT id, session_id, role, content, created_at
-         FROM messages WHERE session_id = ?1
+        "SELECT {COLS} FROM messages WHERE session_id = ?1
          ORDER BY created_at {by}, rowid {rowid}
          LIMIT ?2"
     );
@@ -163,6 +199,9 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         role: row.get(2)?,
         content: row.get(3)?,
         created_at: row.get(4)?,
+        tool_calls: row.get(5)?,
+        tool_call_id: row.get(6)?,
+        tool_name: row.get(7)?,
     })
 }
 
