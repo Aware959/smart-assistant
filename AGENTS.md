@@ -71,7 +71,9 @@ cargo run --bin sa-sticker -- fetch <包名>    # 拉取 Telegram 贴纸包生�
 
 ## 验证基线
 
-改动完成后：`cargo test` 全过 + `cargo check --all-targets` 零警告 + `cargo fmt --all -- --check` 无 diff。涉及 schema 改动时，还要 `sa-mem check`（会对真实库执行增量迁移）确认旧库可正常迁移。
+改动完成后：`cargo test` 全过 + `cargo check --all-targets` 零警告 + `cargo fmt --all -- --check` 无 diff。涉及 schema 改动时，还要 `sa-mem check`（对真实库执行迁移）确认最新版库可正常打开。
+
+> 注：历史迁移已压平到 v17 基线（见 `docs/architecture.md` §7）。`sa-mem check` 只对**新库 / 已升到 v17 的库**干净升级；版本号低于 17 的旧库不再支持平滑升级，需 `rm` 后重建。个人单库场景无影响。
 
 `target/debug` 里的二进制被运行中的进程占用时，`cargo build/test --all-targets` 会报
 `failed to remove file ... .exe`。**不要为此杀掉进程**，改用独立构建目录：

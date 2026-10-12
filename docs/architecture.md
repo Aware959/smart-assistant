@@ -46,10 +46,10 @@
 ├──────────────────────────────────────────────────────────────────────┤
 │  存储层：db/mod.rs（rusqlite + sqlite-vec）                            │
 │  messages / memories / memory_vectors / sessions / channel_sessions / │
-│  self_profile / time_profiles / world_state / relations / meta        │
-│  （time_profiles / world_state / relations 表按 schema 保留、暂无代码   │
-│   接线——aiworld 重设计后由新适配器写；self_profile 已由                 │
-│   core/self_profile 读写，为人设数据源）                              │
+│  self_profile / meta                                                  │
+│  （self_profile 已由 core/self_profile 读写，为人设数据源；            │
+│   time_profiles / world_state / relations 三张死表已由 v17 删掉——      │
+│   代码从不读写，纯 schema 残留，删掉不丢信息）                         │
 │  ↕ Mutex<Database> 同步访问（经 core/session、core/runtime 适配器收敛）│
 ├──────────────────────────────────────────────────────────────────────┤
 │  配置层：config.rs（.env 环境变量 → OnceLock<Config>，全程单例）          │
@@ -203,7 +203,7 @@ AI "关于自己的记忆"（性格/情绪/关系/作息画像，结构化运行
 | `core/context/state.rs`（`render_state` 取数封装） | 已删除 |
 | `memory/current_relation.rs`（亲密度 × 信任度 + `apply_event` 演化） | 已删除（见下方说明） |
 | `memory/current_phase.rs`（时段推断 `infer_from_hours`） | 已删除（见下方说明） |
-| 表 `world_state` / `relations` / `time_profiles` | 按 schema 只增约定保留，暂无代码接线 |
+| 表 `world_state` / `relations` / `time_profiles` | 已由 v17 删掉的死表（代码从不读写，纯 schema 残留，删掉不丢信息） |
 
 > `current_relation` / `current_phase` 一并删除的理由：两者都从未接线到任何生产路径，
 > 而语义与记忆域重叠——"亲密度 / 信任度"表达的是"对方是谁、该被怎么对待"，本来
@@ -361,29 +361,27 @@ search(query)
 
 ---
 
-## 7. 数据库 Schema（v13）
+## 7. 数据库 Schema（v17）
 
-SQLite + WAL 模式 + sqlite-vec 向量扩展。业务表默认只做增量迁移（只增表/列）。
+SQLite + WAL 模式 + sqlite-vec 向量扩展。
+
+**当前 schema 是单一真源**：完全由 `db/schema.rs::init_schema` 里的 `CREATE TABLE IF NOT EXISTS` 定义，新库打开时直接建最新结构。**历史逐版本迁移（v6~v16）已压平**——单人单库且真实库已升到最新，保留逐版本补丁只会增加 `schema.rs` 体积、无实际收益。压平后旧版本库不再支持平滑升级，需 `rm` 后重建。
 
 | 表名 | 用途 |
 |------|------|
 | `meta` | 纯键值元信息（schema_version / embedding_dim / embedding_model / `channel_cursor:{channel}` 拉取游标，§2.1） |
 | `sessions` | 会话（id / title / created_at / updated_at） |
-| `messages` | 对话消息（role = user / assistant / tool，created_at 按通道真实发出时刻写） |
+| `messages` | 对话消息（role = user / assistant；工具结果行用 `role='assistant'` + `tool_call_id`/`tool_name` 标记承载，避免改 role CHECK；created_at 按通道真实发出时刻写） |
 | `memories` | 记忆事实（content / memory_type[CHECK 枚举] / expires_at / message_id） |
 | `memory_vectors` | sqlite-vec0 向量表（memory_id / embedding float32[]） |
 | `channel_sessions` | 通道 ↔ 会话映射（channel + external_id → session_id）；主动候选的来源表 |
 | `self_profile` | AI 自我属性 KV（key / value / updated_at），人设数据源 |
-| `time_profiles` | 时间画像（offset_minutes / active_hour / 观测次数）——**保留、暂无线接** |
-| `world_state` | AI 世界状态（单行 id=1：自我档案 / 情绪）——**保留、暂无线接** |
-| `relations` | 关系状态（closeness / trust）——**保留、暂无线接** |
 
-两处例外（都与"默认值都能重算出来"有关，删表不丢信息）：
+唯一的迁移例外（与"默认值都能重算出来"同一条判据，删表不丢信息）：
 
 | 版本 | 动作 | 理由 |
 |------|------|------|
-| v12 | 重建 `memories` | CHECK 约束只能建在 CREATE TABLE 上，SQLite 不支持 ALTER ADD CONSTRAINT。保数据重建：单事务 + 行数校验 + 失败回滚。同时丢弃 `tier` 列——它与 `memory_type` + `expires_at` 表达同一件事，留着只会矛盾 |
-| v13 | `DROP TABLE intent_state` | 每个值都能从 `messages` 时间线推出（§4.2）。这是它唯一一次真正删表 |
+| v17 | `DROP TABLE relations` / `world_state` / `time_profiles` | 三张表由 v7/v8 引入（关系 / 世界状态 / 作息画像），代码从不读写（无 DAO、无业务调用点），纯 schema 残留。与早先 v13 删 `intent_state` 同理——它们存的每个值都不被任何逻辑当真值来源，删掉不丢信息。按约定 DROP 业务表需升版本号，故从 16 升到 17 |
 
 ---
 
@@ -464,7 +462,7 @@ Kotlin/Swift。
 1. **DB 同步**：所有数据库访问经 `std::sync::Mutex<Database>` 加锁，简单可靠。
 2. **LLM 阻塞调用**：genai 是阻塞 API，在 async 通道里一律 `tokio::task::spawn_blocking`。
 3. **消息 vs 记忆**：`messages` 是原始对话记录；`memories` 只沉淀事实，来源用 `message_id` 关联。
-4. **Schema 迁移**：默认只做增量（只增列/表）。旧库补列用 `add_column_if_missing`。两处例外都遵循同一条判据——**要改的东西必须能从别处重算出来**：v12 重建 `memories` 加 CHECK 约束（保数据重建 + 行数校验 + 失败回滚），v13 删 `intent_state`（值全在 `messages` 里）。
+4. **Schema 迁移**：当前 schema 完全由 `init_schema` 的 `CREATE TABLE IF NOT EXISTS` 定义（单一真源），新库直接建最新结构。历史逐版本迁移（v6~v16）已压平到 v17 基线——单人单库、真实库已升最新，保留逐版本补丁只膨胀 `schema.rs`。压平后旧版本库不再平滑升级，需 `rm` 后重建。仅保留一条 DROP 例外（v17 删三张死表），判据仍是同一条——**要删的东西必须能从别处重算出来 / 不被任何逻辑当真值来源**（见 §7）。
 5. **向量签名锁定**：embedding 模型变更不会自动重建，由独立工具 `cargo run --bin sa-mem -- rebuild` 手动触发，保证旧库不丢数据。
 6. **vec0 kNN 约束**：查询必须写 `k = ?`，把 LIMIT 写在外层查询会报 "A LIMIT or 'k = ?' constraint is required"。
 7. **JSON 结构化输出**：开口决策走 json_schema（支持的模型自动约束输出格式，不支持时退化为自由 JSON + 容错解析）。模型输出一律当**不可信输入**：字段缺失 / `null` / 类型不符 / 空白都回退默认值，不让一次格式抖动变成业务失败。记忆写入改由工具调用承载（参数有 schema 约束），不再走独立判定。
@@ -472,4 +470,4 @@ Kotlin/Swift。
 9. **记忆全链路降级**：`recall_memory` / `remember` 失败只回填一次"没做到"让模型自行纠正，绝不冒泡成"对话失败"。记忆的失败姿态本就是"这条没记住"，不该连累这轮回复。
 10. **提示词塑形 + 流内归一化，两层叠加**：输出形状（换行、长度、句数）主要由 few-shot 示例表达，不写成"不要用空行""不超过 N 字"——模型对禁令的抑制力远弱于示例分布。规则只留示例承载不了的价值判断。字数硬上限会被砍成半句话，宁可不做；`max_tokens` 只作异常熔断。提示词是概率约束，兜不住全部——实测 DeepSeek-V4.1-Flash 仍有 16% 回复带 `\n\n`，故流内再用 `utils/textflow.rs` 归一化空白（收敛连续空白、裁首尾、CJK 两侧不补空格）。**归一化 ≠ 塑形**：它只动空白、不截断不删词，所以不产生半句话，与被砍掉的 `MAX_REPLY_CHARS` 有本质区别。归一化必须发生在 `on_delta` 之前，事后改写全文会让"看到的"和"入库的"不一致。`core/context/prompt.rs` 顶部的维护约定（含"示例块内不得用空行分隔"）是防提示词膨胀与自相矛盾的纪律。
 11. **入站按真实时刻记账**：消息时刻一律取通道报文时间戳，不取接收时刻。这同时决定两件事——消息入库的时间线、主动开口静默窗口的起点。离线积压按游标续传 + 时效分级处理（§2.1），不丢弃也不假装刚收到。
-12. **能不存的就不存**：删状态前先问"这些值能不能从别处算出来"。`intent_state` 的每个字段都是 `messages` 时间线的一次 `MAX`，抄一份就多一条会漂移的写穿路径；`memories.tier` 与 `memory_type` + `expires_at` 表达同一件事，留着只会让前端拿到自相矛盾的两组值。状态表是缓存，能重算就别当真值来源。
+12. **能不存的就不存**：删状态前先问"这些值能不能从别处算出来"。`intent_state` 的每个字段都是 `messages` 时间线的一次 `MAX`，抄一份就多一条会漂移的写穿路径（v13 已删，迁移已压平，见 §7）；`memories.tier` 与 `memory_type` + `expires_at` 表达同一件事，留着只会让前端拿到自相矛盾的两组值。状态表是缓存，能重算就别当真值来源——这条判据也正是 v17 删三张死表的依据。
