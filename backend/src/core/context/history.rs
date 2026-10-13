@@ -91,9 +91,9 @@ pub(crate) fn build_day_history(turns: &[MessageTurn]) -> Result<Vec<ChatMessage
 
 /// 把一条持久化历史轮次还原成发给模型的 [`ChatMessage`]，拼回工具调用上下文。
 ///
-/// genai 要求 assistant 轮的工具调用必须紧跟对应的 tool 结果；工具结果在库里沿用
-/// `role='assistant'` + `tool_call_id` 标记（避免改动 messages 的 role CHECK 约束），
-/// 这里据 `tool_call_id` 非空还原成 `role='tool'`，据 `tool_calls` 的 JSON 还原工具调用列表。
+/// genai 要求 assistant 轮的工具调用必须紧跟对应的 tool 结果。两者都按落库时的原样
+/// 读出：助手轮 `role='assistant'` + `tool_calls` JSON，工具结果 `role='tool'` +
+/// `tool_call_id` / `tool_name`。
 fn turn_to_chat(turn: &MessageTurn) -> ChatMessage {
     let mut msg = ChatMessage::new(turn.role.clone(), turn.content.clone());
     if let Some(json) = &turn.tool_calls {
@@ -103,10 +103,6 @@ fn turn_to_chat(turn: &MessageTurn) -> ChatMessage {
     }
     msg.tool_call_id = turn.tool_call_id.clone();
     msg.tool_name = turn.tool_name.clone();
-    // tool 结果行：库里 role 仍是 assistant，按 tool_call_id 还原协议角色。
-    if msg.tool_call_id.is_some() {
-        msg.role = "tool".to_string();
-    }
     msg
 }
 
@@ -218,9 +214,9 @@ mod tests {
         assert_eq!(a.tool_calls.len(), 1);
         assert_eq!(a.tool_calls[0].fn_name, "recall_memory");
 
-        // 工具结果行：库里 role='assistant' + tool_call_id 非空，应还原成 role='tool'。
+        // 工具结果行：落库时 role 就是 'tool' + tool_call_id，原样还原成 role='tool'。
         let result = MessageTurn {
-            role: "assistant".to_string(),
+            role: "tool".to_string(),
             content: "数据".to_string(),
             created_at: rfc(Utc::now()),
             tool_calls: None,

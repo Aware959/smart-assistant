@@ -40,11 +40,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             user_time: None,
         };
         // 回调收到的是**一条完整消息**（不再逐字增量）：每次调用即一行。
-        // 注意 `on_message` 在 `chat_stream` 返回前就已全部触发，这里不能再打
+        // 注意投递在 `chat_stream` 返回前就已全部触发，这里不能再打
         // `out.reply`——那会把整轮内容重复输出一遍。
-        match chat.chat_stream(&input, |msg| {
-            println!("{msg}");
+        match chat.chat_stream(&input, |reply| {
+            println!("{}", reply.projection());
             io::stdout().flush().ok();
+            Ok(None)
         }) {
             Ok(out) => {
                 println!("[会话 {}]", out.session_id);
@@ -90,8 +91,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             history_count: None,
             user_time: None,
         };
-        match chat.chat_stream(&input, |msg| {
-            println!("{msg}");
+        match chat.chat_stream(&input, |reply| {
+            println!("{}", reply.projection());
+            Ok(None)
         }) {
             Ok(out) => {
                 session_id = Some(out.session_id.clone());

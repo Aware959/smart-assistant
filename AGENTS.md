@@ -75,13 +75,6 @@ cargo run --bin sa-sticker -- fetch <包名>    # 拉取 Telegram 贴纸包生�
 
 > 注：历史迁移已压平到 v17 基线（见 `docs/architecture.md` §7）。`sa-mem check` 只对**新库 / 已升到 v17 的库**干净升级；版本号低于 17 的旧库不再支持平滑升级，需 `rm` 后重建。个人单库场景无影响。
 
-`target/debug` 里的二进制被运行中的进程占用时，`cargo build/test --all-targets` 会报
-`failed to remove file ... .exe`。**不要为此杀掉进程**，改用独立构建目录：
-
-```bash
-$env:CARGO_TARGET_DIR="E:\Project\Rust\smart-assistant\backend\target-alt"   # PowerShell
-```
-
 **排版由 rustfmt 决定，不要手改**：仓库已全量 `cargo fmt` 归一（`rust-toolchain.toml` 固定 stable + rustfmt/clippy），改动写完直接跑 `cargo fmt --all`。手写排版会在下次 fmt 时被重排成另一种 diff，白白制造冲突。
 
 **验证不许污染真实库**：`smart_assistant.db` 就是用户的真实数据，`sa-cli` / `sa-web` / `sa-link` 也都默认连它。需要真实调用 LLM 或通道来验证功能时：

@@ -13,8 +13,7 @@ pub struct Message {
     pub created_at: String,
     /// assistant 轮携带的工具调用列表（JSON 数组），持久化工具往返用。
     pub tool_calls: Option<String>,
-    /// `role='assistant'` 且 `tool_call_id` 非空时，表示这是某次工具调用的结果，
-    /// 加载历史时还原为 genai 的 role='tool'。
+    /// 工具结果行的调用 id（`role='tool'` 时非空）：重建协议时用于配对发起它的那次调用。
     pub tool_call_id: Option<String>,
     /// 工具结果对应的工具名（部分 provider 回填结果时要求）。
     pub tool_name: Option<String>,
@@ -64,8 +63,7 @@ pub fn create_at(
 /// 带工具字段落库：工具往返（assistant 轮的工具调用列表、tool 结果的调用 id 与工具名）。
 ///
 /// `meta.tool_calls` 为 `assistant` 轮的工具调用 JSON 数组；`meta.tool_call_id` /
-/// `meta.tool_name` 为工具结果行使用（结果沿用 `role='assistant'` + `tool_call_id`
-/// 标记，避免改动 messages 的 role CHECK 约束）。三者均可空。
+/// `meta.tool_name` 为工具结果行（`role='tool'`）使用。三者均可空。
 pub fn create_full(
     db: &Database,
     session_id: &str,
@@ -240,5 +238,31 @@ mod tests {
 
         let empty = list_since(&db, &sid, base + Duration::hours(1)).unwrap();
         assert!(empty.is_empty());
+    }
+
+    /// 工具结果以 `role='tool'` 落库并能原样读回（CHECK 约束已放开）。
+    #[test]
+    fn tool_role_roundtrips() {
+        let db = Database::in_memory().unwrap();
+        let sid = session_id(&db);
+        let created = create_full(
+            &db,
+            &sid,
+            "tool",
+            "结果",
+            Utc::now(),
+            &ToolMeta {
+                tool_calls: None,
+                tool_call_id: Some("c1".to_string()),
+                tool_name: Some("recall_memory".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(created.role, "tool");
+
+        let got = get(&db, &created.id).unwrap().unwrap();
+        assert_eq!(got.role, "tool");
+        assert_eq!(got.tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(got.tool_name.as_deref(), Some("recall_memory"));
     }
 }

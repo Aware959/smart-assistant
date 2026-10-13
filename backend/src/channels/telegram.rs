@@ -93,7 +93,7 @@ struct SendMessage<'a> {
 
 /// `sendMessage` 响应体。Bot API 会用 200 携带业务错误（`ok:false`），
 /// 限流时在 `parameters.retry_after` 里给出应当等待的秒数。
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 struct SendResponse {
     #[serde(default)]
     ok: bool,
@@ -101,9 +101,13 @@ struct SendResponse {
     description: Option<String>,
     #[serde(default)]
     parameters: Option<SendParameters>,
+    /// `sendDice` 等业务的 `result` 载荷（骰子点数在 `result.dice.value`）。
+    /// 投骰前不知道点数，必须透传出来交给内核，否则模型只能瞎编。
+    #[serde(default)]
+    result: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SendParameters {
     #[serde(default)]
     retry_after: Option<u64>,
@@ -227,51 +231,62 @@ async fn send_action(
     what: &str,
     url: &str,
     payload: &serde_json::Value,
-) -> Result<(), String> {
-    with_send_retry(&format!("telegram/{what}"), SEND_RETRY, |_| async move {
-        let resp = client
-            .post(url)
-            .timeout(Duration::from_secs(30))
-            .json(payload)
-            .send()
-            .await
-            .map_err(|e| SendErr::Retryable {
-                reason: format!("发送 {what} 失败: {e}"),
-                retry_after: None,
-            })?;
-
-        let status = resp.status();
-        let body = match resp.json::<SendResponse>().await {
-            Ok(b) => b,
-            Err(e) if status.is_success() => {
-                return Err(SendErr::Retryable {
-                    reason: format!("解析响应失败: {e}"),
+) -> Result<SendResponse, String> {
+    // 把成功响应的 `result` 透传出来（骰子点数就藏在里面）：用内部可变捕获在重试闭包里
+    // 写回，最终返回给调用方。用 `Arc<Mutex>`（而非 `Rc<RefCell>`）是因为投递工人跑在
+    // async 任务里，整个 future 必须 `Send`——`Rc` 会把它钉在单线程上。
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(SendResponse::default()));
+    let cap = captured.clone();
+    with_send_retry(&format!("telegram/{what}"), SEND_RETRY, move |_| {
+        let cap = cap.clone();
+        async move {
+            let resp = client
+                .post(url)
+                .timeout(Duration::from_secs(30))
+                .json(payload)
+                .send()
+                .await
+                .map_err(|e| SendErr::Retryable {
+                    reason: format!("发送 {what} 失败: {e}"),
                     retry_after: None,
-                });
-            }
-            Err(_) => SendResponse::default(),
-        };
+                })?;
 
-        if !status.is_success() || !body.ok {
-            let reason = body
-                .description
-                .filter(|d| !d.trim().is_empty())
-                .unwrap_or_else(|| status.to_string());
-            if status_retryable(status.as_u16()) {
-                return Err(SendErr::Retryable {
-                    reason: format!("服务端 {status}: {reason}"),
-                    // 限流按服务端给的秒数等，别把余下几次重投全耗在 429 上。
-                    retry_after: body
-                        .parameters
-                        .and_then(|p| p.retry_after)
-                        .map(Duration::from_secs),
-                });
+            let status = resp.status();
+            let body = match resp.json::<SendResponse>().await {
+                Ok(b) => b,
+                Err(e) if status.is_success() => {
+                    return Err(SendErr::Retryable {
+                        reason: format!("解析响应失败: {e}"),
+                        retry_after: None,
+                    });
+                }
+                Err(_) => SendResponse::default(),
+            };
+
+            if !status.is_success() || !body.ok {
+                let reason = body
+                    .description
+                    .filter(|d| !d.trim().is_empty())
+                    .unwrap_or_else(|| status.to_string());
+                if status_retryable(status.as_u16()) {
+                    return Err(SendErr::Retryable {
+                        reason: format!("服务端 {status}: {reason}"),
+                        // 限流按服务端给的秒数等，别把余下几次重投全耗在 429 上。
+                        retry_after: body
+                            .parameters
+                            .and_then(|p| p.retry_after)
+                            .map(Duration::from_secs),
+                    });
+                }
+                return Err(SendErr::Fatal(format!("发送被拒绝({status}): {reason}")));
             }
-            return Err(SendErr::Fatal(format!("发送被拒绝({status}): {reason}")));
+            *cap.lock().expect("发送响应互斥锁中毒") = body;
+            Ok(())
         }
-        Ok(())
     })
-    .await
+    .await?;
+    let body = captured.lock().expect("发送响应互斥锁中毒").clone();
+    Ok(body)
 }
 
 /// 发一枚动画骰子（Telegram 服务端渲染，无素材上传）。
@@ -280,14 +295,32 @@ async fn send_dice(
     base: &str,
     chat_id: i64,
     emoji: &str,
-) -> Result<(), String> {
-    send_action(
+) -> Result<u8, String> {
+    let resp = send_action(
         client,
         "sendDice",
         &format!("{base}/sendDice"),
         &serde_json::json!({ "chat_id": chat_id, "emoji": emoji }),
     )
-    .await
+    .await?;
+    dice_value(&resp.result)
+}
+
+/// 从 `sendDice` 响应里取出骰子点数（1–6）。
+///
+/// Telegram 的骰子消息在服务端就定好了点数，响应 `result.dice.value` 里立刻带着，
+/// 所以发完骰子就能知道掷出了几——这点必须交回内核，否则模型只能瞎编。
+fn dice_value(result: &Option<serde_json::Value>) -> Result<u8, String> {
+    let v = result
+        .as_ref()
+        .and_then(|r| r.get("dice"))
+        .and_then(|d| d.get("value"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| "骰子响应缺少 result.dice.value".to_string())?;
+    if !(1..=6).contains(&v) {
+        return Err(format!("骰子点数越界: {v}"));
+    }
+    Ok(v as u8)
 }
 
 /// 发一张贴纸。`file_id` 来自 [`crate::core::sticker::StickerCatalog`]，
@@ -305,6 +338,7 @@ async fn send_sticker(
         &serde_json::json!({ "chat_id": chat_id, "sticker": file_id }),
     )
     .await
+    .map(|_| ())
 }
 
 async fn send_typing(client: &reqwest::Client, base: &str, chat_id: i64) {
@@ -314,6 +348,76 @@ async fn send_typing(client: &reqwest::Client, base: &str, chat_id: i64) {
         .json(&serde_json::json!({ "chat_id": chat_id, "action": "typing" }))
         .send()
         .await;
+}
+
+/// 一轮投递请求：一个待发片段 + 把结果带回**同步**对话循环的回执口。
+struct Delivery {
+    reply: Reply,
+    ack: std::sync::mpsc::SyncSender<std::result::Result<Option<u8>, String>>,
+}
+
+/// 通道侧的投递口：对话循环（阻塞线程）通过它把片段交给 [`deliver_worker`] 真正发送。
+///
+/// 为什么要工人而不是在循环里直接发：`chat_stream` 跑在阻塞线程上，直接对 token 发就得
+/// 在阻塞线程里 `block_on` 异步请求；交给同一 runtime 上的工人，既不必嵌套 runtime，
+/// 也能把打字态与真人节奏留在异步侧。循环发一个、阻塞等一个回执，顺序天然不乱。
+#[derive(Clone)]
+struct TgDeliver {
+    tx: tokio::sync::mpsc::UnboundedSender<Delivery>,
+}
+
+impl TgDeliver {
+    /// 投递一个片段并等待落定。骰子返回服务端点数；文本/贴纸返回 `None`。
+    fn deliver(&self, reply: &Reply) -> std::result::Result<Option<u8>, String> {
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(0);
+        self.tx
+            .send(Delivery {
+                reply: reply.clone(),
+                ack: ack_tx,
+            })
+            .map_err(|_| "投递通道已关闭".to_string())?;
+        ack_rx.recv().map_err(|_| "投递工人未回执".to_string())?
+    }
+}
+
+/// 投递工人：按到达顺序逐条发送，维持打字态与真人一句接一句的节奏。
+///
+/// 队列空（所有 sender 被丢弃）即结束；发送结果（骰子点数）经回执口交还对话循环。
+async fn deliver_worker(
+    client: reqwest::Client,
+    base: String,
+    chat_id: i64,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Delivery>,
+) {
+    let mut index = 0usize;
+    while let Some(Delivery { reply, ack }) = rx.recv().await {
+        if index > 0 {
+            tokio::time::sleep(super::pacing_delay(index)).await;
+        }
+        index += 1;
+        send_typing(&client, &base, chat_id).await;
+        let result = match &reply {
+            Reply::Text(text) => send_text(&client, &base, chat_id, text).await.map(|_| None),
+            Reply::Dice { emoji } => send_dice(&client, &base, chat_id, emoji).await.map(Some),
+            Reply::Sticker { file_id } => send_sticker(&client, &base, chat_id, file_id)
+                .await
+                .map(|_| None),
+        };
+        // 回执失败 = 对话循环已放弃（超时 / 异常），工人无需再做别的。
+        let _ = ack.send(result);
+    }
+}
+
+/// 本轮失败 / 超时时补一句兜底话术，避免用户等来一片空白。
+///
+/// 在异步侧直接 `await` 发送（不进 [`TgDeliver`]）——投递口要阻塞等回执，而这里正跑在
+/// runtime 工人线程上。发送本身失败只记日志，不再上抛：此刻已在错误分支里，没有再外层
+/// 的兜底了。
+async fn send_fallback(client: &reqwest::Client, base: &str, chat_id: i64) {
+    send_typing(client, base, chat_id).await;
+    if let Err(e) = send_text(client, base, chat_id, FALLBACK_REPLY).await {
+        tracing::error!(error = %e, chat_id, "兜底回复发送失败");
+    }
 }
 
 /// 主动推送：与长轮询解耦，独立构建 client 直接发送（Telegram 无推送窗口限制）。
@@ -428,74 +532,60 @@ fn inbound_text(message: &TgMessage) -> Option<String> {
 /// 模型整轮没说任何话、或本轮失败/超时时的兜底话术。
 const FALLBACK_REPLY: &str = "刚才走神了，再发一次试试。";
 
-/// 命令类回执：没有用户输入，`user_message_id` 留空表示"本轮无消息来源"。
-fn plain_reply(reply: &str) -> ChatOutput {
-    ChatOutput {
-        session_id: String::new(),
-        reply: reply.to_string(),
-        messages: vec![reply.to_string()],
-        rich: vec![Reply::Text(reply.to_string())],
-        user_message_id: String::new(),
-        memory: None,
+/// 命令类消息的即时回执：`/start` 打招呼、`/new` 重开会话。
+///
+/// 返回 `Some(文本)` 表示这是命令、已处理完，直接把这段文本发出去即可；`None` 表示普通
+/// 消息，交给 AI 流水线。命令不进 AI 流水线，所以既不必起投递工人，也不必占一个阻塞线程。
+fn command_reply(session: &Sessions, chat_id: i64, text: &str) -> Result<Option<String>, String> {
+    match text.trim() {
+        "/start" => Ok(Some(
+            "你好，我是你的记忆助手。直接发消息聊天，我会记住值得记住的事；发送 /new 开始一段新的对话。"
+                .to_string(),
+        )),
+        "/new" => {
+            session
+                .reset(CHANNEL, &chat_id.to_string())
+                .map_err(|e| e.to_string())?;
+            Ok(Some("已开始新对话，之前的记录保留在记忆库里。".to_string()))
+        }
+        _ => Ok(None),
     }
 }
 
-/// 处理一条 TG 文本消息，返回本轮对话结果（None 表示无需回复）。
+/// 处理一条 TG 对话消息，返回本轮对话结果。
 ///
-/// 只负责产出回复；记忆由模型在本轮内自行决定是否写入（`remember` 工具）。
+/// 回复在**本轮内即时投递**（见 [`TgDeliver`]）：内核在工具循环里逐片段投递，骰子点数
+/// 也在这条路径上拿回并回填给模型。只负责产出回复；记忆由模型在本轮内自行决定是否写入
+/// （`remember` 工具）。命令类消息（`/start` / `/new`）不走到这里，见 [`command_reply`]。
 async fn handle_text(
     chat: Arc<Agent>,
     session: Arc<Sessions>,
     chat_id: i64,
     text: &str,
     user_time: Option<String>,
-) -> Result<Option<ChatOutput>, String> {
-    let external = chat_id.to_string();
+    deliverer: TgDeliver,
+) -> Result<ChatOutput, String> {
+    let session_id = session
+        .resolve(CHANNEL, &chat_id.to_string())
+        .map_err(|e| e.to_string())?;
     let text = text.to_string();
-    match text.trim() {
-        "/start" => Ok(Some(plain_reply(
-            "你好，我是你的记忆助手。直接发消息聊天，我会记住值得记住的事；发送 /new 开始一段新的对话。",
-        ))),
-        "/new" => {
-            session
-                .reset(CHANNEL, &external)
-                .map_err(|e| e.to_string())?;
-            Ok(Some(plain_reply("已开始新对话，之前的记录保留在记忆库里。")))
-        }
-        _ => {
-            let session_id = session
-                .resolve(CHANNEL, &external)
-                .map_err(|e| e.to_string())?;
-            // 同步的对话流水线要在阻塞线程池里跑（api/chat.rs 同理）。
-            let mut out = tokio::task::spawn_blocking(move || {
-                let input = ChatInput {
-                    message: text.to_string(),
-                    session_id: Some(session_id),
-                    history: Vec::new(),
-                    history_count: None,
-                    user_time,
-                };
-                chat
-                    .chat_stream(&input, |_| {})
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .map_err(|e| format!("对话任务失败: {e}"))??;
-            // 模型可能整轮只调只读工具、没说任何话；`reply` 已被拼成空串。
-            // 逐条发送用 `rich`，文本投影 `messages` 同步兜底，否则会出现"发了 (空回复)"
-            // 而 `reply` 还是空的不一致状态。
-            if out
-                .rich
-                .iter()
-                .all(|r| r.projection().trim().is_empty())
-            {
-                out.rich = vec![Reply::Text(FALLBACK_REPLY.to_string())];
-            }
-            out.messages = out.rich.iter().map(Reply::projection).collect();
-            out.reply = out.messages.join("\n");
-            Ok(Some(out))
-        }
-    }
+    // 同步的对话流水线要在阻塞线程池里跑（api/chat.rs 同理）；投递口一并移进去，
+    // 内核在工具循环里即时发送、当场拿回骰子点数。投递要阻塞等回执，只有在这个
+    // 阻塞线程上才安全——放到 runtime 工人线程上会把调度线程占死。
+    let worker = deliverer.clone();
+    tokio::task::spawn_blocking(move || {
+        let input = ChatInput {
+            message: text,
+            session_id: Some(session_id),
+            history: Vec::new(),
+            history_count: None,
+            user_time,
+        };
+        chat.chat_stream(&input, move |reply| worker.deliver(reply))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("对话任务失败: {e}"))?
 }
 
 /// 长轮询入口。token 为空时直接返回，由 server 入口决定是否调用。
@@ -642,31 +732,64 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
 
             touch_user_reply(&session, &chat_id.to_string(), sent_at);
 
+            // 命令类消息（`/start` / `/new`）在异步侧直接回执，不进 AI 流水线，
+            // 也就不必起投递工人与阻塞线程。
+            match command_reply(&session, chat_id, &text) {
+                Ok(Some(reply)) => {
+                    send_typing(&client, &base, chat_id).await;
+                    if let Err(e) = send_text(&client, &base, chat_id, &reply).await {
+                        tracing::error!(error = %e, chat_id, "命令回执发送失败");
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(error = %e, chat_id, "命令处理失败");
+                    continue;
+                }
+            }
+
             send_typing(&client, &base, chat_id).await;
             let handle_started = std::time::Instant::now();
 
-            // 本轮产出的是**一组独立消息**（模型自己决定说几句），逐条发送。
-            // 整段 join 成一首发出去等于退回单条长回复，整个改造就白做了。
-            let (next_messages, is_fallback) = match tokio::time::timeout(
+            // 本轮产出的是**一组独立消息**（模型自己决定说几句），由内核在工具循环里
+            // 逐条即时投递：投递口把片段交给同一 runtime 上的工人去发，内核对每个片段
+            // 阻塞等回执，顺序天然不乱，骰子点数也在这条路径上当场拿回并回填给模型。
+            let (deliver_tx, deliver_rx) = tokio::sync::mpsc::unbounded_channel();
+            let deliverer = TgDeliver { tx: deliver_tx };
+            let worker = tokio::spawn(deliver_worker(
+                client.clone(),
+                base.clone(),
+                chat_id,
+                deliver_rx,
+            ));
+
+            let handled = tokio::time::timeout(
                 Duration::from_secs(super::AI_DEADLINE_SECS),
-                handle_text(chat.clone(), session.clone(), chat_id, &text, user_time),
+                handle_text(
+                    chat.clone(),
+                    session.clone(),
+                    chat_id,
+                    &text,
+                    user_time,
+                    deliverer.clone(),
+                ),
             )
-            .await
-            {
-                Ok(Ok(Some(out))) => {
+            .await;
+
+            match handled {
+                Ok(Ok(out)) => {
                     tracing::info!(
                         chat_id,
                         elapsed_ms = handle_started.elapsed().as_millis() as u64,
                         messages = out.messages.len(),
                         memory_written = out.memory.is_some(),
-                        "handle_text 返回（回复生产阶段完成）"
+                        "handle_text 返回（回复已即时投递）"
                     );
-                    (out.rich, false)
                 }
-                Ok(Ok(None)) => continue,
                 Ok(Err(e)) => {
                     tracing::error!(error = %e, "对话失败");
-                    (vec![Reply::Text(FALLBACK_REPLY.to_string())], true)
+                    send_fallback(&client, &base, chat_id).await;
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -674,42 +797,15 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                         deadline_secs = super::AI_DEADLINE_SECS,
                         "单轮对话超时，放弃本轮，继续轮询"
                     );
-                    (vec![Reply::Text(FALLBACK_REPLY.to_string())], true)
-                }
-            };
-
-            // 逐条投递：条与条之间留真人打字节奏，并在每次发送前刷新打字态
-            //（工具轮不产消息时模型在想，首条之前可能已经等了很久）。
-            let mut sent_any = false;
-            for (i, reply) in next_messages.iter().enumerate() {
-                if i > 0 {
-                    tokio::time::sleep(super::pacing_delay(i)).await;
-                }
-                send_typing(&client, &base, chat_id).await;
-                let result = match reply {
-                    Reply::Text(text) => send_text(&client, &base, chat_id, text).await,
-                    Reply::Dice { emoji } => send_dice(&client, &base, chat_id, emoji).await,
-                    Reply::Sticker { file_id } => {
-                        send_sticker(&client, &base, chat_id, file_id).await
-                    }
-                };
-                match result {
-                    Ok(()) => sent_any = true,
-                    Err(e) => {
-                        tracing::error!(error = %e, chat_id, index = i, "回复发送失败");
-                        break;
-                    }
+                    send_fallback(&client, &base, chat_id).await;
                 }
             }
 
-            if sent_any {
-                tracing::info!(
-                    chat_id,
-                    is_fallback,
-                    sent = next_messages.len(),
-                    "回复已发送"
-                );
-            }
+            // 收尾：丢弃投递口让工人自然退出，再兜底 abort（超时那轮的内核任务可能
+            // 还挂着，不能再等它，也不能让工人一直空转）。**不 await 工人**——超时后
+            // 那个仍存活的 `spawn_blocking` 会一直持有它的发送端。
+            drop(deliverer);
+            worker.abort();
         }
     }
 }

@@ -82,8 +82,9 @@ async fn handle_chat_stream(
     // LLM 生成在阻塞线程池跑（内部已自带 runtime block_on），增量经 channel 回流。
     tokio::task::spawn_blocking(move || {
         let outcome = state
-            .chat_stream(&input, |message| {
-                let _ = tx.unbounded_send(SseMsg::Delta(message.to_string()));
+            .chat_stream(&input, |reply| {
+                let _ = tx.unbounded_send(SseMsg::Delta(reply.projection()));
+                Ok(None)
             })
             .map_err(|e| e.to_string());
         let _ = tx.unbounded_send(SseMsg::Done(Box::new(outcome)));
@@ -150,8 +151,9 @@ async fn handle_socket(mut socket: axum::extract::ws::WebSocket, state: Arc<Agen
 
                 tokio::task::spawn_blocking(move || {
                     let outcome = state
-                        .chat_stream(&input, |message| {
-                            let _ = tx.unbounded_send(SseMsg::Delta(message.to_string()));
+                        .chat_stream(&input, |reply| {
+                            let _ = tx.unbounded_send(SseMsg::Delta(reply.projection()));
+                            Ok(None)
                         })
                         .map_err(|e| e.to_string());
                     let _ = tx.unbounded_send(SseMsg::Done(Box::new(outcome)));

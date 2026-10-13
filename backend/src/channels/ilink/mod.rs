@@ -107,7 +107,8 @@ async fn handle_text(
                     history_count: None,
                     user_time,
                 };
-                chat.chat_stream(&input, |_| {}).map_err(|e| e.to_string())
+                chat.chat_stream(&input, |_reply| Ok(None))
+                    .map_err(|e| e.to_string())
             })
             .await
             .map_err(|e| format!("对话任务失败: {e}"))??;

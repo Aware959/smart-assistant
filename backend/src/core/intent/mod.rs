@@ -131,7 +131,9 @@ async fn propose(chat: Arc<Agent>, cand: &IntentCandidate) -> Vec<String> {
     let last_user = cand.last_user_reply_at;
     let last_assistant = cand.last_assistant_at;
     let messages = tokio::task::spawn_blocking(move || {
-        chat.proactive_stream(&session_id, now, last_user, last_assistant, |_| {})
+        chat.proactive_stream(&session_id, now, last_user, last_assistant, |_reply| {
+            Ok(None)
+        })
     })
     .await
     .unwrap_or_else(|e| {

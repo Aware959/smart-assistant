@@ -236,8 +236,7 @@ impl Sessions {
     }
 
     /// 追加一条带工具字段的消息（工具往返：assistant 轮的工具调用列表、或 tool 结果
-    /// 的调用 id 与工具名）。沿用 `role='assistant'` + `tool_call_id` 标记工具结果，
-    /// 不新增 `'tool'` 角色（避免改动 messages 的 role CHECK 约束）。
+    /// 的调用 id 与工具名）。工具结果以 `role='tool'` + `tool_call_id` 落库。
     pub fn add_message_full(
         &self,
         session_id: &str,

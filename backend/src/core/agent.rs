@@ -147,15 +147,16 @@ impl Agent {
     /// 1. 取历史（须在用户消息入库前取）→ 用户消息入库；
     /// 2. 组装 messages（**不再无条件召回记忆**，改由模型按需调 `recall_memory`）；
     /// 3. 循环：流式生成 → 有工具则执行并回填、无工具则结束；
-    /// 4. 每条 `send_message` 的文本即时回调 `on_message` 并单独入库。
+    /// 4. 每条回复片段在工具循环里**即时**交给 `deliver` 通道发送并单独入库；
+    ///    骰子的点数由通道当场返回，回填成工具结果供模型同轮使用。
     ///
     /// **记忆写入也在这个循环里**（`remember` 工具），不再有回复交付后的旁路步骤。
     /// 模型看得见整段对话，所以"这句话值不值得记、指的是哪件旧事"只有它能判断；
     /// 而写入失败也只是回填一次"没记住"，不会连累这轮回复——这本来就是记忆该有的
     /// 失败姿态，只是过去它挂在对话主流程之外、每条消息都要跑一遍判定。
-    pub fn chat_stream<F>(&self, input: &ChatInput, on_message: F) -> Result<ChatOutput>
+    pub fn chat_stream<F>(&self, input: &ChatInput, deliver: F) -> Result<ChatOutput>
     where
-        F: FnMut(&str) + Send,
+        F: FnMut(&Reply) -> std::result::Result<Option<u8>, String> + Send,
     {
         // 追踪：一次调用 = 一个 trace_id span，本函数内所有 target="trace" 的事件
         // 都会带上 trace_id / session_id，便于把"一次请求的各环节"归成一组。
@@ -258,7 +259,7 @@ impl Agent {
             messages,
             &tools,
             ToolPolicy::MustReply,
-            on_message,
+            deliver,
         )?;
 
         // 对话路径一条消息都没产出 = 失败。主动路径的"空"是"决定不开口"，
@@ -310,10 +311,10 @@ impl Agent {
         now: chrono::DateTime<chrono::Utc>,
         last_user_reply_at: Option<chrono::DateTime<chrono::Utc>>,
         last_assistant_at: Option<chrono::DateTime<chrono::Utc>>,
-        on_message: F,
+        deliver: F,
     ) -> Result<Vec<String>>
     where
-        F: FnMut(&str) + Send,
+        F: FnMut(&Reply) -> std::result::Result<Option<u8>, String> + Send,
     {
         let recent = self.recent_history_text(session_id, PROACTIVE_HISTORY_TURNS);
         let profile = self.profile_block();
@@ -336,7 +337,7 @@ impl Agent {
             messages,
             &tools,
             ToolPolicy::MayStaySilent,
-            on_message,
+            deliver,
         )?;
         // 主动路径的工具集不含 `send_dice` / `send_sticker`，故这里只可能是文本；仍走
         // 投影以保持统一口径（若将来给主动路径放开非文本，这里改回 `Vec<Reply>` 即可）。
@@ -350,6 +351,9 @@ impl Agent {
     /// 手段，不是提示词软约束。
     ///
     /// 返回 `(本轮投递的消息, 最后写入的记忆)`；"空投递算不算失败"仍由调用方决定。
+    ///
+    /// `deliver` 由通道提供：内核在处理每个回复片段的当下就调用它完成发送，
+    /// 骰子由此拿回服务端点数（见 [`emit`]）。
     fn run_tool_loop<F>(
         &self,
         session_id: &str,
@@ -357,10 +361,10 @@ impl Agent {
         mut messages: Vec<ChatMessage>,
         tools: &[genai::chat::Tool],
         tool_policy: ToolPolicy,
-        mut on_message: F,
+        mut deliver: F,
     ) -> Result<(Vec<Reply>, Option<MemoryRecord>)>
     where
-        F: FnMut(&str) + Send,
+        F: FnMut(&Reply) -> std::result::Result<Option<u8>, String> + Send,
     {
         // 写入过的记忆留给调用方回报宿主；工具上下文是共享引用，
         // 所以这里用内部可变性收集，不能靠 &mut。
@@ -496,11 +500,11 @@ impl Agent {
                             chars = text.chars().count(),
                             "send_message 已投递"
                         );
-                        // 工具结果先落库（role=assistant + tool_call_id 标记），
+                        // 工具结果先以 role='tool' 落库（带 tool_call_id，重建协议时配对），
                         // 投递文本由 emit 回调后收集、迭代末尾统一落库。
                         self.conversation.add_message_full(
                             session_id,
-                            "assistant",
+                            "tool",
                             crate::llm::tool::SEND_MESSAGE_ACK,
                             &crate::db::message::ToolMeta {
                                 tool_calls: None,
@@ -508,7 +512,7 @@ impl Agent {
                                 tool_name: Some(call.fn_name.clone()),
                             },
                         )?;
-                        let record = emit(&mut on_message, &mut delivered, Reply::Text(text))?;
+                        let (record, _) = emit(&mut deliver, &mut delivered, Reply::Text(text))?;
                         if !record.is_empty() {
                             delivered_records.push(record);
                         }
@@ -519,36 +523,48 @@ impl Agent {
                         ));
                     }
                     crate::llm::tool::ToolOutcome::SentDice(emoji) => {
+                        // 骰子由通道**当场**投递：服务端渲染的点数从这里拿回来，
+                        // 回填成工具结果，模型才能在同一轮里据此接话，而不是瞎编。
+                        let (record, dice) = emit(
+                            &mut deliver,
+                            &mut delivered,
+                            Reply::Dice {
+                                emoji: emoji.clone(),
+                            },
+                        )?;
+                        // 拿不到点数（通道不支持骰子 / 服务端未回）就退回通用确认，
+                        // 绝不编一个点数给模型。
+                        let ack = match dice {
+                            Some(value) => format!("已掷出 {value} 点"),
+                            None => crate::llm::tool::SEND_DICE_ACK.to_string(),
+                        };
                         tracing::info!(
                             session = %session_id,
                             emoji = %emoji,
+                            ?dice,
                             "send_dice 已投递"
                         );
                         self.conversation.add_message_full(
                             session_id,
-                            "assistant",
-                            crate::llm::tool::SEND_DICE_ACK,
+                            "tool",
+                            &ack,
                             &crate::db::message::ToolMeta {
                                 tool_calls: None,
                                 tool_call_id: Some(call.call_id.clone()),
                                 tool_name: Some(call.fn_name.clone()),
                             },
                         )?;
-                        let record = emit(&mut on_message, &mut delivered, Reply::Dice { emoji })?;
                         if !record.is_empty() {
                             delivered_records.push(record);
                         }
                         spoke = true;
-                        messages.push(ChatMessage::tool_result(
-                            call,
-                            crate::llm::tool::SEND_DICE_ACK,
-                        ));
+                        messages.push(ChatMessage::tool_result(call, ack));
                     }
                     crate::llm::tool::ToolOutcome::SentSticker(file_id) => {
                         tracing::info!(session = %session_id, "send_sticker 已投递");
                         self.conversation.add_message_full(
                             session_id,
-                            "assistant",
+                            "tool",
                             crate::llm::tool::SEND_STICKER_ACK,
                             &crate::db::message::ToolMeta {
                                 tool_calls: None,
@@ -556,8 +572,8 @@ impl Agent {
                                 tool_name: Some(call.fn_name.clone()),
                             },
                         )?;
-                        let record =
-                            emit(&mut on_message, &mut delivered, Reply::Sticker { file_id })?;
+                        let (record, _) =
+                            emit(&mut deliver, &mut delivered, Reply::Sticker { file_id })?;
                         if !record.is_empty() {
                             delivered_records.push(record);
                         }
@@ -570,7 +586,7 @@ impl Agent {
                     crate::llm::tool::ToolOutcome::Filled(text) => {
                         self.conversation.add_message_full(
                             session_id,
-                            "assistant",
+                            "tool",
                             &text,
                             &crate::db::message::ToolMeta {
                                 tool_calls: None,
@@ -590,7 +606,7 @@ impl Agent {
                         let content = format!("调用失败：{reason}");
                         self.conversation.add_message_full(
                             session_id,
-                            "assistant",
+                            "tool",
                             &content,
                             &crate::db::message::ToolMeta {
                                 tool_calls: None,
@@ -785,38 +801,49 @@ impl crate::llm::tool::ToolContext for TurnTools<'_> {
     }
 }
 
-/// 投递一个回复片段：归一化空白、回调宿主、记入本轮投递列表，返回入库用的文本。
+/// 投递一个回复片段：归一化空白、**即时交给通道发送**、记入本轮投递列表，
+/// 返回 `(入库用文本, 骰子点数)`。
 ///
 /// **每个片段单独落一行**是刻意的——多条 assistant 消息连续入库，正是"一句一句回"
 /// 在时间线上的真实形态，也让后续按轮次回顾时不会把它们粘成一大段。非文本片段
 /// （骰子）以 [`Reply::projection`] 的占位描述入库，保证历史里留有痕迹。
 ///
-/// 注意：本函数**只负责投递与回调**，不再落库——落库由调用方在迭代末尾统一做。
+/// 投递**在工具循环内当场发生**（而不是把片段收齐后再交给通道）：骰子的点数要等
+/// Telegram 服务端渲染时才确定，只有当场拿回来才能作为工具结果回填给模型，让它
+/// 在同一轮里据此接话。文本/贴纸的投递回调返回 `None`，不受影响。
+///
+/// 注意：本函数**只负责投递**，不再落库——落库由调用方在迭代末尾统一做。
 /// 原因见 [`run_tool_loop`]：genai 要求 assistant 的工具调用必须紧跟其 tool 结果，
 /// 而一次响应可能并行吐出多条 `send_message`；若每条投递在分发时就地落库，工具结果
 /// 行与投递文本会交错，重建出的历史会破坏协议顺序。故工具结果先落、投递文本延后到
 /// 迭代末尾落，保证库里顺序恒为 `assistant(调用) → tool(结果)… → assistant(投递文本)`。
-fn emit<F>(on_message: &mut F, delivered: &mut Vec<Reply>, reply: Reply) -> Result<String>
+fn emit<F>(
+    deliver: &mut F,
+    delivered: &mut Vec<Reply>,
+    reply: Reply,
+) -> Result<(String, Option<u8>)>
 where
-    F: FnMut(&str) + Send,
+    F: FnMut(&Reply) -> std::result::Result<Option<u8>, String>,
 {
     // 文本要归一化空白；非文本按其投影入库（投影已是稳定文本，无需再折叠）。
-    let (reply, record) = match reply {
-        Reply::Text(text) => {
-            let text = crate::utils::textflow::flatten(&text);
-            (Reply::Text(text.clone()), text)
-        }
-        other => {
-            let record = other.projection();
-            (other, record)
-        }
+    let reply = match reply {
+        Reply::Text(text) => Reply::Text(crate::utils::textflow::flatten(&text)),
+        other => other,
     };
+    let record = reply.projection();
     if record.trim().is_empty() {
-        return Ok(String::new());
+        return Ok((String::new(), None));
     }
-    on_message(&record);
+    // 即时投递：骰子在这里拿回服务端点数；发送失败按整轮失败上抛。
+    let dice =
+        deliver(&reply).map_err(|e| crate::error::SqlError::Config(format!("投递失败：{e}")))?;
+    // 骰子把真实点数补进入库投影，历史里不留"未知点数"的坑。
+    let record = match (&reply, dice) {
+        (Reply::Dice { emoji }, Some(value)) => format!("[发了骰子 {emoji} 掷出 {value} 点]"),
+        _ => record,
+    };
     delivered.push(reply);
-    Ok(record)
+    Ok((record, dice))
 }
 
 /// 将 RFC3339 字符串解析为 UTC 时刻（解析失败视为未提供，回退接收时刻）。

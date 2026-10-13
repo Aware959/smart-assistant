@@ -2,7 +2,8 @@
 //!
 //! 当前 schema 完全由 [`init_schema`] 里的 `CREATE TABLE IF NOT EXISTS` 定义（单一真源），
 //! 新库打开时直接建最新结构；历史逐版本迁移（v6~v16）已压平，不再保留。
-//! 仅 [`migrate`] 里保留一段 `v17` 清理（删掉三张从未被读写的死表）与末尾的版本戳。
+//! 仅 [`migrate`] 里保留 `v17`（删掉三张从未被读写的死表）、`v18`（`messages` 放开
+//! `role='tool'` 并改写历史工具结果行）两段，与末尾的版本戳。
 //!
 //! 取舍：旧版本库不再支持平滑升级，需重建（`rm` 后重跑）。对单人单库、且已迁移到最新
 //! 的项目，这比无限累积迁移代码更划算；早期图谱时代残留的 `entities` 等表本就不在本
@@ -14,7 +15,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 17;
+pub(crate) const SCHEMA_VERSION: i64 = 18;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -37,7 +38,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS messages (
             id         TEXT PRIMARY KEY,
             session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            role       TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+            role       TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
             content    TEXT NOT NULL,
             created_at TEXT NOT NULL,
             tool_calls TEXT,
@@ -101,8 +102,9 @@ pub(crate) fn stored_version(conn: &Connection) -> Result<Option<String>> {
 ///
 /// 历史逐版本迁移（v6~v16）已压平到 v17 基线：当前 schema 完全由 [`init_schema`] 的
 /// `CREATE TABLE IF NOT EXISTS` 定义，新库直接建最新结构，不再需要逐版本补丁。
-/// 唯一的 DROP 例外是 v17：删掉三张死表 `relations` / `world_state` / `time_profiles`
-/// （代码从不读写，纯 schema 残留，删掉不丢信息）。
+/// 保留的例外只有两处：v17 删掉三张死表 `relations` / `world_state` / `time_profiles`
+/// （代码从不读写，纯 schema 残留，删掉不丢信息）；v18 重建 `messages` 以放开
+/// `role='tool'`（CHECK 无法 ALTER，只能重建表，见下方）。
 fn migrate(conn: &Connection) -> Result<()> {
     let version = meta::get(conn, KEY_SCHEMA_VERSION)?
         .and_then(|v| v.parse::<i64>().ok())
@@ -128,6 +130,45 @@ fn migrate(conn: &Connection) -> Result<()> {
         tracing::info!("迁移 v17：删除死表 relations / world_state / time_profiles");
     }
 
+    // v18：`messages` 放开 `role='tool'`。工具结果此前借用 `role='assistant'` + 非空
+    // `tool_call_id` 标记（只为绕开 role CHECK），加载历史时再还原成 `tool`。这里改为
+    // 直接落 `role='tool'`，并把历史库里这类行一次性改写过来。
+    //
+    // SQLite 无法 ALTER 掉 CHECK，只能按官方"重建表"流程走：建新表 → 拷数据（顺带按
+    // `tool_call_id` 改写 role）→ 删旧表 → 改名 → 重建索引。**期间关掉外键**，否则
+    // `DROP TABLE messages` 会触发 `memories.message_id ON DELETE SET NULL`，把所有
+    // 记忆的来源消息关联抹成 NULL。只处理 v17 这一跳：全新库没有 messages 表，由下面的
+    // `CREATE TABLE IF NOT EXISTS` 直接建最新结构；更低版本的旧库按约定需重建，不再支持。
+    if version == 17 && table_exists(conn, "messages")? {
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             BEGIN;
+             CREATE TABLE messages_new (
+                 id         TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 role       TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+                 content    TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 tool_calls TEXT,
+                 tool_call_id TEXT,
+                 tool_name TEXT
+             );
+             INSERT INTO messages_new (id, session_id, role, content, created_at, tool_calls, tool_call_id, tool_name)
+                 SELECT id, session_id,
+                        CASE WHEN tool_call_id IS NOT NULL THEN 'tool' ELSE role END,
+                        content, created_at, tool_calls, tool_call_id, tool_name
+                 FROM messages;
+             DROP TABLE messages;
+             ALTER TABLE messages_new RENAME TO messages;
+             CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, created_at);
+             COMMIT;
+             PRAGMA foreign_keys=ON;",
+        )?;
+        tracing::info!(
+            "迁移 v18：messages 支持 role='tool'，历史工具结果行由 assistant 改写为 tool"
+        );
+    }
+
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
@@ -135,6 +176,19 @@ fn migrate(conn: &Connection) -> Result<()> {
     tracing::info!("数据库 schema 版本 {version} -> {SCHEMA_VERSION}（增量迁移，业务数据保留）");
     meta::set(conn, KEY_SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
     Ok(())
+}
+
+/// 表是否已存在。
+///
+/// 迁移里用来区分"全新库"与"旧库"：全新库的 `messages` 尚未建出，重建表分支直接跳过，
+/// 由 [`init_schema`] 的 `CREATE TABLE IF NOT EXISTS` 建最新结构。
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [table],
+        |row| row.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 #[cfg(test)]
@@ -148,16 +202,6 @@ mod tests {
         )
         .unwrap();
         conn
-    }
-
-    /// 表是否已存在（sqlite_master）。
-    fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-            [table],
-            |row| row.get(0),
-        )
-        .map_err(Into::into)
     }
 
     /// 非破坏式迁移：旧版本库升级时业务表与内容全部保留。
@@ -225,6 +269,75 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, 1, "messages 一条不能少");
+        assert_eq!(
+            meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
+            SCHEMA_VERSION.to_string()
+        );
+    }
+
+    /// v18：messages 放开 `role='tool'`，历史工具结果行由 assistant 改写过来；
+    /// 重建表不能破坏 `memories.message_id` 的外键关联，业务数据一条不丢。
+    #[test]
+    fn v18_migrates_tool_role_and_keeps_memory_links() {
+        let conn = open_conn();
+        // 复刻生产连接：外键开着，验证 DROP 不会触发 ON DELETE SET NULL。
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE TABLE messages (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                 role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+                 content TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 tool_calls TEXT,
+                 tool_call_id TEXT,
+                 tool_name TEXT
+             );
+             CREATE TABLE memories (
+                 id TEXT PRIMARY KEY,
+                 content TEXT NOT NULL,
+                 memory_type TEXT NOT NULL CHECK (memory_type IN ('trait','preference','routine','plan')),
+                 expires_at TEXT,
+                 message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             INSERT INTO sessions VALUES ('s1','','t','t');
+             INSERT INTO messages (id, session_id, role, content, created_at, tool_call_id, tool_name)
+                 VALUES ('m1','s1','user','在吗','t',NULL,NULL);
+             INSERT INTO messages (id, session_id, role, content, created_at, tool_call_id, tool_name)
+                 VALUES ('m2','s1','assistant','已发送','t','c1','send_message');
+             INSERT INTO memories (id, content, memory_type, message_id, created_at, updated_at)
+                 VALUES ('mem1','记一件事','trait','m1','t','t');
+             INSERT INTO meta (key, value) VALUES ('schema_version','17');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        // 工具结果行改写成 tool，普通行保持原 role。
+        let role_of = |id: &str| -> String {
+            conn.query_row("SELECT role FROM messages WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(role_of("m1"), "user");
+        assert_eq!(role_of("m2"), "tool", "工具结果行应改为 role='tool'");
+        // 新角色可写入（CHECK 已放开）。
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, created_at) VALUES ('m3','s1','tool','ok','t')",
+            [],
+        )
+        .unwrap();
+        // 记忆的来源消息关联没被重建表抹掉。
+        let linked: Option<String> = conn
+            .query_row("SELECT message_id FROM memories WHERE id='mem1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(linked.as_deref(), Some("m1"), "memories.message_id 不能丢");
         assert_eq!(
             meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
             SCHEMA_VERSION.to_string()

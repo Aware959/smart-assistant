@@ -50,3 +50,26 @@ fn 文本优先于贴纸() {
         Some("哈哈")
     );
 }
+
+/// `sendDice` 响应里 `result.dice.value` 就是服务端定好的点数，必须原样取回。
+#[test]
+fn 骰子响应取出点数() {
+    let result = Some(serde_json::json!({ "dice": { "value": 4, "emoji": "🎲" } }));
+    assert_eq!(dice_value(&result), Ok(4));
+}
+
+/// 缺字段 / 非数字都不能瞎编，一律当失败上抛（点数由服务端决定，编一个等于骗模型）。
+#[test]
+fn 骰子响应缺字段报错() {
+    assert!(dice_value(&None).is_err());
+    assert!(dice_value(&Some(serde_json::json!({}))).is_err());
+    assert!(dice_value(&Some(serde_json::json!({ "dice": {} }))).is_err());
+    assert!(dice_value(&Some(serde_json::json!({ "dice": { "value": "4" } }))).is_err());
+}
+
+/// 越界值（非 1–6）同样拒绝：宁可退回通用确认，也不把非法点数交给模型。
+#[test]
+fn 骰子响应越界报错() {
+    assert!(dice_value(&Some(serde_json::json!({ "dice": { "value": 0 } }))).is_err());
+    assert!(dice_value(&Some(serde_json::json!({ "dice": { "value": 7 } }))).is_err());
+}
