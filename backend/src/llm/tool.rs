@@ -2,9 +2,11 @@
 //!
 //! 分三类，职责完全不同：
 //!
-//! - **输出工具** [`SEND_MESSAGE`] / [`SEND_DICE`] / [`SEND_STICKER`]：对外出口。
-//!   模型想让用户看到的东西只能走这三条，调用即投递，返回给模型的确认文本不参与
-//!   任何判断。三者是并列的三种形态——正文、服务端渲染的骰子、贴纸，都算"说话"。
+//! - **输出工具** [`SEND_MESSAGE`] / [`SEND_DICE`] / [`SEND_STICKER`] / [`GENERATE_IMAGE`]
+//!   / [`GENERATE_VOICE`]：对外出口。模型想让用户看到的东西只能走这些，调用即投递，
+//!   返回给模型的确认文本不参与任何判断。它们并列多种形态——正文、服务端渲染的骰子、
+//!   贴纸、本机生成的图片/语音，都算"说话"。后两者只描述生成意图，真正的网络调用
+//!   在通道层的异步投递工人里完成（见 [`crate::channels::telegram`]）。
 //! - **只读工具** [`GET_NOW`] / [`RECALL_MEMORY`]：只取上下文，不改状态。
 //!   调用结果回填给模型继续推理。
 //! - **写入工具** [`REMEMBER`]：模型主动沉淀一条长期记忆。改状态，但改的是
@@ -26,6 +28,14 @@ pub const SEND_MESSAGE: &str = "send_message";
 pub const SEND_DICE: &str = "send_dice";
 /// 对外输出工具：模型调用它即向用户投递一张贴纸（表情包）。
 pub const SEND_STICKER: &str = "send_sticker";
+/// 对外输出工具：模型调用它即让本机媒体网关生成一张图片并发给用户。
+///
+/// 与 `SEND_STICKER` 同构——工具只描述"要生成什么"，真正的 HTTP（调网关、
+/// 上传到 Telegram）由 Telegram 通道的异步投递工人在 [`crate::channels::telegram`]
+/// 里完成，内核保持无网络。
+pub const GENERATE_IMAGE: &str = "generate_image";
+/// 对外输出工具：模型调用它即让本机媒体网关合成一段语音并发给用户。
+pub const GENERATE_VOICE: &str = "generate_voice";
 /// 只读工具：取当前本地时间。
 pub const GET_NOW: &str = "get_now";
 /// 只读工具：按改写后的 query 检索长期记忆。
@@ -52,6 +62,11 @@ pub enum ToolOutcome {
     SentDice(String),
     /// 输出工具产出的非文本片段：一张贴纸（其 `file_id`）。
     SentSticker(String),
+    /// 输出工具产出的生成请求：让本机网关按 `prompt` 出一张图并发给用户。
+    /// 携带的是生成意图，真正调网关取字节 + 上传在通道层完成。
+    GenerateImage(String),
+    /// 输出工具产出的生成请求：让本机网关按 `text` 合成一段语音并发给用户。
+    GenerateVoice(String),
     /// 只读工具产出的回填文本。
     Filled(String),
     /// 调用非法（未知工具名 / 参数不合约），回填给模型让它自行纠正。
@@ -94,6 +109,12 @@ pub fn definitions(stickers: &StickerCatalog) -> Vec<Tool> {
     let mut defs = vec![send_message_tool(), send_dice_tool()];
     if !stickers.is_empty() {
         defs.push(send_sticker_tool(&stickers.keys()));
+    }
+    // 媒体生成工具：仅在网关开启时下发。与贴纸同理——没起网关时模型调了必失败，
+    // 不如整个工具不出现，让它不知道有这能力。
+    if crate::config::Config::get().media_gateway_enabled {
+        defs.push(generate_image_tool());
+        defs.push(generate_voice_tool());
     }
     defs.extend([get_now_tool(), recall_memory_tool(), remember_tool()]);
     defs
@@ -171,6 +192,55 @@ fn send_sticker_tool(keys: &[String]) -> Tool {
                 }
             },
             "required": ["key"],
+            "additionalProperties": false
+        }))
+}
+
+/// 图片生成工具。只描述"要画什么"，真正调本机网关出图 + 上传到 Telegram 由通道层完成。
+/// `caption` 是可选的一句话，随图附带给用户（像给图片配句旁白），不填就只发图。
+fn generate_image_tool() -> Tool {
+    Tool::new(GENERATE_IMAGE)
+        .with_description(
+            "让本机软件按描述生成一张图片并发给用户——你看得见画面的想象、想给用户看某个画面、\
+             或用户让你'画一张/来张图'时用它。一次调用生成并发送一张，想换风格就再调一次。\
+             prompt 用英文描述画面效果更好（本地扩散模型主要吃英文）。\
+             可以顺手给一句 caption 当图片旁白，不填就只发图。生成需要一点时间，发出即送达。",
+        )
+        .with_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "画面描述（英文更佳），如「a cat sitting on a windowsill at sunset, cinematic lighting」"
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "随图附带给用户的一句话（可选），不填则只发图片"
+                }
+            },
+            "required": ["prompt"],
+            "additionalProperties": false
+        }))
+}
+
+/// 语音合成工具。把一段文字念成语音发给用户——想让用户"听到"你说话、或用户让你
+/// "念一段/读出来"时用它。真正调本机 TTS 合成 + 上传到 Telegram 由通道层完成。
+fn generate_voice_tool() -> Tool {
+    Tool::new(GENERATE_VOICE)
+        .with_description(
+            "把一段文字用语音念出来发给用户——想让用户听到你的声音、或用户让你'念一段/读出来'时用它。\
+             一次调用合成并发送一段语音，text 就是要念的内容。\
+             语音合成需要一点时间，发出即送达。",
+        )
+        .with_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "要念成语音的文字内容"
+                }
+            },
+            "required": ["text"],
             "additionalProperties": false
         }))
 }
@@ -321,6 +391,28 @@ pub fn dispatch(call: &ChatCall, ctx: &dyn ToolContext) -> ToolOutcome {
                 }
             }
         }
+        GENERATE_IMAGE => {
+            // 只取 prompt（必要时顺手裁剪首尾空白）；caption 在通道层随图发出，这里不验证。
+            // 真正的出图网络调用在 Telegram 投递工人里做，内核保持纯函数无网络。
+            match call
+                .arg_str("prompt")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(prompt) => ToolOutcome::GenerateImage(prompt.to_string()),
+                None => ToolOutcome::Rejected("缺少参数 prompt".to_string()),
+            }
+        }
+        GENERATE_VOICE => {
+            match call
+                .arg_str("text")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(text) => ToolOutcome::GenerateVoice(text.to_string()),
+                None => ToolOutcome::Rejected("缺少参数 text".to_string()),
+            }
+        }
         GET_NOW => ToolOutcome::Filled(ctx.now()),
         RECALL_MEMORY => match call.arg_str("query") {
             Some(q) if !q.trim().is_empty() => ToolOutcome::Filled(ctx.recall(q.trim())),
@@ -383,6 +475,13 @@ pub const SEND_DICE_ACK: &str = "已发送";
 /// 刻意不带上是哪张贴纸：键本身已在模型的这次调用里，回填一遍只会让它接着
 /// 向用户解释"我刚发了一张 XX"。
 pub const SEND_STICKER_ACK: &str = "已发送";
+
+/// `generate_image` 已投递（生成并发送）后回填给模型的确认文本。极短，与
+/// [`SEND_STICKER_ACK`] 同构——不复述 prompt，避免模型接着向用户解释"我刚画了…"。
+pub const GENERATE_IMAGE_ACK: &str = "已发送图片";
+
+/// `generate_voice` 已投递（合成并发送）后回填给模型的确认文本。极短。
+pub const GENERATE_VOICE_ACK: &str = "已发送语音";
 
 /// `remember` 新增一条记忆后的回填文本。同样极短，且不复述内容——
 /// 让模型把自己的话再抄一遍进下一轮 prompt，只会诱发它接着解释"我记住了…"。

@@ -44,6 +44,14 @@ pub enum Reply {
     /// 一张贴纸（表情包）。`file_id` 来自 [`crate::core::sticker::StickerCatalog`]，
     /// 选择键不进片段——键可能被手改，历史里留键反而会在重拉目录后指向别的图。
     Sticker { file_id: String },
+    /// 一张本机生成的图片。`prompt` 是生成描述，`caption` 是可选的随图旁白；
+    /// 真正调网关取字节 + 上传在通道层完成，这里只承载意图。
+    Photo {
+        prompt: String,
+        caption: Option<String>,
+    },
+    /// 一段本机合成的语音。`text` 是要念的内容；合成 + 上传在通道层完成。
+    Voice { text: String },
 }
 
 impl Reply {
@@ -56,6 +64,11 @@ impl Reply {
             Reply::Text(text) => text.clone(),
             Reply::Dice { emoji } => format!("[发了骰子 {emoji}]"),
             Reply::Sticker { .. } => "[发了一个表情包]".to_string(),
+            Reply::Photo { caption, .. } => match caption {
+                Some(c) => format!("[发了一张图片] {c}"),
+                None => "[发了一张图片]".to_string(),
+            },
+            Reply::Voice { .. } => "[发了一段语音]".to_string(),
         }
     }
 
@@ -63,7 +76,10 @@ impl Reply {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Reply::Text(text) => Some(text),
-            Reply::Dice { .. } | Reply::Sticker { .. } => None,
+            Reply::Dice { .. }
+            | Reply::Sticker { .. }
+            | Reply::Photo { .. }
+            | Reply::Voice { .. } => None,
         }
     }
 }
@@ -581,6 +597,65 @@ impl Agent {
                         messages.push(ChatMessage::tool_result(
                             call,
                             crate::llm::tool::SEND_STICKER_ACK,
+                        ));
+                    }
+                    crate::llm::tool::ToolOutcome::GenerateImage(prompt) => {
+                        // 意图先入库（ack 占位），真正的出图 + 上传在通道投递工人里异步完成。
+                        self.conversation.add_message_full(
+                            session_id,
+                            "tool",
+                            crate::llm::tool::GENERATE_IMAGE_ACK,
+                            &crate::db::message::ToolMeta {
+                                tool_calls: None,
+                                tool_call_id: Some(call.call_id.clone()),
+                                tool_name: Some(call.fn_name.clone()),
+                            },
+                        )?;
+                        let caption = call
+                            .arg_str("caption")
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from);
+                        let (record, _) = emit(
+                            &mut deliver,
+                            &mut delivered,
+                            Reply::Photo {
+                                prompt: prompt.clone(),
+                                caption,
+                            },
+                        )?;
+                        if !record.is_empty() {
+                            delivered_records.push(record);
+                        }
+                        spoke = true;
+                        messages.push(ChatMessage::tool_result(
+                            call,
+                            crate::llm::tool::GENERATE_IMAGE_ACK,
+                        ));
+                    }
+                    crate::llm::tool::ToolOutcome::GenerateVoice(text) => {
+                        self.conversation.add_message_full(
+                            session_id,
+                            "tool",
+                            crate::llm::tool::GENERATE_VOICE_ACK,
+                            &crate::db::message::ToolMeta {
+                                tool_calls: None,
+                                tool_call_id: Some(call.call_id.clone()),
+                                tool_name: Some(call.fn_name.clone()),
+                            },
+                        )?;
+                        let (record, _) = emit(
+                            &mut deliver,
+                            &mut delivered,
+                            Reply::Voice { text: text.clone() },
+                        )?;
+                        if !record.is_empty() {
+                            delivered_records.push(record);
+                        }
+                        spoke = true;
+                        messages.push(ChatMessage::tool_result(
+                            call,
+                            crate::llm::tool::GENERATE_VOICE_ACK,
                         ));
                     }
                     crate::llm::tool::ToolOutcome::Filled(text) => {

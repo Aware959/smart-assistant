@@ -84,8 +84,8 @@ ctrlc = "3"
 # .env 文件加载（server / cli 启动时）
 dotenvy = "0.15"
 
-# Telegram Bot API 调用（channels/telegram 长轮询）
-reqwest = { version = "0.12", optional = true, features = ["json"] }
+# Telegram Bot API 调用（channels/telegram 长轮询）；multipart 用于上传生成的图片/语音字节
+reqwest = { version = "0.12", optional = true, features = ["json", "multipart"] }
 # 微信 iLink 通道：base64（X-WECHAT-UIN）+ 终端二维码渲染（扫码登录）
 base64 = { version = "0.22", optional = true }
 qrcode = { version = "0.14", optional = true }

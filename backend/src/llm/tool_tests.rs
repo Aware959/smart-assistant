@@ -93,6 +93,9 @@ fn send_message_超长不投递也不截断() {
         ToolOutcome::Sent(_) => panic!("超长消息不应被投递"),
         ToolOutcome::SentDice(_) => panic!("send_message 不应产出骰子"),
         ToolOutcome::SentSticker(_) => panic!("send_message 不应产出贴纸"),
+        ToolOutcome::GenerateImage(_) | ToolOutcome::GenerateVoice(_) => {
+            panic!("send_message 不应产出媒体生成")
+        }
         ToolOutcome::Filled(msg) => assert!(msg.contains("超过单条")),
         ToolOutcome::Rejected(_) => panic!("超长属参数问题，应提示改写而非拒绝"),
     }
@@ -422,6 +425,69 @@ fn remember_描述里带准入三道闸() {
             schema.contains(kind.as_str()),
             "schema 的 kind 枚举应列出 {}：{schema}",
             kind.as_str()
+        );
+    }
+}
+
+/// `generate_image`：合法 prompt 产出 `GenerateImage`，真实出图在通道投递工人里做。
+#[test]
+fn generate_image_合法prompt产出生成意图() {
+    let out = dispatch(
+        &call(
+            GENERATE_IMAGE,
+            serde_json::json!({ "prompt": "a cat on a windowsill", "caption": "看这只猫" }),
+        ),
+        &stub(),
+    );
+    assert!(matches!(out, ToolOutcome::GenerateImage(p) if p == "a cat on a windowsill"));
+}
+
+/// `generate_image` 缺 prompt 必须本地拒绝，不让模型拿空 prompt 去网关撞错误。
+#[test]
+fn generate_image_缺prompt被拒绝() {
+    for args in [serde_json::json!({}), serde_json::json!({ "prompt": "  " })] {
+        let out = dispatch(&call(GENERATE_IMAGE, args), &stub());
+        assert!(
+            matches!(out, ToolOutcome::Rejected(_)),
+            "缺 prompt 应拒绝：{out:?}"
+        );
+    }
+}
+
+/// `generate_voice`：合法 text 产出 `GenerateVoice`。
+#[test]
+fn generate_voice_合法text产出生成意图() {
+    let out = dispatch(
+        &call(
+            GENERATE_VOICE,
+            serde_json::json!({ "text": "晚安，早点睡" }),
+        ),
+        &stub(),
+    );
+    assert!(matches!(out, ToolOutcome::GenerateVoice(t) if t == "晚安，早点睡"));
+}
+
+/// `generate_voice` 缺 text 必须本地拒绝。
+#[test]
+fn generate_voice_缺text被拒绝() {
+    let out = dispatch(&call(GENERATE_VOICE, serde_json::json!({})), &stub());
+    assert!(matches!(out, ToolOutcome::Rejected(_)));
+}
+
+/// 媒体生成工具只在网关开启时下发，避免没起网关时模型调了必失败。
+#[test]
+fn 媒体工具仅在网关开启时下发() {
+    // 注意：本测试依赖进程环境变量 MEDIA_GATEWAY_ENABLED。CI/默认环境下应为关闭，
+    // 工具不应出现；这里只断言"关闭时不在 defs 里"，开启路径由集成/手动验证覆盖。
+    if !std::env::var("MEDIA_GATEWAY_ENABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        let defs = definitions(&StickerCatalog::empty());
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            !names.contains(&GENERATE_IMAGE) && !names.contains(&GENERATE_VOICE),
+            "网关关闭时不应下发媒体生成工具"
         );
     }
 }

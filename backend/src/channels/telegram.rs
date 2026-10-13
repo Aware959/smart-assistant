@@ -341,11 +341,202 @@ async fn send_sticker(
     .map(|_| ())
 }
 
+/// 调本机媒体网关生成媒体，返回原始字节。
+///
+/// 网关是独立的本地进程（见仓库 `media-gateway/`），Rust 只跟它做 HTTP，对它背后的
+/// 扩散软件 / TTS 无感知。`kind` 为 `image` / `voice`，对应网关的
+/// `/generate/image` / `/generate/voice`。
+///
+/// ⚠️ 必须显式 `.no_proxy()`：本机 Clash 系统代理会把 `127.0.0.1` 也路由进代理，
+/// 否则这里会连不上网关。切勿改用全局 `NO_PROXY=*`——那会连 Telegram 轮询依赖的代理一并绕过。
+async fn media_generate(
+    media_url: &str,
+    kind: &str,
+    prompt: &str,
+    timeout: u64,
+) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(timeout))
+        .build()
+        .map_err(|e| format!("创建媒体网关客户端失败: {e}"))?;
+    let url = format!("{media_url}/generate/{kind}");
+    // 只传最必要的字段：图片传 prompt、语音传 text；其余参数（步数、尺寸、音色…）
+    // 由网关按自己接的后端决定默认值，Rust 不必关心。
+    let body = if kind == "image" {
+        serde_json::json!({ "prompt": prompt })
+    } else {
+        serde_json::json!({ "text": prompt })
+    };
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("调用媒体网关失败: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let detail = resp.text().await.unwrap_or_default();
+        return Err(format!("媒体网关返回 {status}: {detail}"));
+    }
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("读取媒体字节失败: {e}"))
+}
+
+/// 一次媒体上传的 Telegram 端点三要素：方法名 / 多部件字段名 / 上传文件名。
+///
+/// 三者总是成组出现（`sendPhoto`↔`photo`↔`image.png`），打包成一个值既省去逐个传参，
+/// 也避免调用方把字段名和方法名配错。
+#[derive(Clone, Copy)]
+struct MediaPart {
+    method: &'static str,
+    field: &'static str,
+    filename: &'static str,
+}
+
+/// 上传一张本地生成的图片（多部件）。`caption` 为可选随图旁白。
+async fn send_photo(
+    client: &reqwest::Client,
+    base: &str,
+    chat_id: i64,
+    bytes: &[u8],
+    caption: Option<&str>,
+) -> Result<(), String> {
+    send_media(
+        client,
+        base,
+        chat_id,
+        MediaPart {
+            method: "sendPhoto",
+            field: "photo",
+            filename: "image.png",
+        },
+        bytes.to_vec(),
+        caption.map(str::to_string),
+    )
+    .await
+}
+
+/// 上传一段本地合成的语音（多部件）。Telegram 语音不带 caption（用语音本身表达）。
+async fn send_voice(
+    client: &reqwest::Client,
+    base: &str,
+    chat_id: i64,
+    bytes: &[u8],
+    caption: Option<&str>,
+) -> Result<(), String> {
+    send_media(
+        client,
+        base,
+        chat_id,
+        MediaPart {
+            method: "sendVoice",
+            field: "voice",
+            filename: "voice.ogg",
+        },
+        bytes.to_vec(),
+        caption.map(str::to_string),
+    )
+    .await
+}
+
+/// 以 `multipart/form-data` 上传一段媒体字节到 Telegram（`sendPhoto` / `sendVoice` 同构）。
+///
+/// 与 [`send_action`] 共用同一套重试与错误分类：传输层错误 / 429 / 5xx / 响应截断退避重投，
+/// 4xx 与 `ok:false` 属确定性拒绝立即放弃。表单每次重试都重建（字节可克隆，避免 move 后
+/// 二次调用丢失），所以闭包里现造表单。`MediaPart` 是 `Copy`，重试闭包每次现造即可。
+async fn send_media(
+    client: &reqwest::Client,
+    base: &str,
+    chat_id: i64,
+    part: MediaPart,
+    bytes: Vec<u8>,
+    caption: Option<String>,
+) -> Result<(), String> {
+    let url = format!("{base}/{}", part.method);
+    with_send_retry(
+        &format!("telegram/{}", part.method),
+        SEND_RETRY,
+        move |_| {
+            // 重试闭包是 FnMut（可能跑多次），里面要的值每次都得是新的，故先克隆再 move 进 future。
+            let url = url.clone();
+            let bytes = bytes.clone();
+            let caption = caption.clone();
+            let what = part.method;
+            async move {
+                let mut form = reqwest::multipart::Form::new()
+                    .text("chat_id", chat_id.to_string())
+                    .part(
+                        part.field,
+                        reqwest::multipart::Part::bytes(bytes).file_name(part.filename),
+                    );
+                if let Some(c) = caption {
+                    form = form.text("caption", c);
+                }
+                let resp = client
+                    .post(&url)
+                    .timeout(Duration::from_secs(60))
+                    .multipart(form)
+                    .send()
+                    .await
+                    .map_err(|e| SendErr::Retryable {
+                        reason: format!("上传 {what} 失败: {e}"),
+                        retry_after: None,
+                    })?;
+
+                let status = resp.status();
+                let body = match resp.json::<SendResponse>().await {
+                    Ok(b) => b,
+                    Err(e) if status.is_success() => {
+                        return Err(SendErr::Retryable {
+                            reason: format!("解析响应失败: {e}"),
+                            retry_after: None,
+                        });
+                    }
+                    Err(_) => SendResponse::default(),
+                };
+
+                if !status.is_success() || !body.ok {
+                    let reason = body
+                        .description
+                        .filter(|d| !d.trim().is_empty())
+                        .unwrap_or_else(|| status.to_string());
+                    if status_retryable(status.as_u16()) {
+                        return Err(SendErr::Retryable {
+                            reason: format!("服务端 {status}: {reason}"),
+                            retry_after: body
+                                .parameters
+                                .and_then(|p| p.retry_after)
+                                .map(Duration::from_secs),
+                        });
+                    }
+                    return Err(SendErr::Fatal(format!("发送被拒绝({status}): {reason}")));
+                }
+                Ok(())
+            }
+        },
+    )
+    .await
+}
+
 async fn send_typing(client: &reqwest::Client, base: &str, chat_id: i64) {
     let _ = client
         .post(format!("{base}/sendChatAction"))
         .timeout(Duration::from_secs(10))
         .json(&serde_json::json!({ "chat_id": chat_id, "action": "typing" }))
+        .send()
+        .await;
+}
+
+/// 设置「正在做某事」的状态动作：生成图片用 `upload_photo`、合成语音用 `record_voice`，
+/// 让用户知道我们在处理而不是卡住了。失败仅记日志，不影响后续上传。
+async fn send_chat_action(client: &reqwest::Client, base: &str, chat_id: i64, action: &str) {
+    let _ = client
+        .post(format!("{base}/sendChatAction"))
+        .timeout(Duration::from_secs(10))
+        .json(&serde_json::json!({ "chat_id": chat_id, "action": action }))
         .send()
         .await;
 }
@@ -387,6 +578,8 @@ async fn deliver_worker(
     client: reqwest::Client,
     base: String,
     chat_id: i64,
+    media_url: String,
+    media_timeout: u64,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Delivery>,
 ) {
     let mut index = 0usize;
@@ -402,6 +595,33 @@ async fn deliver_worker(
             Reply::Sticker { file_id } => send_sticker(&client, &base, chat_id, file_id)
                 .await
                 .map(|_| None),
+            // 本机生成的图片：先告知"正在上传图片"，再调网关出图、上传到 Telegram。
+            // 生成失败直接上抛，交由对话循环的失败分支发兜底话术。
+            Reply::Photo { prompt, caption } => {
+                send_chat_action(&client, &base, chat_id, "upload_photo").await;
+                match media_generate(&media_url, "image", prompt, media_timeout).await {
+                    Ok(bytes) => send_photo(&client, &base, chat_id, &bytes, caption.as_deref())
+                        .await
+                        .map(|_| None),
+                    Err(e) => {
+                        tracing::error!(error = %e, chat_id, "图片生成失败");
+                        Err(e)
+                    }
+                }
+            }
+            // 本机合成的语音：先告知"正在录音"，再调网关合成、上传到 Telegram。
+            Reply::Voice { text } => {
+                send_chat_action(&client, &base, chat_id, "record_voice").await;
+                match media_generate(&media_url, "voice", text, media_timeout).await {
+                    Ok(bytes) => send_voice(&client, &base, chat_id, &bytes, None)
+                        .await
+                        .map(|_| None),
+                    Err(e) => {
+                        tracing::error!(error = %e, chat_id, "语音合成失败");
+                        Err(e)
+                    }
+                }
+            }
         };
         // 回执失败 = 对话循环已放弃（超时 / 异常），工人无需再做别的。
         let _ = ack.send(result);
@@ -761,6 +981,8 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                 client.clone(),
                 base.clone(),
                 chat_id,
+                Config::get().media_gateway_url.clone(),
+                Config::get().media_gateway_timeout,
                 deliver_rx,
             ));
 

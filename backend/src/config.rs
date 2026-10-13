@@ -98,6 +98,14 @@ pub struct Config {
     /// 追踪日志是否记录内容全文（召回记忆 / 提示词 / 回复 / 判定原文）。
     /// 缺省只记摘要（条数 / 字符数），避免默认把内容大量落盘。
     pub trace_content: bool,
+    /// 本机媒体网关地址（独立进程，包装扩散软件与 TTS）。留空用默认
+    /// `http://127.0.0.1:8787`。Rust 调它时强制不走系统代理（见 [`media_gateway_client`]）。
+    pub media_gateway_url: String,
+    /// 媒体生成工具开关：`1`/`true` 才向模型下发 `generate_image` / `generate_voice`；
+    /// 缺省关闭——未起网关时模型看不到这两个工具，零侵入。
+    pub media_gateway_enabled: bool,
+    /// 媒体生成超时（秒）：图片生成可能很慢，默认 120，超时即本轮回执失败走兜底话术。
+    pub media_gateway_timeout: u64,
 }
 
 impl Default for Config {
@@ -135,6 +143,9 @@ impl Default for Config {
             intent_min_silence_hours: 2,
             intent_max_idle_days: 7,
             trace_content: false,
+            media_gateway_url: "http://127.0.0.1:8787".to_string(),
+            media_gateway_enabled: false,
+            media_gateway_timeout: 120,
         }
     }
 }
@@ -237,6 +248,15 @@ impl Config {
             trace_content: std::env::var("TRACE_CONTENT")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            media_gateway_url: std::env::var("MEDIA_GATEWAY_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8787".to_string()),
+            media_gateway_enabled: std::env::var("MEDIA_GATEWAY_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            media_gateway_timeout: std::env::var("MEDIA_GATEWAY_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
         }
     }
 

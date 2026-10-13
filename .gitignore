@@ -1,3 +1,6 @@
+# docs
+/docs/temp.md
+
 # Rust (backend/)
 /target
 /backend/target
@@ -31,6 +34,10 @@
 frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo
+
+# Python 媒体网关 (media-gateway/)
+media-gateway/**/__pycache__/
+media-gateway/**/*.pyc
 
 # Android (android/)
 android/.gradle/

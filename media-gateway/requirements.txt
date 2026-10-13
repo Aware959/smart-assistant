@@ -1,0 +1,6 @@
+# 媒体网关依赖。
+# 服务端本体只依赖 Python 标准库（http.server + urllib），图片生成零依赖即可跑。
+# 语音默认走 Windows SAPI + ffmpeg（离线、零 Python 依赖），也不需要下面的包。
+# 只有把 TTS_ENGINE 切成 edge-tts（在线音色）时，才需要装它——注意它依赖 aiohttp，
+# 在较新的 Python（如 3.15）上可能装不上/导入即崩，因此不是默认引擎。
+edge-tts>=6.1
