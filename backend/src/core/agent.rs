@@ -170,7 +170,13 @@ impl Agent {
     /// 模型看得见整段对话，所以"这句话值不值得记、指的是哪件旧事"只有它能判断；
     /// 而写入失败也只是回填一次"没记住"，不会连累这轮回复——这本来就是记忆该有的
     /// 失败姿态，只是过去它挂在对话主流程之外、每条消息都要跑一遍判定。
-    pub fn chat_stream<F>(&self, input: &ChatInput, deliver: F) -> Result<ChatOutput>
+    pub fn chat_stream<F>(
+        &self,
+        input: &ChatInput,
+        deliver: F,
+        user_message_id_slot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        resume_user_message_id: Option<String>,
+    ) -> Result<ChatOutput>
     where
         F: FnMut(&Reply) -> std::result::Result<Option<u8>, String> + Send,
     {
@@ -203,7 +209,7 @@ impl Agent {
             self.conversation.set_session_title(&session.id, &title)?;
         }
         span.record("session_id", session.id.as_str());
-        tracing::info!(
+        tracing::debug!(
             target: "trace",
             stage = "start",
             history_count = input.history_count,
@@ -215,9 +221,17 @@ impl Agent {
         // 2. 上下文（一）：历史消息。**必须在"本条用户消息入库"之前取**，否则本轮消息
         // 会被算进历史重复出现。默认按"今天"取对话（日界=用户当地 06:00，今日过少自动
         // 并入昨天，让 AI 有连续性）；显式 history_count 则退化为取最近 N 条。
-        let history_turns =
-            context::fetch_history(self.conversation.as_ref(), &session.id, input.history_count)?;
-        tracing::info!(
+        //
+        // 重试场景（`resume_user_message_id` 非空）下，那条用户消息已在首次尝试时落库、
+        // 会出现在历史里；这里按 id 把它从历史剔除，再由下面在末尾显式 push 一次，保证
+        // 它在 `messages` 里恰好出现一次、时序与首轮完全一致（不受日界/压缩影响）。
+        let history_turns = context::fetch_history(
+            self.conversation.as_ref(),
+            &session.id,
+            input.history_count,
+            resume_user_message_id.as_deref(),
+        )?;
+        tracing::debug!(
             target: "trace",
             stage = "history",
             turns = history_turns.len(),
@@ -226,15 +240,30 @@ impl Agent {
         );
 
         // 用户消息入库（记录）。带通道报文时间戳时用之（消息记录精确时间线），否则记接收时刻。
-        let user_message = match input.user_time.as_deref().and_then(parse_rfc3339) {
-            Some(at) => {
-                self.conversation
-                    .add_message_at(&session.id, "user", &input.message, at)?
+        //
+        // 重试场景（`resume_user_message_id` 非空）下跳过入库——该用户消息已在首次尝试时
+        // 落库，这里直接复用其 id 喂给工具循环，避免重复落一条相同消息。
+        let user_message_id = match resume_user_message_id.as_deref() {
+            Some(id) => id.to_string(),
+            None => {
+                let user_message = match input.user_time.as_deref().and_then(parse_rfc3339) {
+                    Some(at) => {
+                        self.conversation
+                            .add_message_at(&session.id, "user", &input.message, at)?
+                    }
+                    None => self
+                        .conversation
+                        .add_message(&session.id, "user", &input.message)?,
+                };
+                user_message.id
             }
-            None => self
-                .conversation
-                .add_message(&session.id, "user", &input.message)?,
         };
+        // 立刻写回已落库的用户消息 id。用共享槽位而非返回值/借用，是为了让调用方在这轮被
+        // 超时取消（`spawn_blocking` 无法取消、此处写入发生在毫秒级、远早于超时）时仍能读到它，
+        // 从而把超时轮次也入队重试。
+        if let Ok(mut slot) = user_message_id_slot.lock() {
+            *slot = Some(user_message_id.clone());
+        }
 
         // 3. 上下文（二）：组装 messages。
         //
@@ -257,8 +286,10 @@ impl Agent {
         for turn in ctx.history.iter().chain(input.history.iter()) {
             messages.push(ChatMessage::new(turn.role.clone(), turn.content.clone()));
         }
+        // 本条用户消息统一在末尾 push：重试场景下它已从历史里按 id 剔除（见上），这里补回，
+        // 因此无论如何都恰好出现一次、且时序与首轮一致。
         messages.push(ChatMessage::user(input.message.clone()));
-        tracing::info!(
+        tracing::debug!(
             target: "trace",
             stage = "prompt",
             n = messages.len(),
@@ -271,7 +302,7 @@ impl Agent {
         let tools = crate::llm::tool::definitions(&self.stickers);
         let (delivered, last_memory) = self.run_tool_loop(
             &session.id,
-            &user_message.id,
+            &user_message_id,
             messages,
             &tools,
             ToolPolicy::MustReply,
@@ -292,11 +323,11 @@ impl Agent {
 
         self.conversation.touch_session(&session.id)?;
 
-        span.record("user_message_id", user_message.id.as_str());
-        tracing::info!(
+        span.record("user_message_id", user_message_id.as_str());
+        tracing::debug!(
             target: "trace",
             stage = "done",
-            user_message_id = %user_message.id,
+            user_message_id = %user_message_id,
             messages = delivered.len(),
             total_ms = turn_started.elapsed().as_millis() as u64,
             "对话完成"
@@ -307,7 +338,7 @@ impl Agent {
             reply,
             messages,
             rich: delivered,
-            user_message_id: user_message.id,
+            user_message_id,
             memory: last_memory,
         })
     }
@@ -338,7 +369,7 @@ impl Agent {
         let user =
             context::proactive_user_prompt(&recent, now, last_user_reply_at, last_assistant_at);
         let messages = vec![ChatMessage::system(system), ChatMessage::user(user)];
-        tracing::info!(
+        tracing::debug!(
             target: "trace",
             stage = "proactive_prompt",
             session_id,
@@ -448,7 +479,7 @@ impl Agent {
                         "模型绕过工具直接写了正文，按约定丢弃（不投递、不入库）"
                     );
                 }
-                tracing::info!(
+                tracing::debug!(
                     target: "trace",
                     stage = "loop_end",
                     iter,
@@ -702,7 +733,7 @@ impl Agent {
             }
 
             mute_rounds = if spoke { 0 } else { mute_rounds + 1 };
-            tracing::info!(
+            tracing::debug!(
                 target: "trace",
                 stage = "loop_step",
                 iter,
@@ -848,7 +879,7 @@ impl crate::llm::tool::ToolContext for TurnTools<'_> {
                     ms = started.elapsed().as_millis() as u64,
                     "remember 工具写入完成"
                 );
-                tracing::info!(
+                tracing::debug!(
                     target: "trace",
                     stage = "memory_written",
                     memory_id = %outcome.memory.id,

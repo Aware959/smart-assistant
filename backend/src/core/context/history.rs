@@ -37,11 +37,17 @@ pub(crate) fn day_window_start(offset_minutes: i64) -> DateTime<Utc> {
 ///   昨天，让 AI 有连续性），并做超长压缩；
 /// - `Some(n)`：退化为取最近 N 条纯文本。
 ///
+/// `exclude_id` 为 `Some(id)` 时，把历史**截断到该消息之前**（重试场景：被复用的用户消息
+/// 及其后来产生的半截 assistant/tool 轮次都要排除，令 `messages` 等价于"首轮重跑"——
+/// 该消息之前的全部历史 + 末尾再显式 push 一次本条用户消息）。截断点即该消息首次出现处；
+/// 历史里没有它（如被日界挡掉）时保持原样，同样由末尾 push 保证恰好出现一次。
+///
 /// **调用时机**：必须在"本条用户消息入库之前"取，否则当前消息会被算进历史。
 pub(crate) fn fetch(
     conversation: &Sessions,
     session_id: &str,
     history_count: Option<u32>,
+    exclude_id: Option<&str>,
 ) -> Result<Vec<ChatMessage>> {
     match history_count {
         Some(n) => fetch_recent(conversation, session_id, n as usize),
@@ -50,6 +56,11 @@ pub(crate) fn fetch(
             let mut turns = conversation.messages_since(session_id, start)?;
             if turns.len() < DAY_POOL_THRESHOLD {
                 turns = conversation.messages_since(session_id, start - Duration::days(1))?;
+            }
+            if let Some(ex) = exclude_id {
+                if let Some(pos) = turns.iter().position(|t| t.id == ex) {
+                    turns.truncate(pos);
+                }
             }
             build_day_history(&turns)
         }
@@ -116,6 +127,7 @@ mod tests {
 
     fn turn(role: &str, content: &str, created_at: &str) -> MessageTurn {
         MessageTurn {
+            id: String::new(),
             role: role.to_string(),
             content: content.to_string(),
             created_at: created_at.to_string(),
@@ -216,6 +228,7 @@ mod tests {
 
         // 工具结果行：落库时 role 就是 'tool' + tool_call_id，原样还原成 role='tool'。
         let result = MessageTurn {
+            id: String::new(),
             role: "tool".to_string(),
             content: "数据".to_string(),
             created_at: rfc(Utc::now()),

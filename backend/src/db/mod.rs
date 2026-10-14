@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod memory;
 pub mod message;
+pub mod pending_retry;
 pub mod self_profile;
 pub mod session;
 

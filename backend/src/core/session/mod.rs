@@ -28,6 +28,8 @@ pub struct StoredMessage {
 /// 历史消息轮次（供时间线构建 / 提示词渲染，纯值类型）。
 #[derive(Debug, Clone)]
 pub struct MessageTurn {
+    /// 消息主键（与 `messages` 表一致），用于按 id 排除特定轮次（如待重试复用场景）。
+    pub id: String,
     pub role: String,
     pub content: String,
     /// RFC3339 时刻。

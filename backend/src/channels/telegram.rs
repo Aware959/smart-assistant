@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::session::{classify_inbound, InboundFreshness, Sessions};
+use crate::db::pending_retry::PendingRetry;
 use crate::{ChatInput, ChatOutput, Reply};
 
 const CHANNEL: &str = "telegram";
@@ -24,6 +25,16 @@ const MAX_MESSAGE_LEN: usize = 4096;
 const POLL_TIMEOUT_SECS: u64 = 50;
 /// 网络异常后的退避等待（秒）。
 const RETRY_DELAY_SECS: u64 = 5;
+
+/// 重试扫表周期（秒）：每隔多久醒来一次扫 `pending_retry` 表。
+const SWEEP_INTERVAL_SECS: u64 = 15;
+/// 失败轮次的最大重试次数（含首次失败后的重试）。
+const MAX_RETRY_ATTEMPTS: i64 = 5;
+/// 持久重试退避步长（秒），按"已失败次数"索引（从 1 起），用尽后保持最后一步长。
+const RETRY_BACKOFF_SECS: &[u64] = &[30, 120, 600, 1800];
+/// 超时轮次下次重试的最小间隔（秒）：须大于单次 LLM 调用上限（genai 侧 `CHAT_TIMEOUT`=300s），
+/// 否则被 `AI_DEADLINE_SECS` 超时打断的旧阻塞任务可能仍在跑，会与新重试并发写同一会话。
+const RETRY_TIMEOUT_GRACE_SECS: u64 = 360;
 
 #[derive(Debug, Deserialize)]
 struct ApiResponse<T> {
@@ -131,6 +142,11 @@ fn build_client() -> Result<reqwest::Client, String> {
     builder
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))
+}
+
+/// 复用同一套代理配置的 Telegram client 构造（长轮询 `run` 与重试扫表 `run_retry_sweep` 共用）。
+pub(crate) fn telegram_client() -> Result<reqwest::Client, String> {
+    build_client()
 }
 
 use super::chunk_text;
@@ -628,16 +644,71 @@ async fn deliver_worker(
     }
 }
 
-/// 本轮失败 / 超时时补一句兜底话术，避免用户等来一片空白。
+/// 本轮对话失败（或超时）时把"待重试"落库。失败**不再向用户发声**——原兜底话术
+/// "刚才走神了，再发一次试试。"会误导用户重发，而用户消息其实已在对话流水线里落库；
+/// 这里改为入队，由 [`run_retry_sweep`] 后续静默重试，成功才把回复送达。
 ///
-/// 在异步侧直接 `await` 发送（不进 [`TgDeliver`]）——投递口要阻塞等回执，而这里正跑在
-/// runtime 工人线程上。发送本身失败只记日志，不再上抛：此刻已在错误分支里，没有再外层
-/// 的兜底了。
-async fn send_fallback(client: &reqwest::Client, base: &str, chat_id: i64) {
-    send_typing(client, base, chat_id).await;
-    if let Err(e) = send_text(client, base, chat_id, FALLBACK_REPLY).await {
-        tracing::error!(error = %e, chat_id, "兜底回复发送失败");
+/// `timeout` 为真表示本轮是被 `AI_DEADLINE_SECS` 超时打断——其内部的阻塞任务可能仍在跑，
+/// 故下次重试时刻推到超时之后，避免与仍在运行的旧任务并发写同一会话。
+fn enqueue_failure(
+    session: &Sessions,
+    chat_id: i64,
+    content: &str,
+    user_time: Option<String>,
+    user_message_id: Option<&str>,
+    timeout: bool,
+) {
+    let Some(uid) = user_message_id else {
+        tracing::error!(
+            chat_id,
+            "对话失败但拿不到用户消息 id，无法入队重试（用户消息已落库）"
+        );
+        return;
+    };
+    let session_id = match session.resolve(CHANNEL, &chat_id.to_string()) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(error = %e, chat_id, "解析会话失败，无法入队重试");
+            return;
+        }
+    };
+    let now = Utc::now();
+    let next_attempt_at = if timeout {
+        now + chrono::Duration::seconds(RETRY_TIMEOUT_GRACE_SECS as i64)
+    } else {
+        now + chrono::Duration::seconds(RETRY_BACKOFF_SECS[0] as i64)
+    };
+    let row = PendingRetry {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id,
+        chat_id: chat_id.to_string(),
+        user_message_id: uid.to_string(),
+        content: content.to_string(),
+        user_time,
+        attempts: 0,
+        next_attempt_at,
+        created_at: now,
+    };
+    if let Err(e) = session.enqueue_retry(&row) {
+        tracing::error!(error = %e, chat_id, "待重试入队失败");
     }
+}
+
+/// 计算第 `attempts` 次失败后的下次重试时刻（attempts 从 1 起，等于已重试次数 + 1）。
+///
+/// 退避步长按 [`RETRY_BACKOFF_SECS`] 索引，超过后保持最后一步长；超时场景至少退到
+/// [`RETRY_TIMEOUT_GRACE_SECS`] 之后，确保旧阻塞任务已收尾、不与新重试并发。
+fn next_backoff(attempts: i64, now: DateTime<Utc>, timeout: bool) -> DateTime<Utc> {
+    let base = RETRY_BACKOFF_SECS
+        .get((attempts - 1) as usize)
+        .copied()
+        .unwrap_or(*RETRY_BACKOFF_SECS.last().unwrap_or(&30));
+    let secs = if timeout {
+        base.max(RETRY_TIMEOUT_GRACE_SECS)
+    } else {
+        base
+    };
+    now + chrono::Duration::seconds(secs as i64)
 }
 
 /// 主动推送：与长轮询解耦，独立构建 client 直接发送（Telegram 无推送窗口限制）。
@@ -749,9 +820,6 @@ fn inbound_text(message: &TgMessage) -> Option<String> {
     }
 }
 
-/// 模型整轮没说任何话、或本轮失败/超时时的兜底话术。
-const FALLBACK_REPLY: &str = "刚才走神了，再发一次试试。";
-
 /// 命令类消息的即时回执：`/start` 打招呼、`/new` 重开会话。
 ///
 /// 返回 `Some(文本)` 表示这是命令、已处理完，直接把这段文本发出去即可；`None` 表示普通
@@ -777,6 +845,7 @@ fn command_reply(session: &Sessions, chat_id: i64, text: &str) -> Result<Option<
 /// 回复在**本轮内即时投递**（见 [`TgDeliver`]）：内核在工具循环里逐片段投递，骰子点数
 /// 也在这条路径上拿回并回填给模型。只负责产出回复；记忆由模型在本轮内自行决定是否写入
 /// （`remember` 工具）。命令类消息（`/start` / `/new`）不走到这里，见 [`command_reply`]。
+#[allow(clippy::too_many_arguments)]
 async fn handle_text(
     chat: Arc<Agent>,
     session: Arc<Sessions>,
@@ -784,6 +853,8 @@ async fn handle_text(
     text: &str,
     user_time: Option<String>,
     deliverer: TgDeliver,
+    user_message_id_slot: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    resume_user_message_id: Option<String>,
 ) -> Result<ChatOutput, String> {
     let session_id = session
         .resolve(CHANNEL, &chat_id.to_string())
@@ -801,8 +872,15 @@ async fn handle_text(
             history_count: None,
             user_time,
         };
-        chat.chat_stream(&input, move |reply| worker.deliver(reply))
-            .map_err(|e| e.to_string())
+        // `chat_stream` 会在用户消息入库后把其 id 写进共享槽位（跨取消安全）；重试路径下
+        // 复用已落库的用户消息 id（`resume_user_message_id`），不再重复入库。
+        chat.chat_stream(
+            &input,
+            move |reply| worker.deliver(reply),
+            user_message_id_slot,
+            resume_user_message_id,
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("对话任务失败: {e}"))?
@@ -890,11 +968,11 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
         }
 
         let batch = updates.result.unwrap_or_default();
-        tracing::info!(updates = batch.len(), "getUpdates 轮询返回");
         if batch.is_empty() {
-            // 长轮询正常空转：周期性地确认循环仍在呼吸（可作为心跳检查）。
+            // 长轮询正常空转，不刷日志（进程存活与否由 watchdog 探针单独确认）。
             continue;
         }
+        tracing::info!(updates = batch.len(), "getUpdates 轮询返回");
 
         // 整批确认后立即落盘游标：即使后续处理中途崩溃，重启也不会重放这批。
         offset = offset.max(
@@ -986,6 +1064,12 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                 deliver_rx,
             ));
 
+            // 用户消息在对话流水线里入库后即写回此共享槽位；失败（含超时取消）时用它把
+            // 这条已落库的消息入队待重试（不重复落库、不向用户发声）。用 `Arc<Mutex<_>>`
+            // 是因为超时会取消 `handle_text` 的 future，借用型出参拿不到值，而写入发生在
+            // 毫秒级、远早于超时，共享槽位能跨取消读到。
+            let user_msg_id: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(None));
             let handled = tokio::time::timeout(
                 Duration::from_secs(super::AI_DEADLINE_SECS),
                 handle_text(
@@ -993,8 +1077,10 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                     session.clone(),
                     chat_id,
                     &text,
-                    user_time,
+                    user_time.clone(),
                     deliverer.clone(),
+                    user_msg_id.clone(),
+                    None,
                 ),
             )
             .await;
@@ -1010,16 +1096,36 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                     );
                 }
                 Ok(Err(e)) => {
-                    tracing::error!(error = %e, "对话失败");
-                    send_fallback(&client, &base, chat_id).await;
+                    tracing::error!(
+                        error = %e,
+                        chat_id,
+                        "对话失败，入队待重试（不再向用户发声）"
+                    );
+                    let uid = user_msg_id.lock().unwrap().clone();
+                    enqueue_failure(
+                        &session,
+                        chat_id,
+                        &text,
+                        user_time.clone(),
+                        uid.as_deref(),
+                        false,
+                    );
                 }
                 Err(_) => {
                     tracing::warn!(
                         chat_id,
                         deadline_secs = super::AI_DEADLINE_SECS,
-                        "单轮对话超时，放弃本轮，继续轮询"
+                        "单轮对话超时，入队待重试（不再向用户发声）"
                     );
-                    send_fallback(&client, &base, chat_id).await;
+                    let uid = user_msg_id.lock().unwrap().clone();
+                    enqueue_failure(
+                        &session,
+                        chat_id,
+                        &text,
+                        user_time.clone(),
+                        uid.as_deref(),
+                        true,
+                    );
                 }
             }
 
@@ -1028,6 +1134,138 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
             // 那个仍存活的 `spawn_blocking` 会一直持有它的发送端。
             drop(deliverer);
             worker.abort();
+        }
+    }
+}
+
+/// 失败轮次重试扫表：周期性扫描 `pending_retry`，把到期且未达上限的轮次重新跑一遍。
+///
+/// - 复用已落库的用户消息（同一 `user_message_id`），不重复落库；
+/// - **成功**才由工具循环经 [`TgDeliver`] 把回复送达用户，然后从队列删除；
+/// - **失败**推进退避（写回 `next_attempt_at`）等下一轮；耗尽则静默放弃。
+///
+/// 无论成功/放弃，用户消息始终留在 `messages` 时间线，不丢上下文；失败也**不向用户发
+/// 任何话术**（原"刚才走神了"会误导重发，而消息其实已落库）。
+pub async fn run_retry_sweep(chat: Arc<Agent>, session: Arc<Sessions>) {
+    let token = Config::get().telegram_bot_token.trim().to_string();
+    if token.is_empty() {
+        return;
+    }
+    let client = match telegram_client() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "重试扫表无法构建 Telegram client，退出");
+            return;
+        }
+    };
+    let base = api_base(&token);
+    let media_url = Config::get().media_gateway_url.clone();
+    let media_timeout = Config::get().media_gateway_timeout;
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(SWEEP_INTERVAL_SECS));
+    loop {
+        ticker.tick().await;
+        let now = Utc::now();
+        let due = match session.due_retries(now) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::error!(error = %e, "读取待重试队列失败，下一周期重试");
+                continue;
+            }
+        };
+        // 逐行顺序处理（每行 `await` 到结果），天然不会自行并发；跨轮次对同一行的重叠由
+        // `next_attempt_at` 退避兜住——超时轮次的下次重试被推到 `RETRY_TIMEOUT_GRACE_SECS`
+        // 之后（大于单次 LLM 调用上限），原阻塞任务此时已收尾，不会与新重试并发。
+        for r in due {
+            let chat_id = match r.chat_id.parse::<i64>() {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!(error = %e, id = %r.chat_id, "pending_retry.chat_id 非法，跳过");
+                    continue;
+                }
+            };
+            // 同一次扫表内顺序处理，每个轮次用独立投递工人即时送达回复。
+            let (deliver_tx, deliver_rx) = tokio::sync::mpsc::unbounded_channel();
+            let deliverer = TgDeliver { tx: deliver_tx };
+            let worker = tokio::spawn(deliver_worker(
+                client.clone(),
+                base.clone(),
+                chat_id,
+                media_url.clone(),
+                media_timeout,
+                deliver_rx,
+            ));
+            let handled = tokio::time::timeout(
+                Duration::from_secs(super::AI_DEADLINE_SECS),
+                handle_text(
+                    chat.clone(),
+                    session.clone(),
+                    chat_id,
+                    &r.content,
+                    r.user_time.clone(),
+                    deliverer.clone(),
+                    // 重试行已知用户消息 id（复用同一 id），无需回读槽位。
+                    std::sync::Arc::new(std::sync::Mutex::new(None)),
+                    Some(r.user_message_id.clone()),
+                ),
+            )
+            .await;
+            // 收尾：丢弃投递口、abort 工人（超时那轮的内核任务可能仍挂着，不 await）。
+            drop(deliverer);
+            worker.abort();
+
+            match handled {
+                Ok(Ok(_)) => {
+                    if let Err(e) = session.remove_retry(&r.id) {
+                        tracing::error!(error = %e, chat_id, "重试成功但删除队列项失败");
+                    } else {
+                        tracing::info!(chat_id, "待重试轮次重试成功，回复已送达，出队");
+                    }
+                }
+                Ok(Err(e)) => {
+                    let attempts = r.attempts + 1;
+                    if attempts >= MAX_RETRY_ATTEMPTS {
+                        tracing::warn!(
+                            error = %e,
+                            chat_id,
+                            attempts,
+                            "重试仍失败且已达上限，静默放弃（用户消息保留在时间线）"
+                        );
+                        let _ = session.remove_retry(&r.id);
+                    } else {
+                        let next = next_backoff(attempts, Utc::now(), false);
+                        if let Err(me) = session.mark_retry_attempted(&r.id, next) {
+                            tracing::error!(error = %me, chat_id, "推进重试退避失败");
+                        } else {
+                            tracing::warn!(
+                                error = %e,
+                                chat_id,
+                                attempts,
+                                "重试仍失败，已退避，等待下一轮扫表"
+                            );
+                        }
+                    }
+                }
+                Err(_) => {
+                    let attempts = r.attempts + 1;
+                    if attempts >= MAX_RETRY_ATTEMPTS {
+                        tracing::warn!(
+                            chat_id,
+                            attempts,
+                            "重试超时且已达上限，静默放弃（用户消息保留在时间线）"
+                        );
+                        let _ = session.remove_retry(&r.id);
+                    } else {
+                        // 超时：旧阻塞任务可能仍跑，下次重试时刻推到超时之后。
+                        let next = next_backoff(attempts, Utc::now(), true);
+                        if let Err(me) = session.mark_retry_attempted(&r.id, next) {
+                            tracing::error!(error = %me, chat_id, "推进重试退避失败");
+                        } else {
+                            tracing::warn!(chat_id, attempts, "重试超时，已退避，等待下一轮扫表");
+                        }
+                    }
+                }
+            }
         }
     }
 }

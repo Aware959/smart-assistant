@@ -99,3 +99,19 @@ ilink = ["dep:reqwest", "dep:base64", "dep:qrcode"]
 [profile.release]
 lto = true
 opt-level = 3
+
+# 构建体积优化（dev/test）
+[profile.dev]
+debug = "line-tables-only"
+incremental = true
+split-debuginfo = "unpacked"
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev.build-override]
+debug = false
+opt-level = 0

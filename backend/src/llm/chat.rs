@@ -63,6 +63,93 @@ fn build_plain_request(messages: &[ChatMessage]) -> ChatRequest {
     build_chat_request(messages, &[])
 }
 
+/// 瞬时错误最多重试次数：初始请求 + 3 次重试。
+const LLM_MAX_RETRIES: u32 = 3;
+/// 重试退避基准间隔（毫秒），指数递增 `base · 2^(attempt-1)`：500 / 1000 / 2000，
+/// 合计最多 ~3.5s，远在 `AI_DEADLINE_SECS`（240s）的单轮预算内。
+const LLM_RETRY_BASE_DELAY_MS: u64 = 500;
+
+/// 第 `attempt` 次重试前的退避时长（毫秒），`attempt` 从 1 起。指数退避：500/1000/2000。
+fn retry_backoff_ms(attempt: u32) -> u64 {
+    LLM_RETRY_BASE_DELAY_MS * 2u64.pow(attempt - 1)
+}
+
+/// 判断一个 genai 错误是否属于可重试的瞬时故障。
+///
+/// genai 的错误是结构化的，按 variant 走标准判定，不依赖字符串特征：
+/// - `HttpError { status }` / `webc::Error::ResponseFailedStatus { status }`：直接带 HTTP
+///   状态码，429 限流与 5xx 网关瞬时都可重试；
+/// - `webc::Error::Reqwest(_)`：请求根本没完成（连接超时 / 重置 / DNS / 代理抖动）。
+///   genai 把"传输层失败"与"成功但状态码异常"拆成了两个 variant，所以走到这里的必然
+///   是传输层失败，天然可重试。
+///
+/// 其余（鉴权 401、参数 400、响应体解析、流解析）视为致命，立刻上抛交给上层兜底。
+fn is_genai_retryable(e: &genai::Error) -> bool {
+    use genai::Error as G;
+    match e {
+        G::HttpError { status, .. } => is_status_retryable(status.as_u16()),
+        G::WebAdapterCall { webc_error, .. } | G::WebModelCall { webc_error, .. } => {
+            is_webc_retryable(webc_error)
+        }
+        _ => false,
+    }
+}
+
+/// 429 限流 + 5xx 网关瞬时可重试。
+fn is_status_retryable(code: u16) -> bool {
+    code == 429 || (500..=599).contains(&code)
+}
+
+/// 判定 webc 层（genai 对 reqwest 的封装）错误是否可重试。
+///
+/// 用 `as_u16()` 取状态码，避免直接引用 `reqwest::StatusCode` 类型——本仓的 reqwest
+/// 是 0.12，而 genai 依赖的是 0.13，两个 major 的类型不互通，但状态码数值语义一致。
+fn is_webc_retryable(e: &genai::webc::Error) -> bool {
+    match e {
+        genai::webc::Error::ResponseFailedStatus { status, .. } => {
+            is_status_retryable(status.as_u16())
+        }
+        // 走到 Reqwest variant 的必然是传输层失败（无响应），不是业务状态码错误，
+        // 故一律可重试。
+        genai::webc::Error::Reqwest(_) => true,
+        _ => false,
+    }
+}
+
+/// 对 genai 请求做带指数退避的重试。
+///
+/// 仅当错误可重试（`[is_genai_retryable]`）且未达次数上限时才重试；否则原样返回错误。
+/// 退避在 genai 专用 runtime 上 `sleep`，不阻塞通道轮询线程。只覆盖"首字节之前"的请求
+/// 阶段失败（429 限流、`error sending request` 传输错误都发生在这一步）；中道流式错误与
+/// 致命错误不在此重试。
+pub(crate) async fn with_llm_retry<F, Fut, T>(mut op: F) -> std::result::Result<T, genai::Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, genai::Error>>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt >= LLM_MAX_RETRIES || !is_genai_retryable(&e) {
+                    return Err(e);
+                }
+                attempt += 1;
+                let delay_ms = retry_backoff_ms(attempt);
+                tracing::warn!(
+                    attempt,
+                    max = LLM_MAX_RETRIES,
+                    delay_ms,
+                    error = %e,
+                    "LLM 请求瞬时失败，准备重试"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+}
+
 /// 调用远程 LLM 完成非流式对话，返回回复文本。
 pub fn complete(messages: &[ChatMessage]) -> Result<String> {
     complete_with_model(messages, &crate::config::Config::get().llm_model)
@@ -106,12 +193,16 @@ fn complete_impl(
     model: &str,
     options: Option<&ChatOptions>,
 ) -> Result<String> {
-    let chat_req = build_plain_request(messages);
     let started = std::time::Instant::now();
 
     let chat_res = genai_client::block_on(async move {
         let client = genai_client::chat_client();
-        client.exec_chat(model, chat_req, options).await
+        // 限流 429 / 网络抖动等瞬时错误退避重试，避免直接失败触发通道兜底话术。
+        with_llm_retry(|| {
+            let req = build_plain_request(messages);
+            client.exec_chat(model, req, options)
+        })
+        .await
     })?;
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -178,7 +269,6 @@ pub fn complete_stream_with_tools<F>(
 where
     F: FnMut(&str) + Send,
 {
-    let chat_req = build_chat_request(messages, tools);
     let model = crate::config::Config::get().llm_model.clone();
     let options = ChatOptions {
         capture_content: Some(true),
@@ -189,105 +279,160 @@ where
         ..Default::default()
     };
 
-    genai_client::block_on(async move {
-        let chat_res = genai_client::chat_client()
-            .exec_chat_stream(&model, chat_req, Some(&options))
-            .await?;
-        let mut stream = chat_res.stream;
+    Ok(genai_client::block_on(async move {
+        let client = genai_client::chat_client();
+        // 请求阶段与消费阶段共用同一重试预算（最多 LLM_MAX_RETRIES 次）：
+        // - 首字节之前：429 限流 / 网络抖动 / 5xx 网关瞬时；
+        // - 首字节之后：连接中途断开、流解析失败等。
+        // on_delta 只在整轮成功（End 事件）后才可能下发用户内容，故中途失败重试
+        // 不会重复下发；工具循环路径下 on_delta 本就是空实现，同样安全。
+        let mut attempt: u32 = 0;
+        loop {
+            // —— 请求阶段：拿不到首字节即失败，可重试则退避后整轮重来。
+            let chat_res = match client
+                .exec_chat_stream(&model, build_chat_request(messages, tools), Some(&options))
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if attempt >= LLM_MAX_RETRIES || !is_genai_retryable(&e) {
+                        return Err(e);
+                    }
+                    attempt += 1;
+                    let delay_ms = retry_backoff_ms(attempt);
+                    tracing::warn!(
+                        attempt,
+                        max = LLM_MAX_RETRIES,
+                        delay_ms,
+                        error = %e,
+                        "LLM 请求瞬时失败，准备重试"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+            };
 
-        // 首字节之前的等待集中了几个最典型的卡点：LLM 服务端重新加载模型、
-        // TCP 半开连接、上游排队。记到 info，任何反常都能在日志时间轴上看出。
-        let started = std::time::Instant::now();
-        let mut flat = crate::utils::textflow::ParagraphFlattener::new();
-        let mut collapsed = 0usize;
-        let mut reasoning_chars = 0usize;
-        let mut tool_chunks = 0usize;
-        let mut stop_reason = None;
-        let mut tool_calls: Vec<ChatCall> = Vec::new();
-        while let Some(event) = stream.next().await {
-            match event? {
-                ChatStreamEvent::Chunk(chunk) => {
-                    if flat.is_empty() {
-                        let first_ms = started.elapsed().as_millis() as u64;
-                        tracing::info!(model = %model, first_ms, "LLM 流式：首字节到达");
+            // —— 消费阶段：首字节之后的处理。
+            let started = std::time::Instant::now();
+            let mut flat = crate::utils::textflow::ParagraphFlattener::new();
+            let mut collapsed = 0usize;
+            let mut reasoning_chars = 0usize;
+            let mut tool_chunks = 0usize;
+            let mut stop_reason = None;
+            let mut tool_calls: Vec<ChatCall> = Vec::new();
+            let mut stream = chat_res.stream;
+            let mut stream_err: Option<genai::Error> = None;
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(ChatStreamEvent::Chunk(chunk)) => {
+                        if flat.is_empty() {
+                            let first_ms = started.elapsed().as_millis() as u64;
+                            tracing::info!(model = %model, first_ms, "LLM 流式：首字节到达");
+                        }
+                        // 原文可能带空白而产出片段不带，差值即被归一化掉的字符数。
+                        let before = chunk.content.len();
+                        let piece = flat.push(&chunk.content);
+                        collapsed += before - piece.len();
+                        // 这里**不**回调：直接正文只在"整轮无工具调用"时才算数，
+                        // 而这件事要等 End 才确定。先下发给用户再发现模型同时调了
+                        // send_message，就会多发一段凭空正文（实测 content 与 tool_calls
+                        // 同轮出现过）。所以一律先攒着，由下方收尾按条件统一下发。
                     }
-                    // 原文可能带空白而产出片段不带，差值即被归一化掉的字符数。
-                    let before = chunk.content.len();
-                    let piece = flat.push(&chunk.content);
-                    collapsed += before - piece.len();
-                    // 这里**不**回调：直接正文只在"整轮无工具调用"时才算数，
-                    // 而这件事要等 End 才确定。先下发给用户再发现模型同时调了
-                    // send_message，就会多发一段凭空正文（实测 content 与 tool_calls
-                    // 同轮出现过）。所以一律先攒着，由下方收尾按条件统一下发。
-                }
-                ChatStreamEvent::ReasoningChunk(chunk) => {
-                    reasoning_chars += chunk.content.chars().count();
-                }
-                ChatStreamEvent::ToolCallChunk(_) => tool_chunks += 1,
-                ChatStreamEvent::End(end) => {
-                    // capture_content=true 时这里给出权威的完整拼接文本，兜底对齐。
-                    // 只纠正最终入库文本，不重复下发增量（用户看到的流不回滚）。
-                    if let Some(texts) = end.captured_texts() {
-                        flat.overwrite(&texts.concat());
+                    Ok(ChatStreamEvent::ReasoningChunk(chunk)) => {
+                        reasoning_chars += chunk.content.chars().count();
                     }
-                    stop_reason = end.captured_stop_reason.clone();
-                    tool_calls = end
-                        .captured_tool_calls()
-                        .map(|calls| {
-                            calls
-                                .into_iter()
-                                .map(|c| {
-                                    ChatCall::new(
-                                        c.call_id.clone(),
-                                        c.fn_name.clone(),
-                                        c.fn_arguments.clone(),
-                                    )
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    break;
+                    Ok(ChatStreamEvent::ToolCallChunk(_)) => tool_chunks += 1,
+                    Ok(ChatStreamEvent::End(end)) => {
+                        // capture_content=true 时这里给出权威的完整拼接文本，兜底对齐。
+                        // 只纠正最终入库文本，不重复下发增量（用户看到的流不回滚）。
+                        if let Some(texts) = end.captured_texts() {
+                            flat.overwrite(&texts.concat());
+                        }
+                        stop_reason = end.captured_stop_reason.clone();
+                        tool_calls = end
+                            .captured_tool_calls()
+                            .map(|calls| {
+                                calls
+                                    .into_iter()
+                                    .map(|c| {
+                                        ChatCall::new(
+                                            c.call_id.clone(),
+                                            c.fn_name.clone(),
+                                            c.fn_arguments.clone(),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        stream_err = Some(e);
+                        break;
+                    }
                 }
-                _ => {}
+            }
+
+            match stream_err {
+                Some(e) => {
+                    // 中道流式错误：传输层断开（WebStream）可重试；流解析等致命错误不重试。
+                    if attempt >= LLM_MAX_RETRIES || !is_genai_retryable(&e) {
+                        return Err(e);
+                    }
+                    attempt += 1;
+                    let delay_ms = retry_backoff_ms(attempt);
+                    tracing::warn!(
+                        attempt,
+                        max = LLM_MAX_RETRIES,
+                        delay_ms,
+                        error = %e,
+                        "LLM 流式中途失败，准备整轮重试"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                None => {
+                    let total_ms = started.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        model = %model,
+                        total_ms,
+                        collapsed,
+                        tool_chunks,
+                        tool_calls = tool_calls.len(),
+                        reasoning_chars,
+                        ?stop_reason,
+                        "LLM 流式：结束"
+                    );
+
+                    let text = flat.finish().to_string();
+                    // 收尾裁定直接正文：只在整轮无工具调用时才交给 `on_delta`。
+                    //
+                    // 有工具调用时正文是模型的"自言自语"，不是给用户看的话（探针里
+                    // content 与 send_message 同轮出现时，content 是前言铺垫、正文在参数里），
+                    // 交给调用方只会让用户收到一段与工具消息重复的突兀开场。调用方
+                    // （`run_tool_loop`）另有约定：即便无工具调用，也丢弃正文。
+                    let dropped_text = !tool_calls.is_empty() && !text.trim().is_empty();
+                    if dropped_text {
+                        tracing::warn!(
+                            chars = text.chars().count(),
+                            tool_calls = tool_calls.len(),
+                            "模型同轮既有直接正文又有工具调用，按约定丢弃直接正文"
+                        );
+                    } else if !text.is_empty() {
+                        on_delta(&text);
+                    }
+
+                    return Ok(StreamOutcome {
+                        text,
+                        tool_calls,
+                        stop_reason,
+                        reasoning_chars,
+                    });
+                }
             }
         }
-        let total_ms = started.elapsed().as_millis() as u64;
-        tracing::info!(
-            model = %model,
-            total_ms,
-            collapsed,
-            tool_chunks,
-            tool_calls = tool_calls.len(),
-            reasoning_chars,
-            ?stop_reason,
-            "LLM 流式：结束"
-        );
-
-        let text = flat.finish().to_string();
-        // 收尾裁定直接正文：只在整轮无工具调用时才交给 `on_delta`。
-        //
-        // 有工具调用时正文是模型的"自言自语"，不是给用户看的话（探针里
-        // content 与 send_message 同轮出现时，content 是前言铺垫、正文在参数里），
-        // 交给调用方只会让用户收到一段与工具消息重复的突兀开场。调用方
-        // （`run_tool_loop`）另有约定：即便无工具调用，也丢弃正文。
-        let dropped_text = !tool_calls.is_empty() && !text.trim().is_empty();
-        if dropped_text {
-            tracing::warn!(
-                chars = text.chars().count(),
-                tool_calls = tool_calls.len(),
-                "模型同轮既有直接正文又有工具调用，按约定丢弃直接正文"
-            );
-        } else if !text.is_empty() {
-            on_delta(&text);
-        }
-
-        Ok(StreamOutcome {
-            text,
-            tool_calls,
-            stop_reason,
-            reasoning_chars,
-        })
-    })
+    })?)
 }
 
 /// 无状态的 LLM 适配器：把对话 / 结构化输出 / 流式回复接到本模块的实现函数上。

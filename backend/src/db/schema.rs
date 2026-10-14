@@ -15,7 +15,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 18;
+pub(crate) const SCHEMA_VERSION: i64 = 19;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -69,6 +69,18 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             key        TEXT PRIMARY KEY,
             value      TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pending_retry (
+            id              TEXT PRIMARY KEY,
+            session_id      TEXT NOT NULL,
+            chat_id         TEXT NOT NULL,
+            user_message_id TEXT NOT NULL,
+            content         TEXT NOT NULL,
+            user_time       TEXT,
+            attempts        INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT NOT NULL,
+            created_at      TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, created_at);
@@ -167,6 +179,26 @@ fn migrate(conn: &Connection) -> Result<()> {
         tracing::info!(
             "迁移 v18：messages 支持 role='tool'，历史工具结果行由 assistant 改写为 tool"
         );
+    }
+
+    // v19：新增 `pending_retry` 表，承接"对话轮次因内部错误失败但用户消息已落库"的
+    // 跨进程持久重试队列。幂等加表、不碰任何既有业务表，业务数据零丢失。新库由上面的
+    // `CREATE TABLE IF NOT EXISTS` 直接建出，这里只为旧库增量补表。
+    if version < 19 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pending_retry (
+                id              TEXT PRIMARY KEY,
+                session_id      TEXT NOT NULL,
+                chat_id         TEXT NOT NULL,
+                user_message_id TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                user_time       TEXT,
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            );",
+        )?;
+        tracing::info!("迁移 v19：新增 pending_retry 表（失败轮次持久重试队列）");
     }
 
     if version >= SCHEMA_VERSION {
@@ -338,6 +370,33 @@ mod tests {
             })
             .unwrap();
         assert_eq!(linked.as_deref(), Some("m1"), "memories.message_id 不能丢");
+        assert_eq!(
+            meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
+            SCHEMA_VERSION.to_string()
+        );
+    }
+
+    /// v19：增量新增 `pending_retry` 表，不破坏既有业务表。
+    #[test]
+    fn v19_creates_pending_retry_table() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, created_at TEXT);
+             INSERT INTO messages VALUES ('m1','s1','user','在吗','t');
+             INSERT INTO meta (key, value) VALUES ('schema_version','18');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(
+            table_exists(&conn, "pending_retry").unwrap(),
+            "pending_retry 应被 v19 建出"
+        );
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "messages 一条不能少");
         assert_eq!(
             meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
             SCHEMA_VERSION.to_string()

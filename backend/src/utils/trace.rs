@@ -1,8 +1,11 @@
 //! 链路追踪辅助：给一次对话 / 决策打上 `trace_id`，并按开关决定内容详略。
 //!
-//! 约定：追踪事件统一用 `target: "trace"`，便于日志层单独过滤并落 JSON 文件
-//! （server 的 `SMART_ASSISTANT_TRACE_FILE`）。内容默认只记摘要，设
-//! `TRACE_CONTENT=1` 才记全文——避免默认把记忆 / 提示词 / 回复全文落盘。
+//! 约定：追踪事件统一用 `target: "trace"`，且以 **debug 级**发出——默认控制台
+//! （EnvFilter 默认 `info`）不打印这些逐阶段事件，避免正常对话刷屏；只有设了
+//! `SMART_ASSISTANT_TRACE_FILE` 的 JSON 落盘层（收 `target="trace"` 的 TRACE 及以上）
+//! 才会捕获，按 `trace_id` / `session_id` 回放一次请求全过程。排查时也可 `RUST_LOG=debug`
+//! 直接打回控制台。内容默认只记摘要，设 `TRACE_CONTENT=1` 才记全文——避免默认把记忆 /
+//! 提示词 / 回复全文落盘。
 
 use std::fmt;
 

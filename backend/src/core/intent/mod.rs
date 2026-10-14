@@ -116,7 +116,7 @@ async fn run_once(chat: Arc<Agent>, session: &Sessions, pusher: &ChannelsPusher)
 async fn propose(chat: Arc<Agent>, cand: &IntentCandidate) -> Vec<String> {
     let trace_id = crate::utils::trace::new_id();
     let step_start = std::time::Instant::now();
-    tracing::info!(
+    tracing::debug!(
         target: "trace",
         stage = "intent_context",
         trace_id = %trace_id,
@@ -145,7 +145,7 @@ async fn propose(chat: Arc<Agent>, cand: &IntentCandidate) -> Vec<String> {
         Vec::new()
     });
 
-    tracing::info!(
+    tracing::debug!(
         target: "trace",
         stage = "intent_decision",
         trace_id = %trace_id,

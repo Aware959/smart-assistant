@@ -52,6 +52,13 @@ async fn main() {
             app.chat.clone(),
             app.session.clone(),
         )));
+        // 失败轮次重试扫表：与长轮询并列，静默重试待重试队列里的轮次。
+        handles.push(tokio::spawn(
+            smart_assistant::channels::telegram::run_retry_sweep(
+                app.chat.clone(),
+                app.session.clone(),
+            ),
+        ));
     }
 
     // 微信 iLink 通道：无 token 且未启用时内部静默跳过；启用后首次启动需扫码。

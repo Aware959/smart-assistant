@@ -326,6 +326,31 @@ impl Sessions {
         }
     }
 
+    // ---------- 失败轮次重试队列（pending_retry） ----------
+
+    /// 入队一条待重试记录（对话轮次因内部错误失败后调用，不再向用户发声）。
+    pub fn enqueue_retry(&self, row: &crate::db::pending_retry::PendingRetry) -> Result<()> {
+        crate::db::pending_retry::enqueue(&lock_db(&self.db), row)
+    }
+
+    /// 取所有已到重试时刻的待重试记录（按时间正序）。
+    pub fn due_retries(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<crate::db::pending_retry::PendingRetry>> {
+        crate::db::pending_retry::due(&lock_db(&self.db), &now)
+    }
+
+    /// 推进重试计数并设定下次重试时刻（本次重试仍失败、但还没到上限时）。
+    pub fn mark_retry_attempted(&self, id: &str, next_attempt_at: DateTime<Utc>) -> Result<()> {
+        crate::db::pending_retry::mark_attempted(&lock_db(&self.db), id, &next_attempt_at)
+    }
+
+    /// 删除一条待重试记录（重试成功、或放弃重试时）。
+    pub fn remove_retry(&self, id: &str) -> Result<()> {
+        crate::db::pending_retry::remove(&lock_db(&self.db), id)
+    }
+
     /// 只入库留痕，不调 LLM、不回复（用于超过时效上限的离线积压消息）。
     ///
     /// 消息仍以**真实时刻**入库，所以下次对方说话时历史时间线是对的。
@@ -374,6 +399,7 @@ impl Sessions {
 
 fn turn_from(m: &DbMessage) -> MessageTurn {
     MessageTurn {
+        id: m.id.clone(),
         role: m.role.clone(),
         content: m.content.clone(),
         created_at: m.created_at.clone(),
@@ -414,6 +440,35 @@ mod tests {
         let db = lock_db(&sessions.db);
         let all = crate::db::message::list_all(&db, &s.id).unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn fetch_excludes_retried_user_message_and_its_partial_turns() {
+        let sessions = Sessions::new(db()).unwrap();
+        let s = sessions.get_or_create_session(None).unwrap();
+        // 早前的一轮正常对话。
+        sessions.add_message(&s.id, "user", "前面的话").unwrap();
+        sessions
+            .add_message(&s.id, "assistant", "前面的回复")
+            .unwrap();
+        // 失败轮次：用户消息已落库，且该轮其后半截又产生了 assistant/tool 往返。
+        let failed = sessions
+            .add_message(&s.id, "user", "这条要不要重试")
+            .unwrap();
+        sessions.add_message(&s.id, "assistant", "半截").unwrap();
+        sessions.add_message(&s.id, "tool", "结果").unwrap();
+
+        // 正常取（不排除）：历史含全部 5 条。
+        let all = crate::core::context::fetch_history(&sessions, &s.id, None, None).unwrap();
+        assert_eq!(all.len(), 5);
+
+        // 重试取（排除失败的用户消息 id）：截断到它之前，只剩前两条正常对话——
+        // 该消息与它之后的半截轮次都被排除，随后由调用方在末尾显式 push 一次它本身。
+        let before =
+            crate::core::context::fetch_history(&sessions, &s.id, None, Some(&failed.id)).unwrap();
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0].content, "前面的话");
+        assert_eq!(before[1].content, "前面的回复");
     }
 
     #[test]
