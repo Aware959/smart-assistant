@@ -60,7 +60,8 @@
 
 ## 2. 核心数据流：一条消息的全旅程
 
-以 Telegram 用户发来一条消息为例（HTTP/SSE/iLink 路径一致，仅通道接入不同）：
+以 Telegram 用户发来一条消息为例（Web/iLink 走同一条流水线，差别在通道接入与
+"消息何时入库"——Telegram 落库先于起轮次，Web/iLink 仍由 `chat_stream` 入库，见 §2.2）：
 
 ```
 TG 长轮询收到 Update
@@ -76,19 +77,27 @@ TG 长轮询收到 Update
   ├─ Sessions::resolve("telegram", chat_id)
   │  → 内存通道映射命中即复用，未命中建映射（即写穿）
   │
-  ├─ Sessions::add_message_at(session_id, "user", text, user_time)
-  │  → 内存缓冲追加 + 即写穿 messages 表
-  │  （路径：core/agent.rs，有通道时间戳时用之，否则记接收时刻）
+  ├─ Sessions::add_message_at(session_id, "user", text, sent_at)
+  │  → **落库先于起轮次**（§2.2）：内存缓冲追加 + 即写穿 messages 表，
+  │    时刻取通道报文时间戳；Web/iLink 仍由 chat_stream 在取历史后入库
+  │
+  ├─ Sessions::begin_turn(session_id) → TurnTicket（同会话单轮名额，§2.2）
+  │  ├─ 拿到 → spawn_turn 起独立任务跑这一轮，长轮询不等它、继续收下一条
+  │  └─ 拿不到（已有轮次在跑）→ 消息已落库即止，不再另起一轮（在跑的那轮自己取用）
   │
   ├─ ① 上下文组装（core::context，只读；与主动决策共用同一套实现）
   │     ⚠ **记忆不进提示词**——改由模型在工具循环里按需调 recall_memory（§6.3）
-  │     context::fetch_history(conversation: &Sessions, session_id, history_count)
+  │     context::fetch_history(conversation: &Sessions, session_id, history_count, exclude_id)
   │       ├─ 默认按"今天"取消息（日界 = 固定东八区 06:00；今日 <6 条自动并入昨天）
   │       │   （时区偏移此前由世界运行时推断，aiworld 拆出后暂用固定常量，待重设计）
   │       ├─ >60 条 → 保留头 8 条 + 尾 + 省略中间
   │       ├─ 内容保持原文，不带时间/角色前缀
-  │       ├─ history_count 显式指定 → 退化为取最近 N 条
-  │       └─ ⚠ 必须在"本条用户消息入库之前"取，否则本轮消息会被算进历史
+  │       ├─ history_count 显式指定 → 退化为取最近 N 条（同样尊重 exclude_id，
+  │       │   并按 sanitize_tool_pairs 净化残缺的工具配对）
+  │       ├─ exclude_id（Telegram：复用已落库的用户消息）→ 历史截断到该消息之前，
+  │       │   末尾再显式 push 一次，时序与首轮一致
+  │       └─ ⚠ 未传 exclude_id 时必须在"本条用户消息入库之前"取（Web/iLink 路径），
+  │           否则本轮消息会被算进历史、在提示词里出现两遍
   │     context::system_prompt(profile) → core/context/prompt.rs
   │       ├─ 角色设定：self_profile KV 表（AI 自我属性，中文原文注入，最高优先级；
   │       │   由 core/self_profile::Profile::block 渲染为「性格：…；人格：…」，
@@ -103,13 +112,20 @@ TG 长轮询收到 Update
 │       └─ 延迟消息时追加 delay_notice() 时差说明（§2.1）——仅 Delayed 档
   │
   └─ ② 工具循环（core/agent.rs chat_stream）
-        四个工具（llm/tool.rs 目录，每次请求都带，不做动态裁剪）：
-          send_message  输出工具，唯一对外出口；一次调用发一条
-          get_now       只读，当前本地时间
-          recall_memory 只读，按需检索长期记忆（RECALL_LIMIT=5）
-          remember      写入，沉淀一条长期记忆（§6.2）
+        八个工具（llm/tool.rs 目录，每次请求都带，不做动态裁剪）：
+          send_message   输出工具，唯一文本出口；一次调用发一条
+          send_dice      输出，动画骰子（服务端点数当场回填模型）
+          send_sticker   输出，表情包（file_id 经贴纸目录校验）
+          generate_image 输出，经本机媒体网关出图
+          generate_voice 输出，经本机媒体网关合成语音
+          get_now        只读，当前本地时间
+          recall_memory  只读，按需检索长期记忆（RECALL_LIMIT=5）
+          remember       写入，沉淀一条长期记忆（§6.2）
         │
-        每轮：Llm::complete_stream(messages, tool_calls, on_delta)
+        **每次生成前**：ingest_steers 把水位线之后新到的用户消息并进本轮
+        live 上下文（§2.2）——agent 跑着也能插话，不必等这一轮跑完
+        │
+        每轮：Llm::complete_stream_with_tools(messages, tools, tool_choice, on_delta)
           → genai_client: 按 LLM_PROVIDER 选 OpenAI / Gemini adapter
           → genai 0.6.5 流式 API
           → 逐 chunk 过 ParagraphFlattener（utils/textflow.rs）→ delta 回调
@@ -123,6 +139,10 @@ TG 长轮询收到 Update
             → 裁剪至 SEND_MESSAGE_MAX_CHARS=200 → on_message(text) 即时投递
             → Sessions::add_message(session_id, "assistant", text) 单独入库
               （**这条 assistant 消息同时是主动引擎的间隔账本**，见 §4.2）
+          send_dice / send_sticker / generate_image / generate_voice
+            → 同一经通道投递口即时发送（骰子点数当场回填；媒体经本机网关），
+              历史里落的是文本投影（如 "[发了一张图片：…]"），非文本片段
+              进不了历史，投影是它唯一的文本痕迹
           recall_memory(query)
             → core/memory::search(query, RECALL_LIMIT) → 语义向量检索
               （§6.3）；命中回填文本（含 [id] 供 remember.supersedes 指向）
@@ -180,6 +200,33 @@ TG 长轮询收到 Update
 
 > `MAX_REPLYABLE_HOURS = 24` 刻意与 Telegram 服务端的 update 保留窗口对齐：关机
 > 超过 24h，那条消息服务端也已丢弃，任何实现都救不回来。
+
+### 2.2 运行中插话与失败重试
+
+一轮对话动辄几十秒（本地模型更久），用户不会等它跑完才发第二条。解法与 Codex 等
+agent 一致：**agent 运行时允许插入新的上下文**。全程只用 DB 时间线当队列——插话
+一到就落库，没有任何"内存信箱 / 消息转交"的中间态，轮次死了消息也不丢。
+
+**通道侧：落库先于起轮次，轮询永不被一轮占住。** Telegram 每条消息收到即落库；
+`Sessions::begin_turn` 发放同会话唯一的轮次名额（`TurnTicket`，丢弃即销号，超时
+旧凭证凭令牌号不会误销新轮），拿到名额才 `spawn_turn` 起独立任务跑这一轮，长轮询
+循环立刻回去收下一条。没拿到名额（已有轮次在跑）就只落库、不另起一轮——同一会话
+永远是"一个 agent 循环 + 期间不断并入的新消息"，不会两轮并发各答各的。
+
+**内核侧：迭代边界并入插话。** 工具循环每次生成前调 `ingest_steers`：按游标（触发
+消息 id）把水位线之后新到的用户消息读进本轮 live 上下文；刚要收尾时又来了新消息，
+也并进来继续答而不是就此结束。并入是**只读**的——插话已在时间线里，不消费不复制，
+这一轮中途死掉也不丢。主动开口轮次不并入用户消息（它的提示词是"该不该开口"的主动
+语境，用户真发了话由对话轮次来接）。
+
+**失败轮次：静默重试，目标重定向到最新消息。** 一条都没送达才入队重试（`pending_retry`
+表，扫表周期 15s，退避 30s/2m/10m/30m、上限 5 次后静默放弃；超时轮次的下次重试推到
+`RETRY_TIMEOUT_GRACE_SECS=360s` 之后，避免与仍在收尾的旧阻塞任务并发写同一会话）。
+已有内容送达就不再整轮重跑——重跑会把同样的话再说一遍，比"后半截没说出来"更糟；
+没赶上的插话留在时间线里，等用户下一条消息时一并被看到。入队时若会话里已出现更新的
+用户消息，重试目标**重定向到那条最新的**（重跑用 `exclude_id` 截历史，按旧目标截会
+把插话截掉）；扫表时发现会话里已有更新的消息也直接放弃过时重试——用户最后说的那句
+才是最该回应的。
 
 ---
 
@@ -361,27 +408,30 @@ search(query)
 
 ---
 
-## 7. 数据库 Schema（v17）
+## 7. 数据库 Schema（v19）
 
 SQLite + WAL 模式 + sqlite-vec 向量扩展。
 
-**当前 schema 是单一真源**：完全由 `db/schema.rs::init_schema` 里的 `CREATE TABLE IF NOT EXISTS` 定义，新库打开时直接建最新结构。**历史逐版本迁移（v6~v16）已压平**——单人单库且真实库已升到最新，保留逐版本补丁只会增加 `schema.rs` 体积、无实际收益。压平后旧版本库不再支持平滑升级，需 `rm` 后重建。
+**当前 schema 是单一真源**：完全由 `db/schema.rs::init_schema` 里的 `CREATE TABLE IF NOT EXISTS` 定义，新库打开时直接建最新结构。**历史逐版本迁移（v6~v16）已压平**——单人单库且真实库已升到最新，保留逐版本补丁只会增加 `schema.rs` 体积、无实际收益。压平后旧版本库不再支持平滑升级，需 `rm` 后重建；v17 基线之后仍按需追加版本化步骤（见下表）。
 
 | 表名 | 用途 |
 |------|------|
 | `meta` | 纯键值元信息（schema_version / embedding_dim / embedding_model / `channel_cursor:{channel}` 拉取游标，§2.1） |
 | `sessions` | 会话（id / title / created_at / updated_at） |
-| `messages` | 对话消息（role = user / assistant；工具结果行用 `role='assistant'` + `tool_call_id`/`tool_name` 标记承载，避免改 role CHECK；created_at 按通道真实发出时刻写） |
+| `messages` | 对话消息（role = user / assistant / tool；assistant 轮的工具调用列表存 `tool_calls`（JSON），工具结果行 `role='tool'` + `tool_call_id`/`tool_name` 配对（v18 放开）；created_at 按通道真实发出时刻写） |
 | `memories` | 记忆事实（content / memory_type[CHECK 枚举] / expires_at / message_id） |
 | `memory_vectors` | sqlite-vec0 向量表（memory_id / embedding float32[]） |
 | `channel_sessions` | 通道 ↔ 会话映射（channel + external_id → session_id）；主动候选的来源表 |
 | `self_profile` | AI 自我属性 KV（key / value / updated_at），人设数据源 |
+| `pending_retry` | 失败轮次静默重试队列（§2.2；attempts / next_attempt_at，进程重启不丢） |
 
-唯一的迁移例外（与"默认值都能重算出来"同一条判据，删表不丢信息）：
+版本化迁移记录（v17 压平基线之后追加的步骤；判据不变——DROP / 重建表必须升版本号）：
 
 | 版本 | 动作 | 理由 |
 |------|------|------|
-| v17 | `DROP TABLE relations` / `world_state` / `time_profiles` | 三张表由 v7/v8 引入（关系 / 世界状态 / 作息画像），代码从不读写（无 DAO、无业务调用点），纯 schema 残留。与早先 v13 删 `intent_state` 同理——它们存的每个值都不被任何逻辑当真值来源，删掉不丢信息。按约定 DROP 业务表需升版本号，故从 16 升到 17 |
+| v17 | `DROP TABLE relations` / `world_state` / `time_profiles` | 三张表由 v7/v8 引入（关系 / 世界状态 / 作息画像），代码从不读写（无 DAO、无业务调用点），纯 schema 残留。与早先 v13 删 `intent_state` 同理——它们存的每个值都不被任何逻辑当真值来源，删掉不丢信息 |
+| v18 | 重建 `messages` 表，role CHECK 放开 `'tool'` | 工具结果行此前挤在 `role='assistant'` + `tool_call_id` 标记里承载（为绕开 role CHECK）；SQLite 无法 ALTER CHECK，按官方"重建表"流程走（建新表 → 拷数据 → 改名），顺带保全 `memories.message_id` 的外键指向 |
+| v19 | 新增 `pending_retry` 表 | 失败轮次持久化静默重试（§2.2），加表升版本号 |
 
 ---
 

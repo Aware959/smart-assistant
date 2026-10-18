@@ -483,6 +483,19 @@ pub const GENERATE_IMAGE_ACK: &str = "已发送图片";
 /// `generate_voice` 已投递（合成并发送）后回填给模型的确认文本。极短。
 pub const GENERATE_VOICE_ACK: &str = "已发送语音";
 
+/// 本批工具调用中途失败时，给没走到自己结果行的调用补的占位文本。
+///
+/// 它**不是**任何一次工具调用的真实结果，只为保住 `assistant(tool_calls)` 与 `tool` 结果行
+/// 的配对（协议要求每个调用都有结果，缺一个整批请求就被 provider 拒）——见
+/// `Agent::backfill_tool_rows`。
+pub const ABORTED_ACK: &str = "本轮中断，本条未执行";
+
+/// 片段**没能投递出去**（通道侧发送失败）时写进 `tool` 结果行的文本。
+///
+/// 与 [`SEND_MESSAGE_ACK`] 这类"已发送"确认相对：用户没收到的东西不能在时间线里
+/// 留下"已发送"的痕迹，否则后续每一轮读历史时都会以为它送出去了。
+pub const DELIVERY_FAILED_ACK: &str = "投递失败，对方未收到";
+
 /// `remember` 新增一条记忆后的回填文本。同样极短，且不复述内容——
 /// 让模型把自己的话再抄一遍进下一轮 prompt，只会诱发它接着解释"我记住了…"。
 pub const REMEMBER_ACK_NEW: &str = "已记住";

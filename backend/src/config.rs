@@ -108,49 +108,12 @@ pub struct Config {
     pub media_gateway_timeout: u64,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            db_path: "smart_assistant.db".to_string(),
-            llm_provider: LlmProvider::OpenAI,
-            llm_api_url: "http://127.0.0.1:1234/v1/completions".to_string(),
-            llm_api_key: String::new(),
-            llm_model: "qwen3.5-9b-uncensored-hauhaucs-aggressive".to_string(),
-            llm_structured_output: "json_schema".to_string(),
-            embedding_api_url: "http://127.0.0.1:1234/v1/embeddings".to_string(),
-            embedding_api_key: String::new(),
-            embedding_model: "text-embedding-embeddinggemma-300m".to_string(),
-            embedding_dim: 768,
-            memory_recall_min_similarity: 0.79,
-            memory_dedup_min_similarity: 0.92,
-            tls_cert: None,
-            tls_key: None,
-            web_dist: Some("../frontend/dist".to_string()),
-            telegram_bot_token: String::new(),
-            telegram_enabled: true,
-            telegram_allowed_ids: Vec::new(),
-            telegram_proxy: None,
-            sticker_catalog_file: "sticker_catalog.json".to_string(),
-            ilink_enabled: false,
-            ilink_bot_token: String::new(),
-            ilink_session_file: "ilink_session.json".to_string(),
-            ilink_allowed_ids: Vec::new(),
-            ilink_context_max_age_hours: 12,
-            intent_enabled: false,
-            intent_min_minutes: 90,
-            intent_max_minutes: 360,
-            intent_quiet_hours: (23, 7),
-            intent_min_silence_hours: 2,
-            intent_max_idle_days: 7,
-            trace_content: false,
-            media_gateway_url: "http://127.0.0.1:8787".to_string(),
-            media_gateway_enabled: false,
-            media_gateway_timeout: 120,
-        }
-    }
-}
-
 impl Config {
+    /// 从环境变量装载配置；每个字段的缺省值就写在这里（**唯一**一份缺省值）。
+    ///
+    /// 早先另有一份 `impl Default`，两边的 `llm_model` / `intent_min_minutes` /
+    /// `intent_max_minutes` 已经悄悄漂移成了不同的值——两份缺省值必然再次分家，
+    /// 且那份 Default 全仓无人调用，故直接删掉，只留这一处。
     pub fn init_from_env() -> Self {
         Self {
             db_path: std::env::var("SMART_ASSISTANT_DB")

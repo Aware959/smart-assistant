@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::core::context::{self, AgentContext};
 use crate::core::memory::{MemoryKind, MemoryRecord, Store};
-use crate::core::schema::message::ChatMessage;
+use crate::core::schema::message::{ChatCall, ChatMessage};
 use crate::core::self_profile::Profile;
 use crate::core::session::Sessions;
 use crate::core::sticker::StickerCatalog;
@@ -59,16 +59,21 @@ impl Reply {
     ///
     /// 用于历史入库与 [`ChatOutput::messages`] / [`ChatOutput::reply`]——
     /// 让不识别非文本的宿主与后续轮次的模型至少知道"这里发生过什么"。
+    ///
+    /// **用户真能感知到的内容要一并带上**：语音念的就是那段话，不带进历史等于用户
+    /// 听到了、模型却不知道自己说过；图片带上生成描述，同样是为了让后续轮次知道
+    /// 画的是什么（描述可能冗长，但这是它唯一的文本痕迹）。贴纸不带选择键——
+    /// 键只是目录里的索引，对"说过什么"没有信息量。
     pub fn projection(&self) -> String {
         match self {
             Reply::Text(text) => text.clone(),
             Reply::Dice { emoji } => format!("[发了骰子 {emoji}]"),
             Reply::Sticker { .. } => "[发了一个表情包]".to_string(),
-            Reply::Photo { caption, .. } => match caption {
-                Some(c) => format!("[发了一张图片] {c}"),
-                None => "[发了一张图片]".to_string(),
+            Reply::Photo { prompt, caption } => match caption {
+                Some(c) => format!("[发了一张图片：{prompt}] {c}"),
+                None => format!("[发了一张图片：{prompt}]"),
             },
-            Reply::Voice { .. } => "[发了一段语音]".to_string(),
+            Reply::Voice { text } => format!("[发了一段语音] {text}"),
         }
     }
 
@@ -165,6 +170,11 @@ impl Agent {
     /// 3. 循环：流式生成 → 有工具则执行并回填、无工具则结束；
     /// 4. 每条回复片段在工具循环里**即时**交给 `deliver` 通道发送并单独入库；
     ///    骰子的点数由通道当场返回，回填成工具结果供模型同轮使用。
+    ///
+    /// **一轮在跑时用户还能接着说**：这时新到的消息由通道落库、不再起第二轮，本轮的
+    /// 工具循环在每次生成前把水位线之后的用户消息并进 live 上下文（见 [`ingest_steers`]），
+    /// 所以模型下一次生成就看得到刚说的话，不必等这一轮跑完。本轮没来得及用上的，
+    /// 也已经躺在时间线里，下一次对话（或重试）照样读得到。
     ///
     /// **记忆写入也在这个循环里**（`remember` 工具），不再有回复交付后的旁路步骤。
     /// 模型看得见整段对话，所以"这句话值不值得记、指的是哪件旧事"只有它能判断；
@@ -299,6 +309,9 @@ impl Agent {
 
         // 4. 工具循环。对话路径必须产出一条消息：没产出前由循环在协议层强制
         // 模型调工具（见 [`ToolPolicy`]），空投递仍交给下面的判据报错兜底。
+        //
+        // 插话游标从本条用户消息起算：这一轮在跑的时候用户还能接着说，那些消息到达即落库
+        // （通道侧），由循环在迭代边界并进 live 上下文（见 [`ingest_steers`]）。
         let tools = crate::llm::tool::definitions(&self.stickers);
         let (delivered, last_memory) = self.run_tool_loop(
             &session.id,
@@ -306,6 +319,7 @@ impl Agent {
             messages,
             &tools,
             ToolPolicy::MustReply,
+            Some(user_message_id.clone()),
             deliver,
         )?;
 
@@ -384,6 +398,9 @@ impl Agent {
             messages,
             &tools,
             ToolPolicy::MayStaySilent,
+            // 主动轮次不并入用户消息：它的提示词是"该不该开口"的主动语境，
+            // 用户此刻真发了话该由对话轮次接（那一轮会自己起）。
+            None,
             deliver,
         )?;
         // 主动路径的工具集不含 `send_dice` / `send_sticker`，故这里只可能是文本；仍走
@@ -397,10 +414,15 @@ impl Agent {
     /// 在**协议层**强制模型调工具——见 [`ToolPolicy`]，这是治"模型绕过工具直接写正文"的
     /// 手段，不是提示词软约束。
     ///
+    /// `steer_after` 是本轮的插话游标：`Some(触发消息 id)` 表示"运行期间新到的用户消息
+    /// 要并进本轮上下文"（见 [`ingest_steers`]），`None` 表示不并入（主动开口轮次——它的
+    /// 提示词是主动语境，此刻接话该由对话轮次来做）。
+    ///
     /// 返回 `(本轮投递的消息, 最后写入的记忆)`；"空投递算不算失败"仍由调用方决定。
     ///
     /// `deliver` 由通道提供：内核在处理每个回复片段的当下就调用它完成发送，
     /// 骰子由此拿回服务端点数（见 [`emit`]）。
+    #[allow(clippy::too_many_arguments)] // 上下文/工具/策略/投递/插话游标各占一个，职责已到拆分的临界点
     fn run_tool_loop<F>(
         &self,
         session_id: &str,
@@ -408,6 +430,7 @@ impl Agent {
         mut messages: Vec<ChatMessage>,
         tools: &[genai::chat::Tool],
         tool_policy: ToolPolicy,
+        steer_after: Option<String>,
         mut deliver: F,
     ) -> Result<(Vec<Reply>, Option<MemoryRecord>)>
     where
@@ -425,8 +448,29 @@ impl Agent {
         let mut delivered: Vec<Reply> = Vec::new();
         // 连续多少轮只调只读工具、一次都没说话。防止模型在工具上来回打转不说话。
         let mut mute_rounds = 0u32;
+        // 插话游标：已并入上下文的最后一条用户消息，每轮循环边界往后推进。
+        let mut steer_cursor = steer_after;
 
         for iter in 1..=MAX_TOOL_ITER {
+            // 运行中收到的插话：通道在收到消息的当下就把它落库了，这里按游标把它贴进本轮
+            // live 上下文，本次生成模型就能看到——不必等这一轮跑完再发下一条（Codex 式
+            // 运行时插话）。位置在"上一批工具结果之后、本次生成之前"，协议序列依然合法。
+            let steered = ingest_steers(
+                self.conversation.as_ref(),
+                session_id,
+                &mut steer_cursor,
+                &mut messages,
+            )?;
+            if steered > 0 {
+                tracing::debug!(
+                    target: "trace",
+                    stage = "steer",
+                    iter,
+                    n = steered,
+                    "本轮并入运行中收到的消息"
+                );
+            }
+
             // 协议层工具选择：对话路径在"一条消息都还没发出"前强制模型调工具。
             // 实测本仓的 DeepSeek-V4.1-Flash 在同一上下文里 auto 下 0/3 会直接写正文、
             // `Required` 下 3/3 走 send_message，软提示拦不住。一旦说上话（delivered 非空）
@@ -479,6 +523,22 @@ impl Agent {
                         "模型绕过工具直接写了正文，按约定丢弃（不投递、不入库）"
                     );
                 }
+                // 刚要收尾时又有新消息到：并进来接着答，别把用户晾在那儿（这一轮还没把
+                // 它当上下文看过，就此结束等于没看见）。迭代上限照旧兜住次数。
+                if ingest_steers(
+                    self.conversation.as_ref(),
+                    session_id,
+                    &mut steer_cursor,
+                    &mut messages,
+                )? > 0
+                {
+                    tracing::info!(
+                        session = %session_id,
+                        iter,
+                        "收尾前并入运行中收到的消息，本轮继续"
+                    );
+                    continue;
+                }
                 tracing::debug!(
                     target: "trace",
                     stage = "loop_end",
@@ -518,6 +578,8 @@ impl Agent {
                 },
             )?;
 
+            // 本批已落 `tool` 结果行的调用 id：任何中途失败都要据此补齐，见 [`Self::backfill_tool_rows`]。
+            let mut paired: Vec<String> = Vec::new();
             let mut spoke = false;
             let mut delivered_records: Vec<String> = Vec::new();
             for call in &outcome.tool_calls {
@@ -538,199 +600,41 @@ impl Agent {
                     arguments = %call.fn_arguments,
                     "工具调用入参"
                 );
-                match crate::llm::tool::dispatch(call, &tool_ctx) {
-                    crate::llm::tool::ToolOutcome::Sent(text) => {
-                        // 已投递的正文另记一条：这是用户实际看到的内容，
-                        // 与"入参"分开记，便于核对投递前是否被归一化改写。
-                        tracing::info!(
-                            session = %session_id,
-                            chars = text.chars().count(),
-                            "send_message 已投递"
-                        );
-                        // 工具结果先以 role='tool' 落库（带 tool_call_id，重建协议时配对），
-                        // 投递文本由 emit 回调后收集、迭代末尾统一落库。
-                        self.conversation.add_message_full(
-                            session_id,
-                            "tool",
-                            crate::llm::tool::SEND_MESSAGE_ACK,
-                            &crate::db::message::ToolMeta {
-                                tool_calls: None,
-                                tool_call_id: Some(call.call_id.clone()),
-                                tool_name: Some(call.fn_name.clone()),
-                            },
-                        )?;
-                        let (record, _) = emit(&mut deliver, &mut delivered, Reply::Text(text))?;
-                        if !record.is_empty() {
-                            delivered_records.push(record);
+                let progress = match self.dispatch_call(
+                    session_id,
+                    call,
+                    &tool_ctx,
+                    &mut deliver,
+                    &mut delivered,
+                    &mut paired,
+                ) {
+                    Ok(progress) => progress,
+                    Err(e) => {
+                        // assistant 调用行已经入库，本批剩下的调用还没走到自己的结果行——
+                        // 先补齐再上抛，否则历史里留下残缺配对（见 [`Self::backfill_tool_rows`]）。
+                        self.backfill_tool_rows(session_id, &outcome.tool_calls, &paired);
+                        // 已经投递的话也要落库：本轮到此为止，历史得如实记着用户收到了什么。
+                        // 尽力而为——用户都已经收到内容了，这里失败只记日志，不掩盖原始错误。
+                        if let Err(pe) = self.persist_delivered(session_id, &delivered_records) {
+                            tracing::error!(
+                                session = %session_id,
+                                error = %pe,
+                                "失败轮次补已投递文本失败"
+                            );
                         }
-                        spoke = true;
-                        messages.push(ChatMessage::tool_result(
-                            call,
-                            crate::llm::tool::SEND_MESSAGE_ACK,
-                        ));
+                        return Err(e);
                     }
-                    crate::llm::tool::ToolOutcome::SentDice(emoji) => {
-                        // 骰子由通道**当场**投递：服务端渲染的点数从这里拿回来，
-                        // 回填成工具结果，模型才能在同一轮里据此接话，而不是瞎编。
-                        let (record, dice) = emit(
-                            &mut deliver,
-                            &mut delivered,
-                            Reply::Dice {
-                                emoji: emoji.clone(),
-                            },
-                        )?;
-                        // 拿不到点数（通道不支持骰子 / 服务端未回）就退回通用确认，
-                        // 绝不编一个点数给模型。
-                        let ack = match dice {
-                            Some(value) => format!("已掷出 {value} 点"),
-                            None => crate::llm::tool::SEND_DICE_ACK.to_string(),
-                        };
-                        tracing::info!(
-                            session = %session_id,
-                            emoji = %emoji,
-                            ?dice,
-                            "send_dice 已投递"
-                        );
-                        self.conversation.add_message_full(
-                            session_id,
-                            "tool",
-                            &ack,
-                            &crate::db::message::ToolMeta {
-                                tool_calls: None,
-                                tool_call_id: Some(call.call_id.clone()),
-                                tool_name: Some(call.fn_name.clone()),
-                            },
-                        )?;
-                        if !record.is_empty() {
-                            delivered_records.push(record);
-                        }
-                        spoke = true;
-                        messages.push(ChatMessage::tool_result(call, ack));
-                    }
-                    crate::llm::tool::ToolOutcome::SentSticker(file_id) => {
-                        tracing::info!(session = %session_id, "send_sticker 已投递");
-                        self.conversation.add_message_full(
-                            session_id,
-                            "tool",
-                            crate::llm::tool::SEND_STICKER_ACK,
-                            &crate::db::message::ToolMeta {
-                                tool_calls: None,
-                                tool_call_id: Some(call.call_id.clone()),
-                                tool_name: Some(call.fn_name.clone()),
-                            },
-                        )?;
-                        let (record, _) =
-                            emit(&mut deliver, &mut delivered, Reply::Sticker { file_id })?;
-                        if !record.is_empty() {
-                            delivered_records.push(record);
-                        }
-                        spoke = true;
-                        messages.push(ChatMessage::tool_result(
-                            call,
-                            crate::llm::tool::SEND_STICKER_ACK,
-                        ));
-                    }
-                    crate::llm::tool::ToolOutcome::GenerateImage(prompt) => {
-                        // 意图先入库（ack 占位），真正的出图 + 上传在通道投递工人里异步完成。
-                        self.conversation.add_message_full(
-                            session_id,
-                            "tool",
-                            crate::llm::tool::GENERATE_IMAGE_ACK,
-                            &crate::db::message::ToolMeta {
-                                tool_calls: None,
-                                tool_call_id: Some(call.call_id.clone()),
-                                tool_name: Some(call.fn_name.clone()),
-                            },
-                        )?;
-                        let caption = call
-                            .arg_str("caption")
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from);
-                        let (record, _) = emit(
-                            &mut deliver,
-                            &mut delivered,
-                            Reply::Photo {
-                                prompt: prompt.clone(),
-                                caption,
-                            },
-                        )?;
-                        if !record.is_empty() {
-                            delivered_records.push(record);
-                        }
-                        spoke = true;
-                        messages.push(ChatMessage::tool_result(
-                            call,
-                            crate::llm::tool::GENERATE_IMAGE_ACK,
-                        ));
-                    }
-                    crate::llm::tool::ToolOutcome::GenerateVoice(text) => {
-                        self.conversation.add_message_full(
-                            session_id,
-                            "tool",
-                            crate::llm::tool::GENERATE_VOICE_ACK,
-                            &crate::db::message::ToolMeta {
-                                tool_calls: None,
-                                tool_call_id: Some(call.call_id.clone()),
-                                tool_name: Some(call.fn_name.clone()),
-                            },
-                        )?;
-                        let (record, _) = emit(
-                            &mut deliver,
-                            &mut delivered,
-                            Reply::Voice { text: text.clone() },
-                        )?;
-                        if !record.is_empty() {
-                            delivered_records.push(record);
-                        }
-                        spoke = true;
-                        messages.push(ChatMessage::tool_result(
-                            call,
-                            crate::llm::tool::GENERATE_VOICE_ACK,
-                        ));
-                    }
-                    crate::llm::tool::ToolOutcome::Filled(text) => {
-                        self.conversation.add_message_full(
-                            session_id,
-                            "tool",
-                            &text,
-                            &crate::db::message::ToolMeta {
-                                tool_calls: None,
-                                tool_call_id: Some(call.call_id.clone()),
-                                tool_name: Some(call.fn_name.clone()),
-                            },
-                        )?;
-                        messages.push(ChatMessage::tool_result(call, text));
-                    }
-                    crate::llm::tool::ToolOutcome::Rejected(reason) => {
-                        tracing::warn!(
-                            session = %session_id,
-                            tool = %call.fn_name,
-                            reason = %reason,
-                            "工具调用被拒绝"
-                        );
-                        let content = format!("调用失败：{reason}");
-                        self.conversation.add_message_full(
-                            session_id,
-                            "tool",
-                            &content,
-                            &crate::db::message::ToolMeta {
-                                tool_calls: None,
-                                tool_call_id: Some(call.call_id.clone()),
-                                tool_name: Some(call.fn_name.clone()),
-                            },
-                        )?;
-                        messages.push(ChatMessage::tool_result(call, content));
-                    }
+                };
+                messages.push(progress.tool_msg);
+                spoke |= progress.spoke;
+                if !progress.record.is_empty() {
+                    delivered_records.push(progress.record);
                 }
             }
 
             // 投递文本延后到工具结果之后落库，保证协议顺序
             // `assistant(调用) → tool(结果)… → assistant(投递文本)`。
-            for record in &delivered_records {
-                self.conversation
-                    .add_message(session_id, "assistant", record)?;
-            }
+            self.persist_delivered(session_id, &delivered_records)?;
 
             mute_rounds = if spoke { 0 } else { mute_rounds + 1 };
             tracing::debug!(
@@ -770,6 +674,315 @@ impl Agent {
         let last_memory = tool_ctx.written.borrow().last().cloned();
         Ok((delivered, last_memory))
     }
+
+    /// 分发本批中的一个工具调用：落它的 `tool` 结果行 + 即时投递。
+    ///
+    /// 落库顺序由调用方把关（assistant 调用行先入库），本函数只负责本调用的结果行与投递；
+    /// 任何失败都直接上抛，由调用方补行——见 [`Self::backfill_tool_rows`]。
+    fn dispatch_call(
+        &self,
+        session_id: &str,
+        call: &ChatCall,
+        tool_ctx: &dyn crate::llm::tool::ToolContext,
+        deliver: &mut impl FnMut(&Reply) -> std::result::Result<Option<u8>, String>,
+        delivered: &mut Vec<Reply>,
+        paired: &mut Vec<String>,
+    ) -> Result<CallProgress> {
+        match crate::llm::tool::dispatch(call, tool_ctx) {
+            crate::llm::tool::ToolOutcome::Sent(text) => {
+                // 已投递的正文另记一条：这是用户实际看到的内容，
+                // 与"入参"分开记，便于核对投递前是否被归一化改写。
+                tracing::info!(
+                    session = %session_id,
+                    chars = text.chars().count(),
+                    "send_message 已投递"
+                );
+                // 工具结果先以 role='tool' 落库（带 tool_call_id，重建协议时配对），
+                // 投递文本由 emit 回调后收集、迭代末尾统一落库。
+                let record = self.deliver_and_record(
+                    session_id,
+                    call,
+                    deliver,
+                    delivered,
+                    paired,
+                    Reply::Text(text),
+                    crate::llm::tool::SEND_MESSAGE_ACK,
+                )?;
+                Ok(CallProgress {
+                    record,
+                    spoke: true,
+                    tool_msg: ChatMessage::tool_result(call, crate::llm::tool::SEND_MESSAGE_ACK),
+                })
+            }
+            crate::llm::tool::ToolOutcome::SentDice(emoji) => {
+                // 骰子由通道**当场**投递：服务端渲染的点数从这里拿回来，
+                // 回填成工具结果，模型才能在同一轮里据此接话，而不是瞎编。
+                let (record, dice) = emit(
+                    deliver,
+                    delivered,
+                    Reply::Dice {
+                        emoji: emoji.clone(),
+                    },
+                )?;
+                // 拿不到点数（通道不支持骰子 / 服务端未回）就退回通用确认，
+                // 绝不编一个点数给模型。
+                let ack = match dice {
+                    Some(value) => format!("已掷出 {value} 点"),
+                    None => crate::llm::tool::SEND_DICE_ACK.to_string(),
+                };
+                tracing::info!(
+                    session = %session_id,
+                    emoji = %emoji,
+                    ?dice,
+                    "send_dice 已投递"
+                );
+                self.record_tool_result(session_id, call, &ack, paired)?;
+                Ok(CallProgress {
+                    record,
+                    spoke: true,
+                    tool_msg: ChatMessage::tool_result(call, ack),
+                })
+            }
+            crate::llm::tool::ToolOutcome::SentSticker(file_id) => {
+                tracing::info!(session = %session_id, "send_sticker 已投递");
+                let record = self.deliver_and_record(
+                    session_id,
+                    call,
+                    deliver,
+                    delivered,
+                    paired,
+                    Reply::Sticker { file_id },
+                    crate::llm::tool::SEND_STICKER_ACK,
+                )?;
+                Ok(CallProgress {
+                    record,
+                    spoke: true,
+                    tool_msg: ChatMessage::tool_result(call, crate::llm::tool::SEND_STICKER_ACK),
+                })
+            }
+            crate::llm::tool::ToolOutcome::GenerateImage(prompt) => {
+                // 真正的出图 + 上传在通道投递工人里异步完成，这里是"投递意图"的往返。
+                let caption = call
+                    .arg_str("caption")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                let record = self.deliver_and_record(
+                    session_id,
+                    call,
+                    deliver,
+                    delivered,
+                    paired,
+                    Reply::Photo {
+                        prompt: prompt.clone(),
+                        caption,
+                    },
+                    crate::llm::tool::GENERATE_IMAGE_ACK,
+                )?;
+                Ok(CallProgress {
+                    record,
+                    spoke: true,
+                    tool_msg: ChatMessage::tool_result(call, crate::llm::tool::GENERATE_IMAGE_ACK),
+                })
+            }
+            crate::llm::tool::ToolOutcome::GenerateVoice(text) => {
+                let record = self.deliver_and_record(
+                    session_id,
+                    call,
+                    deliver,
+                    delivered,
+                    paired,
+                    Reply::Voice { text: text.clone() },
+                    crate::llm::tool::GENERATE_VOICE_ACK,
+                )?;
+                Ok(CallProgress {
+                    record,
+                    spoke: true,
+                    tool_msg: ChatMessage::tool_result(call, crate::llm::tool::GENERATE_VOICE_ACK),
+                })
+            }
+            crate::llm::tool::ToolOutcome::Filled(text) => {
+                self.record_tool_result(session_id, call, &text, paired)?;
+                Ok(CallProgress {
+                    record: String::new(),
+                    spoke: false,
+                    tool_msg: ChatMessage::tool_result(call, text),
+                })
+            }
+            crate::llm::tool::ToolOutcome::Rejected(reason) => {
+                tracing::warn!(
+                    session = %session_id,
+                    tool = %call.fn_name,
+                    reason = %reason,
+                    "工具调用被拒绝"
+                );
+                let content = format!("调用失败：{reason}");
+                self.record_tool_result(session_id, call, &content, paired)?;
+                Ok(CallProgress {
+                    record: String::new(),
+                    spoke: false,
+                    tool_msg: ChatMessage::tool_result(call, content),
+                })
+            }
+        }
+    }
+
+    /// 落一条 `tool` 结果行，并把它的调用 id 记入本批已配对集合。
+    ///
+    /// 写行与登记绑在一起：凡落行必经此处，[`Self::backfill_tool_rows`] 才能算出本批
+    /// 还有哪些调用没结果行。
+    fn record_tool_result(
+        &self,
+        session_id: &str,
+        call: &ChatCall,
+        content: &str,
+        paired: &mut Vec<String>,
+    ) -> Result<()> {
+        self.conversation.add_message_full(
+            session_id,
+            "tool",
+            content,
+            &crate::db::message::ToolMeta {
+                tool_calls: None,
+                tool_call_id: Some(call.call_id.clone()),
+                tool_name: Some(call.fn_name.clone()),
+            },
+        )?;
+        paired.push(call.call_id.clone());
+        Ok(())
+    }
+
+    /// 投递一个片段，并把这次投递的结果如实写进时间线。
+    ///
+    /// 顺序刻意是**先投递、后落结果行**：投递失败时结果行写的是"没送出去"
+    /// （[`crate::llm::tool::DELIVERY_FAILED_ACK`]），而不是先落"已发送"再发现没送出去——
+    /// 那条假记录会被后续每一轮读到的历史当真。结果行本身无论如何都要落，协议要求配对。
+    // 参数就是投递链路的全套管线（投递口 / 已投递收集 / 配对登记），与 `dispatch_call`
+    // 同源；拆包只会让每个调用点多写几行。
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_and_record(
+        &self,
+        session_id: &str,
+        call: &ChatCall,
+        deliver: &mut impl FnMut(&Reply) -> std::result::Result<Option<u8>, String>,
+        delivered: &mut Vec<Reply>,
+        paired: &mut Vec<String>,
+        reply: Reply,
+        ack: &str,
+    ) -> Result<String> {
+        match emit(deliver, delivered, reply) {
+            Ok((record, _)) => {
+                self.record_tool_result(session_id, call, ack, paired)?;
+                Ok(record)
+            }
+            Err(e) => {
+                // 落行失败只记日志：原始错误是投递失败，别把它换成落库错误上抛。
+                if let Err(pe) = self.record_tool_result(
+                    session_id,
+                    call,
+                    crate::llm::tool::DELIVERY_FAILED_ACK,
+                    paired,
+                ) {
+                    tracing::error!(
+                        session = %session_id,
+                        call_id = %call.call_id,
+                        error = %pe,
+                        "投递失败后补结果行失败，历史里的工具配对可能残缺"
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// 给本批还没落 `tool` 结果行的调用补上占位结果行。
+    ///
+    /// 存在的理由：`assistant(tool_calls)` 行在分发**之前**就已入库（协议要求它先于结果行），
+    /// 而批内任何一步失败都会中断整批——后面几条调用就永远走不到自己的结果行，库里留下
+    /// "有调用、结果缺几条"的残缺配对。重建历史时这会被原样翻译成请求，provider 直接拒
+    /// （`400`，见 `llm/chat.rs` 的协议注释），且因为残缺行整天都在时间线里，当天剩余时间
+    /// 条条请求都失败。补行的目的是保住配对，内容只是占位，不代表真实投递结果。
+    ///
+    /// 尽力而为：写库本身失败时（数据库不可用）只记日志，原始错误照常上抛给调用方。
+    fn backfill_tool_rows(&self, session_id: &str, calls: &[ChatCall], paired: &[String]) {
+        for call in calls.iter().filter(|c| !paired.contains(&c.call_id)) {
+            let written = self.conversation.add_message_full(
+                session_id,
+                "tool",
+                crate::llm::tool::ABORTED_ACK,
+                &crate::db::message::ToolMeta {
+                    tool_calls: None,
+                    tool_call_id: Some(call.call_id.clone()),
+                    tool_name: Some(call.fn_name.clone()),
+                },
+            );
+            if let Err(e) = written {
+                tracing::error!(
+                    session = %session_id,
+                    call_id = %call.call_id,
+                    error = %e,
+                    "补工具结果行失败，历史里的工具配对可能残缺"
+                );
+            }
+        }
+    }
+
+    /// 把本轮已投递出去的文本落库（协议顺序在工具结果之后，见调用点）。
+    ///
+    /// 正常路径由迭代末尾统一调用；**失败路径也要调**——话已经发给用户了，
+    /// 时间线就不能装作没说过：否则用户看得见的回复在历史里缺席，而重试轮次
+    /// 截断到用户消息重跑时也会把它重复说一遍。
+    fn persist_delivered(&self, session_id: &str, records: &[String]) -> Result<()> {
+        for record in records {
+            self.conversation
+                .add_message(session_id, "assistant", record)?;
+        }
+        Ok(())
+    }
+}
+
+/// 把运行中到达的用户消息并入本轮 live 上下文（返回并入条数，游标停到最后一条上）。
+///
+/// 这是"agent 跑着也能插话"的内核一半（另一半是通道：收到消息的当下就落库、发现会话有
+/// 轮次在跑就不再起第二轮）。并进来的消息**已经在库里**，这里只读——不消费、不复制，
+/// 所以这一轮中途死掉也不会把它弄丢：下一次对话（或重试）照样从时间线里读到。
+///
+/// 游标为 `None`（主动开口轮次）时不并入：那种轮次的提示词是"该不该开口"的主动语境，
+/// 此刻接话应由对话轮次来做。
+fn ingest_steers(
+    conversation: &Sessions,
+    session_id: &str,
+    cursor: &mut Option<String>,
+    messages: &mut Vec<ChatMessage>,
+) -> Result<usize> {
+    let Some(after) = cursor.as_deref() else {
+        return Ok(0);
+    };
+    let fresh = conversation.user_messages_after(session_id, after)?;
+    let Some(last_id) = fresh.last().map(|m| m.id.clone()) else {
+        return Ok(0);
+    };
+    tracing::info!(
+        session = %session_id,
+        n = fresh.len(),
+        "运行中收到新消息，并入本轮上下文"
+    );
+    let n = fresh.len();
+    for turn in fresh {
+        messages.push(ChatMessage::user(turn.content));
+    }
+    *cursor = Some(last_id);
+    Ok(n)
+}
+
+/// 一次工具调用的处理结果（[`Agent::dispatch_call`] 产出）。
+struct CallProgress {
+    /// 投递文本的入库投影（迭代末尾统一落库）；空串表示本条没有向用户投递。
+    record: String,
+    /// 本条是否投递了东西给用户（决定"沉默轮次"计数）。
+    spoke: bool,
+    /// 回填给模型的工具结果消息，拼进本轮 live 的 `messages`（落库已在分发时完成）。
+    tool_msg: ChatMessage,
 }
 
 /// 工具循环的迭代硬上限。
@@ -1012,3 +1225,7 @@ fn render_messages(messages: &[ChatMessage]) -> String {
     )
     .unwrap_or_else(|_| "[]".to_string())
 }
+
+#[cfg(test)]
+#[path = "agent_tests.rs"]
+mod agent_tests;

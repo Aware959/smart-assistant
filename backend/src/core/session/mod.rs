@@ -9,7 +9,8 @@
 mod sessions;
 
 pub use sessions::{
-    classify_inbound, InboundFreshness, Sessions, FRESH_WINDOW_MINUTES, MAX_REPLYABLE_HOURS,
+    classify_inbound, InboundFreshness, Sessions, TurnTicket, FRESH_WINDOW_MINUTES,
+    MAX_REPLYABLE_HOURS,
 };
 
 /// 会话视图（不感知存储实现）。

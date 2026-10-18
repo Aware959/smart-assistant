@@ -17,6 +17,9 @@ pub(crate) const USER_OFFSET_MINUTES: i64 = 8 * 60;
 /// 今日消息少于该条数时，把昨天也并入上下文（人记得昨晚的事）。
 const DAY_POOL_THRESHOLD: usize = 6;
 /// 按天上下文的最大消息条数；超出时保留开头与结尾、中间整段省略。
+///
+/// 压缩以工具调用组为单位（见 [`tool_group_end`]），整组同留同弃，故实际条数可能
+/// 略超这个上限——最多超一组工具往返。
 const DAY_CONTEXT_MAX: usize = 60;
 /// 压缩时保留的头部条数（保住今天早晨的开场）。
 const DAY_KEEP_HEAD: usize = 8;
@@ -35,14 +38,16 @@ pub(crate) fn day_window_start(offset_minutes: i64) -> DateTime<Utc> {
 ///
 /// - `history_count` 为 `None`：按"今天"取（日界 = 用户当地 06:00；今日过少自动并入
 ///   昨天，让 AI 有连续性），并做超长压缩；
-/// - `Some(n)`：退化为取最近 N 条纯文本。
+/// - `Some(n)`：退化为取最近 N 条（不做按天整理，同样尊重 `exclude_id`）。
 ///
 /// `exclude_id` 为 `Some(id)` 时，把历史**截断到该消息之前**（重试场景：被复用的用户消息
 /// 及其后来产生的半截 assistant/tool 轮次都要排除，令 `messages` 等价于"首轮重跑"——
 /// 该消息之前的全部历史 + 末尾再显式 push 一次本条用户消息）。截断点即该消息首次出现处；
 /// 历史里没有它（如被日界挡掉）时保持原样，同样由末尾 push 保证恰好出现一次。
 ///
-/// **调用时机**：必须在"本条用户消息入库之前"取，否则当前消息会被算进历史。
+/// **调用时机**：传了 `exclude_id`（Telegram：消息在通道侧收到时就已落库）就不必挑时机，
+/// 截断保证它不会既在历史里、又在末尾被 push 一次；未传时（Web/iLink：由 `chat_stream`
+/// 自行入库）必须在入库之前取，否则当前消息会被算进历史、在提示词里出现两遍。
 pub(crate) fn fetch(
     conversation: &Sessions,
     session_id: &str,
@@ -50,7 +55,7 @@ pub(crate) fn fetch(
     exclude_id: Option<&str>,
 ) -> Result<Vec<ChatMessage>> {
     match history_count {
-        Some(n) => fetch_recent(conversation, session_id, n as usize),
+        Some(n) => recent_history(conversation, session_id, n as usize, exclude_id),
         None => {
             let start = day_window_start(USER_OFFSET_MINUTES);
             let mut turns = conversation.messages_since(session_id, start)?;
@@ -75,29 +80,143 @@ pub(crate) fn fetch_recent(
     session_id: &str,
     limit: usize,
 ) -> Result<Vec<ChatMessage>> {
-    Ok(conversation
-        .recent_messages(session_id, limit)?
-        .iter()
-        .map(turn_to_chat)
-        .collect())
+    recent_history(conversation, session_id, limit, None)
+}
+
+/// 取最近 `limit` 条历史并做配对净化；`exclude_id` 为 `Some` 时截断到该消息之前。
+///
+/// [`fetch`] 的 `Some(n)` 路径与 [`fetch_recent`] 共用此实现——重试的重跑语义
+/// （排除被复用的用户消息及其半截轮次）在两条取法上都成立，不该因宿主传了
+/// `history_count` 就失效。
+fn recent_history(
+    conversation: &Sessions,
+    session_id: &str,
+    limit: usize,
+    exclude_id: Option<&str>,
+) -> Result<Vec<ChatMessage>> {
+    let mut turns = conversation.recent_messages(session_id, limit)?;
+    if let Some(ex) = exclude_id {
+        if let Some(pos) = turns.iter().position(|t| t.id == ex) {
+            turns.truncate(pos);
+        }
+    }
+    let msgs: Vec<ChatMessage> = turns.iter().map(turn_to_chat).collect();
+    Ok(sanitize_tool_pairs(msgs))
 }
 
 /// 按"今天"把历史消息构建成对话上下文（参考人的作息与生物节律）：
 /// - 入场条数超上限时做骨架压缩（保留开头与结尾、省略中间），控制单轮上下文长度；
+/// - 压缩以**工具调用组**为单位（见 [`tool_group_end`]）：协议要求 assistant 的每个工具
+///   调用都紧跟配对结果，切在组中间就会产出非法历史，所以整组同留同弃——实际条数因此
+///   可能略超上限（最多一组工具往返）；
 /// - 说话人靠消息本身的 role 一并传给模型，内容保持原文、不做任何装饰。
 pub(crate) fn build_day_history(turns: &[MessageTurn]) -> Result<Vec<ChatMessage>> {
     let total = turns.len();
     let compact = total > DAY_CONTEXT_MAX;
     let tail_start = total.saturating_sub(DAY_CONTEXT_MAX - DAY_KEEP_HEAD);
 
-    let mut out = Vec::with_capacity(total.min(DAY_CONTEXT_MAX));
-    for (idx, m) in turns.iter().enumerate() {
-        if compact && idx >= DAY_KEEP_HEAD && idx < tail_start {
+    let mut keep = vec![true; total];
+    if compact {
+        for (idx, slot) in keep.iter_mut().enumerate() {
+            *slot = idx < DAY_KEEP_HEAD || idx >= tail_start;
+        }
+        // 整组对齐：组内只要有一条原本被留下，整组都留下（反之整组丢弃）。两个方向都要管——
+        // 留下调用声明却丢了它的结果行，和留下结果行却丢了声明，都是 provider 会直接拒的残缺配对。
+        let mut idx = 0;
+        while idx < total {
+            match tool_group_end(turns, idx) {
+                Some(end) => {
+                    if keep[idx..end].iter().any(|k| *k) {
+                        keep[idx..end].fill(true);
+                    }
+                    idx = end;
+                }
+                None => idx += 1,
+            }
+        }
+    }
+
+    let out: Vec<ChatMessage> = turns
+        .iter()
+        .zip(&keep)
+        .filter(|(_, kept)| **kept)
+        .map(|(m, _)| turn_to_chat(m))
+        .collect();
+    Ok(sanitize_tool_pairs(out))
+}
+
+/// 若 `idx` 处是一条"带工具调用的 assistant 轮"，返回其工具调用组的结束下标（不含）；否则 `None`。
+///
+/// 组 = 该 assistant 轮 + 紧随其后的连续 `tool` 结果行。协议要求两者成对出现，
+/// 因此它是压缩裁剪时不可拆分的最小单位。
+fn tool_group_end(turns: &[MessageTurn], idx: usize) -> Option<usize> {
+    let head = turns.get(idx)?;
+    if head.role != "assistant" || declared_calls(head).is_empty() {
+        return None;
+    }
+    let mut end = idx + 1;
+    while end < turns.len() && turns[end].role == "tool" {
+        end += 1;
+    }
+    Some(end)
+}
+
+/// 读时净化：丢掉不成对的工具往返片段，保证发给 provider 的消息序列协议合法。
+///
+/// 库里可能残留残缺配对——落库中途失败（见 `Agent::backfill_tool_rows`）、进程被杀、
+/// 或压缩裁剪的边界恰好落在组中间。而 provider 对"有调用没结果"和"有结果没调用"都是直接
+/// 400，一条脏行就会让**当天剩余时间的每条请求**都失败，所以读到就修：按 call_id 配对，
+/// 结果行找不到声明它的调用就丢弃；调用声明的结果一条都没有，就顺手退掉这条声明
+/// （整轮没有正文也没有配对的调用时，这一轮直接不发给模型）。
+fn sanitize_tool_pairs(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    // 调用 id → 声明它的那一轮下标（重复声明时以最早的一轮为准）。
+    let mut declared_at: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role == "assistant" {
+            for call in &msg.tool_calls {
+                declared_at.entry(call.call_id.clone()).or_insert(idx);
+            }
+        }
+    }
+
+    // 只有"声明之后确实出现了配对结果"的调用才算被回答。
+    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role != "tool" {
             continue;
         }
-        out.push(turn_to_chat(m));
+        let Some(call_id) = msg.tool_call_id.as_ref() else {
+            continue;
+        };
+        if declared_at.get(call_id).is_some_and(|head| *head < idx) {
+            answered.insert(call_id.clone());
+        }
     }
-    Ok(out)
+
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    for mut msg in messages {
+        if msg.role == "tool" {
+            let paired = msg
+                .tool_call_id
+                .as_ref()
+                .is_some_and(|id| answered.contains(id));
+            if paired {
+                out.push(msg);
+            }
+            continue;
+        }
+        if msg.role == "assistant" && !msg.tool_calls.is_empty() {
+            msg.tool_calls
+                .retain(|call| answered.contains(&call.call_id));
+            // 结果全丢了就退化成纯正文轮；连正文都没有（正常：正文走工具）就整轮丢掉。
+            if msg.tool_calls.is_empty() && msg.content.trim().is_empty() {
+                continue;
+            }
+        }
+        out.push(msg);
+    }
+    out
 }
 
 /// 把一条持久化历史轮次还原成发给模型的 [`ChatMessage`]，拼回工具调用上下文。
@@ -107,15 +226,23 @@ pub(crate) fn build_day_history(turns: &[MessageTurn]) -> Result<Vec<ChatMessage
 /// `tool_call_id` / `tool_name`。
 fn turn_to_chat(turn: &MessageTurn) -> ChatMessage {
     let mut msg = ChatMessage::new(turn.role.clone(), turn.content.clone());
-    if let Some(json) = &turn.tool_calls {
-        if let Ok(calls) = serde_json::from_str::<Vec<ChatCall>>(json) {
-            msg.tool_calls = calls;
-        }
-    }
+    msg.tool_calls = declared_calls(turn);
     msg.tool_call_id = turn.tool_call_id.clone();
     msg.tool_name = turn.tool_name.clone();
     msg
 }
+
+/// 解析一轮里落库的工具调用声明（`tool_calls` JSON）；缺失或解析失败视为没有调用。
+fn declared_calls(turn: &MessageTurn) -> Vec<ChatCall> {
+    turn.tool_calls
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod history_tests;
 
 #[cfg(test)]
 mod tests {

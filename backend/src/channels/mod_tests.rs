@@ -154,3 +154,35 @@ async fn production_policy_stays_within_bounded_window() {
         .sum();
     assert_eq!(total, 13_000, "1+2+4+6 秒");
 }
+
+/// Telegram 的上限按 UTF-16 码元计：emoji（代理对）占 2，按字符数分片会切出超限片段。
+#[test]
+fn 按码元分片时emoji算两个单位() {
+    let chunks = chunk_text_utf16("😀😀😀", 4);
+    assert_eq!(chunks, vec!["😀😀".to_string(), "😀".to_string()]);
+    for c in &chunks {
+        assert!(c.encode_utf16().count() <= 4, "分片超出上限：{c}");
+    }
+}
+
+/// 整段都在上限内时不切（含上限内的 emoji），切口仍优先落在换行处。
+#[test]
+fn 按码元分片的边界与换行() {
+    assert_eq!(chunk_text_utf16("😀", 2), vec!["😀".to_string()]);
+    // 单个字符就超上限（上限 1 遇到代理对）时，仍切出这一个字符，不死循环。
+    assert_eq!(chunk_text_utf16("😀", 1), vec!["😀".to_string()]);
+    assert_eq!(
+        chunk_text_utf16("一二三四五\n六七八九十", 6),
+        vec!["一二三四五\n".to_string(), "六七八九十".to_string()]
+    );
+}
+
+/// 按字符计数的分片语义不变（按字符计上限的渠道不受 Telegram 这条规则影响）。
+#[test]
+fn 按字符分片语义不变() {
+    assert_eq!(
+        chunk_text("😀😀😀", 2),
+        vec!["😀😀".to_string(), "😀".to_string()]
+    );
+    assert!(chunk_text("", 10).is_empty());
+}
