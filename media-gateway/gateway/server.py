@@ -2,9 +2,10 @@
 
 | 方法 | 路径               | 返回                                  |
 | ---- | ------------------ | ------------------------------------- |
-| GET  | `/health`          | 配置摘要（扩散后端 / TTS 引擎）        |
+| GET  | `/health`          | 配置摘要（扩散后端 / TTS 引擎 / ASR）  |
 | POST | `/generate/image`  | 图片字节                              |
 | POST | `/generate/voice`  | 音频字节                              |
+| POST | `/transcribe`      | 转写文本（JSON）；请求体是原始音频字节 |
 
 退出语义（对齐 Rust 侧 `sa-link`）：
 
@@ -22,6 +23,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .config import Settings, settings
+from . import asr
 from .errors import GatewayError
 from .imaging import generate_image
 from .speech import generate_voice
@@ -43,23 +45,53 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] == "/health":
-            body = {"ok": True, "diffusion": settings.diffusion_backend_type, "tts": settings.tts_engine}
+            body = {
+                "ok": True,
+                "diffusion": settings.diffusion_backend_type,
+                "tts": settings.tts_engine,
+                # 只做"依赖是否可导入"的探测，**不加载模型**——健康检查不该触发 GB 级加载。
+                "asr": {
+                    "engine": settings.asr_engine,
+                    "importable": asr.engine_importable(settings.asr_engine),
+                    "model_loaded": asr.model_loaded(settings.asr_engine),
+                },
+            }
             self._send(200, json.dumps(body).encode())
             return
         self._send(404, json.dumps({"error": "not found"}).encode())
 
+    def _transcribe(self):
+        """/transcribe：请求体是**原始音频字节**（非 JSON、非 multipart、非 base64）。"""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0:
+            raise GatewayError(400, "请求体为空：/transcribe 需要在 body 里直接放音频字节")
+        audio = self.rfile.read(length)
+        result = asr.transcribe(audio, self.headers.get("Content-Type") or "")
+        body = {"text": result.text}
+        if result.language is not None:
+            body["language"] = result.language
+        if result.duration is not None:
+            body["duration"] = result.duration
+        self._send(200, json.dumps(body).encode())
+
     def do_POST(self):
+        path = self.path.split("?")[0]
         try:
-            if self.path.split("?")[0] == "/generate/image":
+            if path == "/generate/image":
                 data, ctype = generate_image(self._json())
                 self._send(200, data, ctype)
-            elif self.path.split("?")[0] == "/generate/voice":
+            elif path == "/generate/voice":
                 data, ctype = generate_voice(self._json())
                 self._send(200, data, ctype)
+            elif path == "/transcribe":
+                self._transcribe()
             else:
                 self._send(404, json.dumps({"error": "not found"}).encode())
         except GatewayError as e:
-            self._send(e.status, json.dumps({"error": e.detail}).encode())
+            body = {"error": e.detail}
+            if e.kind:
+                body["kind"] = e.kind
+            self._send(e.status, json.dumps(body).encode())
         except Exception as e:  # noqa: BLE001
             self._send(500, json.dumps({"error": f"内部错误：{e}"}).encode())
 
@@ -129,6 +161,13 @@ def serve(config: Settings | None = None):
         f"(diffusion={config.diffusion_backend_type}, Ctrl+C / Ctrl+Break 退出)",
         flush=True,
     )
+
+    # 后台预热 ASR 模型（ASR_WARMUP=1 且引擎非空时）：冷加载实测 20 秒级，挪到启动期做，
+    # 免得第一条语音白等。**必须后台线程**——预热失败或很慢都不该挡住监听启动。
+    if config.asr_warmup and (config.asr_engine or "").strip().lower() not in asr.ENGINE_NONE:
+        print(f"[asr] 后台预热引擎 '{config.asr_engine}'（模型 {config.asr_model}）……", flush=True)
+        threading.Thread(target=asr.warmup, args=(config,), name="asr-warmup", daemon=True).start()
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:  # 兜底：信号处理器没挂上时（如非主线程调用）

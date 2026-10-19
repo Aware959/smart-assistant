@@ -14,6 +14,15 @@
     SAPI_VOICE            可选：显式指定 SAPI 音色全名（优先级高于 TTS_VOICE）
     FFMPEG_BIN            ffmpeg 可执行文件（默认取 PATH 里的 ffmpeg；sapi 引擎用它转码）
     MEDIA_HTTP_TIMEOUT    单次生成总超时秒（默认 120）
+
+    --- 语音识别（ASR，入站语音转文字；依赖可选，见 gateway/asr/）---
+    ASR_ENGINE            引擎：faster-whisper（默认）| 空/none 表示本网关不提供转写
+    ASR_MODEL             模型规格或本地路径（默认 small：tiny/base/small/medium/large-v3…）
+    ASR_LANGUAGE          识别语种（默认 auto，交给模型自判）
+    ASR_DEVICE            cpu（默认）| cuda
+    ASR_COMPUTE_TYPE      int8（默认，CPU 推荐）| float16（GPU）
+    ASR_MODEL_DIR         模型缓存/本地目录；留空用引擎默认（HuggingFace 缓存）
+    ASR_WARMUP            启动时用后台线程预热模型（默认开；关闭则首次转写才加载）
 """
 
 from __future__ import annotations
@@ -68,6 +77,13 @@ class Settings:
     sapi_voice: str
     ffmpeg_bin: str
     http_timeout: float
+    asr_engine: str
+    asr_model: str
+    asr_language: str
+    asr_device: str
+    asr_compute_type: str
+    asr_model_dir: str
+    asr_warmup: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -89,6 +105,15 @@ class Settings:
             sapi_voice=os.getenv("SAPI_VOICE", ""),
             ffmpeg_bin=os.getenv("FFMPEG_BIN", "ffmpeg"),
             http_timeout=float(os.getenv("MEDIA_HTTP_TIMEOUT", "120")),
+            asr_engine=os.getenv("ASR_ENGINE", "faster-whisper").strip().lower(),
+            asr_model=os.getenv("ASR_MODEL", "small").strip(),
+            asr_language=os.getenv("ASR_LANGUAGE", "auto").strip(),
+            asr_device=os.getenv("ASR_DEVICE", "cpu").strip().lower(),
+            asr_compute_type=os.getenv("ASR_COMPUTE_TYPE", "int8").strip(),
+            asr_model_dir=os.getenv("ASR_MODEL_DIR", "").strip(),
+            # 与 Rust 侧 TELEGRAM_ENABLED 同语义：只有显式的 0/false/no/off 才算关。
+            asr_warmup=os.getenv("ASR_WARMUP", "1").strip().lower()
+            not in ("0", "false", "no", "off"),
         )
 
 

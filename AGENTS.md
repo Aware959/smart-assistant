@@ -66,8 +66,10 @@ cargo run --bin sa-sticker -- fetch <包名>    # 拉取 Telegram 贴纸包生�
 
 ## 代码约定
 
-- **单元测试不写进逻辑代码文件末尾**。新单元测试放同目录独立文件（如 `core/memory/current_relation.rs` 的测试 → `core/memory/current_relation_tests.rs`），原文件末行用 `#[cfg(test)] #[path = "<name>_tests.rs"] mod <name>_tests;` 挂载（`#[path]` 指到同级文件，否则子模块会去 `<file>/<name>_tests.rs` 目录里找），测试内用 `super::` 访问原模块（私有成员可及性不变）。
-- 顶层 `tests/` 只放集成测试（走 crate 公开 API）。历史遗留的内嵌 `#[cfg(test)] mod tests` 不强制迁移。
+- **单元测试跟随 Rust 惯例写在同文件末尾**的 `#[cfg(test)] mod tests { … }`，不在同目录另开测试文件。
+  历史上曾用「独立 `_tests.rs` + `#[path]` 挂载」的写法（如 `channels/telegram_tests.rs`），
+  这些残留**不强制迁移**，在后续迭代里顺手收敛回文件末尾即可。
+- 顶层 `tests/` 只放集成测试（走 crate 公开 API）。
 
 ## 验证基线
 

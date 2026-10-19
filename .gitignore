@@ -38,6 +38,8 @@ frontend/dist/
 # Python 媒体网关 (media-gateway/)
 media-gateway/**/__pycache__/
 media-gateway/**/*.pyc
+# ASR 依赖装在本地 venv 里（uv venv --python 3.13 media-gateway/.venv），绝不能入库
+media-gateway/.venv/
 
 # Android (android/)
 android/.gradle/

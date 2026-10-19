@@ -106,6 +106,20 @@ pub struct Config {
     pub media_gateway_enabled: bool,
     /// 媒体生成超时（秒）：图片生成可能很慢，默认 120，超时即本轮回执失败走兜底话术。
     pub media_gateway_timeout: u64,
+    /// 入站语音转写总开关：`1`/`true` 才转写用户发来的语音。缺省关闭。
+    ///
+    /// **刻意不复用** [`Config::media_gateway_enabled`]——那个管的是"是否把
+    /// `generate_image`/`generate_voice` 下发给模型"（出站），与"是否把用户语音转成
+    /// 文字"（入站）是两件事，混用会让"关掉出图工具"顺手关掉语音转写。
+    pub voice_transcribe_enabled: bool,
+    /// 单次转写硬超时（秒）。超时归**系统故障**路径（不落库、不起轮次）——它的前提是
+    /// `voice_transcribe_max_secs` 的前置拦截已把合法语音挡在超时之前。
+    pub voice_transcribe_timeout: u64,
+    /// 语音时长的**前置上限**（秒）：超过则不下载、不转写，直接判内容层面失败。
+    ///
+    /// 这条的存在是为了满足 FR-003 的"不能长时间无响应"：若只靠超时兜底，一条几分钟的
+    /// 语音会一路跑到超时才静默失败，用户长时间什么也收不到。
+    pub voice_transcribe_max_secs: u64,
 }
 
 impl Config {
@@ -217,6 +231,17 @@ impl Config {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             media_gateway_timeout: std::env::var("MEDIA_GATEWAY_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
+            voice_transcribe_enabled: std::env::var("VOICE_TRANSCRIBE_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            voice_transcribe_timeout: std::env::var("VOICE_TRANSCRIBE_TIMEOUT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(180),
+            voice_transcribe_max_secs: std::env::var("VOICE_TRANSCRIBE_MAX_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(120),
