@@ -50,6 +50,9 @@ fn chat(role: &str, content: &str, calls: &[&str], tool_call_id: Option<&str>) -
 }
 
 /// 断言序列里不存在残缺配对：每个调用都有结果，每条结果都有声明它的调用。
+///
+/// 同时断言**相邻**：`assistant(tool_calls)` 之后必须紧跟按序排列的结果行——
+/// provider 对"隔着别的消息才出现结果"同样会 400 拒。
 fn assert_pairs_complete(messages: &[ChatMessage]) {
     for (idx, msg) in messages.iter().enumerate() {
         if msg.role == "assistant" {
@@ -59,6 +62,18 @@ fn assert_pairs_complete(messages: &[ChatMessage]) {
                         && m.tool_call_id.as_deref() == Some(call.call_id.as_str())),
                     "调用 {} 没有配对的结果行",
                     call.call_id
+                );
+            }
+            for (offset, call) in msg.tool_calls.iter().enumerate() {
+                let next = &messages[idx + 1 + offset];
+                assert_eq!(
+                    next.role, "tool",
+                    "结果行必须紧跟在声明它的 assistant 轮之后"
+                );
+                assert_eq!(
+                    next.tool_call_id.as_deref(),
+                    Some(call.call_id.as_str()),
+                    "紧随的结果行 id 必须与调用一一对应"
                 );
             }
         }
@@ -197,6 +212,24 @@ fn sanitize_degrades_unanswered_assistant_round() {
     // 空正文的孤立声明轮没有留下的意义，直接消失。
     assert_eq!(without_text.len(), 1);
     assert_eq!(without_text[0].role, "user");
+}
+
+/// 结果行与声明之间夹了一条 user（运行中插话的落库时序）时，结果行必须被重新贴回
+/// 声明轮之后——原样发出会被 provider 以"tool_call_id 对不上"400 拒。
+#[test]
+fn sanitize_reanchors_interleaved_result() {
+    let msgs = vec![
+        chat("assistant", "", &["c1"], None),
+        chat("user", "你什么时候睡呀", &[], None),
+        chat("tool", crate::llm::tool::SEND_MESSAGE_ACK, &[], Some("c1")),
+    ];
+    let out = sanitize_tool_pairs(msgs);
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].role, "assistant");
+    assert_eq!(out[1].role, "tool");
+    assert_eq!(out[1].tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(out[2].role, "user");
+    assert_pairs_complete(&out);
 }
 
 /// 净化对已经合法的序列是幂等的（正常路径不该被改动）。

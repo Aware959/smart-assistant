@@ -293,8 +293,12 @@ impl Agent {
             None => context::system_prompt(&profile),
         };
         let mut messages = vec![ChatMessage::system(system)];
+        // 历史轮次**原样**并入：`role='tool'` 的结果行必须带着 `tool_call_id`，声明它的
+        // assistant 轮必须带着 `tool_calls`——两者任缺其一，provider 都会按 400 拒绝
+        // （这正是"工具结果里 tool_call_id 对不上"报错的来源）。所以这里只能 clone，
+        // 不能再用 `ChatMessage::new(role, content)` 重造（那会把工具字段全丢掉）。
         for turn in ctx.history.iter().chain(input.history.iter()) {
-            messages.push(ChatMessage::new(turn.role.clone(), turn.content.clone()));
+            messages.push(turn.clone());
         }
         // 本条用户消息统一在末尾 push：重试场景下它已从历史里按 id 剔除（见上），这里补回，
         // 因此无论如何都恰好出现一次、且时序与首轮一致。

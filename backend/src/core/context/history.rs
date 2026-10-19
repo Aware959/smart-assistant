@@ -161,13 +161,18 @@ fn tool_group_end(turns: &[MessageTurn], idx: usize) -> Option<usize> {
     Some(end)
 }
 
-/// 读时净化：丢掉不成对的工具往返片段，保证发给 provider 的消息序列协议合法。
+/// 读时净化：丢掉不成对的工具往返片段、并把结果行重新贴回声明它的调用之后，
+/// 保证发给 provider 的消息序列协议合法。
 ///
 /// 库里可能残留残缺配对——落库中途失败（见 `Agent::backfill_tool_rows`）、进程被杀、
 /// 或压缩裁剪的边界恰好落在组中间。而 provider 对"有调用没结果"和"有结果没调用"都是直接
 /// 400，一条脏行就会让**当天剩余时间的每条请求**都失败，所以读到就修：按 call_id 配对，
 /// 结果行找不到声明它的调用就丢弃；调用声明的结果一条都没有，就顺手退掉这条声明
 /// （整轮没有正文也没有配对的调用时，这一轮直接不发给模型）。
+///
+/// 配对之外还必须**相邻**：provider 要求结果行紧跟在声明它的 assistant 轮之后，
+/// 隔着别的消息（实测运行中插话时 user 消息会落在调用与结果之间）一样会被 400 拒。
+/// 因此这里以声明轮为锚点把结果行重新内联，不留在原位。
 fn sanitize_tool_pairs(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     // 调用 id → 声明它的那一轮下标（重复声明时以最早的一轮为准）。
     let mut declared_at: std::collections::HashMap<String, usize> =
@@ -194,25 +199,52 @@ fn sanitize_tool_pairs(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
         }
     }
 
+    // 结果行按 call_id 归档（同 id 只留第一条），供紧随其调用内联。
+    let mut results: std::collections::HashMap<String, ChatMessage> =
+        std::collections::HashMap::new();
+    for msg in &messages {
+        if msg.role != "tool" {
+            continue;
+        }
+        let Some(call_id) = msg.tool_call_id.as_ref() else {
+            continue;
+        };
+        if answered.contains(call_id) {
+            results
+                .entry(call_id.clone())
+                .or_insert_with(|| msg.clone());
+        }
+    }
+
     let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
-    for mut msg in messages {
+    for (idx, mut msg) in messages.into_iter().enumerate() {
         if msg.role == "tool" {
-            let paired = msg
-                .tool_call_id
-                .as_ref()
-                .is_some_and(|id| answered.contains(id));
-            if paired {
-                out.push(msg);
-            }
+            // 结果行统一在声明轮处内联，原位一律丢弃。
             continue;
         }
         if msg.role == "assistant" && !msg.tool_calls.is_empty() {
-            msg.tool_calls
-                .retain(|call| answered.contains(&call.call_id));
+            // 只保留"这一轮是声明处、且有配对结果"的调用：重复声明（重试）与没有结果的
+            // 调用都会让协议不合法，一并退掉。
+            let kept: Vec<ChatCall> = msg
+                .tool_calls
+                .drain(..)
+                .filter(|call| {
+                    declared_at.get(&call.call_id) == Some(&idx) && answered.contains(&call.call_id)
+                })
+                .collect();
             // 结果全丢了就退化成纯正文轮；连正文都没有（正常：正文走工具）就整轮丢掉。
-            if msg.tool_calls.is_empty() && msg.content.trim().is_empty() {
+            if kept.is_empty() && msg.content.trim().is_empty() {
                 continue;
             }
+            msg.tool_calls = kept;
+            let ids: Vec<String> = msg.tool_calls.iter().map(|c| c.call_id.clone()).collect();
+            out.push(msg);
+            for id in ids {
+                if let Some(result) = results.get(&id) {
+                    out.push(result.clone());
+                }
+            }
+            continue;
         }
         out.push(msg);
     }
