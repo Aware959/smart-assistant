@@ -112,6 +112,49 @@ fn 只取水位线之后的用户消息() {
         .is_empty());
 }
 
+/// 进程重启后某会话的第一条消息：缓冲里不得出现两份，否则插话游标会原地打转。
+///
+/// 复现路径：`Sessions::new` 只载入 channel_map、`hot` 是空的；重启后的第一条消息经
+/// `resolve()` 命中映射直接返回（不水合），随后 `add_message` 先写库再水合，水合快照
+/// 就带上了刚插入的那条，再 append 一次即重复。重复的后果是
+/// [`Sessions::user_messages_after`] 在每一轮迭代都把同一条当成"新插话"并进上下文，
+/// 模型因此以为用户把同一句话发了好几遍。
+#[test]
+fn 重启后首条消息不会在缓冲里存两份() {
+    let db = Arc::new(Mutex::new(Database::in_memory().unwrap()));
+
+    let before = Sessions::new(db.clone()).unwrap();
+    let sid = before.resolve("telegram", "100").unwrap();
+    before.add_message(&sid, "user", "重启前的一句话").unwrap();
+    drop(before);
+
+    // 模拟进程重启：channel_map 从库全量载入，hot 为空。
+    let after = Sessions::new(db).unwrap();
+    let resumed = after.resolve("telegram", "100").unwrap();
+    assert_eq!(resumed, sid, "重启后应复用原来的会话");
+
+    let first = after.add_message(&resumed, "user", "下班啦  宝宝").unwrap();
+    assert!(
+        after
+            .user_messages_after(&resumed, &first.id)
+            .unwrap()
+            .is_empty(),
+        "同一条消息不得在缓冲里存两份（否则每轮迭代都会当成新插话重复并入）"
+    );
+
+    // 重启后正常到达的插话仍能取到，且只取一次。
+    let steer = after.add_message(&resumed, "user", "在吗").unwrap();
+    let fresh = after.user_messages_after(&resumed, &first.id).unwrap();
+    assert_eq!(
+        fresh.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(),
+        vec!["在吗"]
+    );
+    assert!(after
+        .user_messages_after(&resumed, &steer.id)
+        .unwrap()
+        .is_empty());
+}
+
 /// 失败轮次的重跑目标：比触发消息更新的最后一条用户消息（没有则 None）。
 #[test]
 fn 重跑目标取更新的最后一条用户消息() {

@@ -170,10 +170,18 @@ impl Sessions {
     }
 
     /// 已写穿成功的消息回到内存缓冲（会话未水合先水合）。
+    ///
+    /// **写库之前必须先水合**（见 [`Self::add_message`] 系列），否则水合快照会把刚插入
+    /// 的这行一并读进来，这里再 `append` 一次，同一 id 就在缓冲里存了两份。后果不是多占
+    /// 点内存：插话游标 [`Self::user_messages_after`] 用 `position()` 找**第一份**，
+    /// 第二份会在每一轮迭代里被当成"新插话"重复并入上下文，直到撞上工具循环的迭代上限
+    /// （表现为模型以为用户把同一句话发了好几遍）。这里再按 id 兜底去重。
     fn reflect_message(&self, session_id: &str, m: DbMessage) -> Result<()> {
         self.ensure_hydrated(session_id)?;
         if let Some(hs) = self.inner.lock().unwrap().hot.get_mut(session_id) {
-            hs.append(m);
+            if hs.messages.iter().all(|x| x.id != m.id) {
+                hs.append(m);
+            }
         }
         Ok(())
     }
@@ -250,6 +258,9 @@ impl Sessions {
         role: &str,
         content: &str,
     ) -> Result<StoredMessage> {
+        // 水合必须排在写库之前：反过来时 `reflect_message` 里的水合快照会带上刚插入的
+        // 这行，再 append 一次即重复（详见 [`Self::reflect_message`]）。
+        self.ensure_hydrated(session_id)?;
         let m = crate::db::message::create(&lock_db(&self.db), session_id, role, content)?;
         self.reflect_message(session_id, m.clone())?;
         Ok(StoredMessage { id: m.id })
@@ -263,6 +274,7 @@ impl Sessions {
         content: &str,
         at: DateTime<Utc>,
     ) -> Result<StoredMessage> {
+        self.ensure_hydrated(session_id)?;
         let m = crate::db::message::create_at(&lock_db(&self.db), session_id, role, content, at)?;
         self.reflect_message(session_id, m.clone())?;
         Ok(StoredMessage { id: m.id })
@@ -277,6 +289,8 @@ impl Sessions {
         content: &str,
         meta: &crate::db::message::ToolMeta,
     ) -> Result<StoredMessage> {
+        // 同 `add_message`：先水合，避免水合快照把刚插入的这行再算一遍。
+        self.ensure_hydrated(session_id)?;
         let m = crate::db::message::create_full(
             &lock_db(&self.db),
             session_id,
