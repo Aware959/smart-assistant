@@ -15,9 +15,12 @@ use crate::error::{Result, SqlError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemoryKind {
-    /// 稳定的性格 / 能力 / 身份事实："会一点厨艺"、"自称只是傲娇"、"名字是阿离"。
+    /// 稳定的性格 / 能力 / 身份事实："会一点厨艺"、"脾气有点傲娇"、"名字是阿离"。
     Trait,
-    /// 稳定的偏好与对 AI 的指令："希望被称呼为阿离"、"想念时大胆说出来"。
+    /// 稳定的偏好与相处方式："希望被称呼为阿离"、"不喜欢被追问工作"。
+    ///
+    /// 只收**关于对方自己**的偏好。「你该扮演什么角色、该用什么语气」属于人设
+    /// （`self_profile`），不是用户记忆——写进来会和最高优先级的人设打架。
     Preference,
     /// 作息与时段规律："午休时间是中午12点到下午2点"。
     Routine,
