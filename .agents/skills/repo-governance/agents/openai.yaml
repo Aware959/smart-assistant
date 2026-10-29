@@ -1,0 +1,5 @@
+interface:
+  display_name: "Repo Governance"
+  short_description: "Whole-repo audits, naming discipline, and phased cleanup"
+  default_prompt: "Use $repo-governance to audit this repository, report actionable findings, and propose a phased cleanup plan."
+

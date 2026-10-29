@@ -1,0 +1,47 @@
+{
+  "description": "Repo governance guards for the Telegram-first smart-assistant repository",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode pre-edit",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode pre-edit",
+            "timeout": 30,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode post-edit",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode post-edit",
+            "timeout": 60,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode stop",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode stop",
+            "timeout": 180,
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}
+
