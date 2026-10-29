@@ -645,3 +645,123 @@ fn 自检摘要按health字段取值() {
         assert!(!h.model_loaded);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 身份管理命令
+// ---------------------------------------------------------------------------
+
+#[test]
+fn 解析身份管理命令并区分普通消息() {
+    assert_eq!(parse_command("/identity"), Ok(Some(Command::Identity)));
+    assert_eq!(parse_command("/proposals"), Ok(Some(Command::Proposals)));
+    assert_eq!(
+        parse_command("/approve abc consent"),
+        Ok(Some(Command::Approve {
+            id: "abc".to_string(),
+            consent: true
+        }))
+    );
+    assert_eq!(
+        parse_command("/approve abc --consent"),
+        Ok(Some(Command::Approve {
+            id: "abc".to_string(),
+            consent: true
+        }))
+    );
+    assert_eq!(
+        parse_command("/approve abc"),
+        Ok(Some(Command::Approve {
+            id: "abc".to_string(),
+            consent: false
+        }))
+    );
+    assert_eq!(
+        parse_command("/reject abc"),
+        Ok(Some(Command::Reject {
+            id: "abc".to_string()
+        }))
+    );
+    assert_eq!(
+        parse_command("/rollback"),
+        Ok(Some(Command::Rollback { version: None }))
+    );
+    assert_eq!(
+        parse_command("/rollback 7"),
+        Ok(Some(Command::Rollback { version: Some(7) }))
+    );
+    assert_eq!(
+        parse_command("/identity@my_bot"),
+        Ok(Some(Command::Identity)),
+        "Telegram 群组命令带 bot 后缀"
+    );
+    assert_eq!(parse_command("今天吃什么"), Ok(None));
+}
+
+#[test]
+fn 非法管理命令给出用法而不进入对话() {
+    assert!(parse_command("/approve").unwrap_err().contains("用法"));
+    assert!(parse_command("/reject").unwrap_err().contains("用法"));
+    assert!(parse_command("/rollback abc").unwrap_err().contains("用法"));
+    assert_eq!(parse_command("/unknown"), Ok(Some(Command::Help)));
+}
+
+#[test]
+fn 身份与提案格式化包含审批所需信息() {
+    let view = IdentityView {
+        version: Some(2),
+        text: "性格：慢热；价值观：真诚".to_string(),
+    };
+    let text = format_identity(&view);
+    assert!(text.contains("v2"));
+    assert!(text.contains("性格：慢热"));
+
+    let proposal = ProposalView {
+        id: "p1".to_string(),
+        field_key: "relationship_stance".to_string(),
+        before_value: Some("保持距离".to_string()),
+        after_value: "更亲近但尊重独处".to_string(),
+        reason: "用户表达了希望更亲近".to_string(),
+        evidence_message_ids: vec!["m1".to_string()],
+        confidence: "high".to_string(),
+        risk_level: "high".to_string(),
+        status: "pending".to_string(),
+        proposer: "identity-evolution-v1".to_string(),
+        decided_by: None,
+        base_version: 1,
+    };
+    let text = format_proposal(&proposal);
+    assert!(text.contains("p1"));
+    assert!(text.contains("关系姿态"));
+    assert!(text.contains("保持距离 → 更亲近但尊重独处"));
+    assert!(text.contains("m1"));
+}
+
+#[test]
+fn 空提案列表有明确回执() {
+    assert_eq!(format_proposals(&[]), "当前没有待审批的身份提案。");
+}
+
+#[test]
+fn 非白名单管理员不能查看或修改身份() {
+    for command in [
+        Command::Identity,
+        Command::Proposals,
+        Command::Approve {
+            id: "p1".to_string(),
+            consent: false,
+        },
+        Command::Reject {
+            id: "p1".to_string(),
+        },
+        Command::Rollback { version: None },
+    ] {
+        assert!(
+            is_admin_command(&command),
+            "身份管理动作都必须经过管理员门禁"
+        );
+    }
+    for command in [Command::Start, Command::New, Command::Help] {
+        assert!(!is_admin_command(&command));
+    }
+    assert!(admin_denied().contains("只允许白名单管理员"));
+}

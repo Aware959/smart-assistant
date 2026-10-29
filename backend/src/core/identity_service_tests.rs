@@ -40,11 +40,13 @@ fn draft(evidence: Vec<String>) -> ProposalDraft {
 }
 
 fn service(db: Arc<Mutex<Database>>) -> IdentityService {
-    IdentityService::new(db)
+    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    IdentityService::new(db, profile)
 }
 
 fn limited_service(db: Arc<Mutex<Database>>, limits: ProposalLimits) -> IdentityService {
-    IdentityService::with_limits(db, limits)
+    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    IdentityService::with_limits(db, profile, limits)
 }
 
 #[test]
@@ -61,10 +63,7 @@ fn creates_pending_proposal_without_touching_current_identity() {
     assert_eq!(created.proposal.before_value, None);
     assert_eq!(created.proposal.base_version, 0);
     assert_eq!(created.proposal.risk_level, "medium");
-    assert_eq!(
-        created.proposal.evidence,
-        serde_json::json!([evidence]).to_string()
-    );
+    assert_eq!(created.proposal.evidence_message_ids, vec![evidence]);
 
     let guard = crate::db::lock_db(&db);
     assert_eq!(
@@ -101,6 +100,7 @@ fn before_value_comes_from_latest_version_not_from_draft() {
                 source: "manual".to_string(),
                 reason: "初始版本".to_string(),
                 created_at: at(0),
+                operator: None,
                 rolled_back_from: None,
             },
         )
@@ -157,10 +157,7 @@ fn evidence_ids_are_trimmed_deduplicated_and_ordered() {
             at(0),
         )
         .unwrap();
-    assert_eq!(
-        created.proposal.evidence,
-        serde_json::json!([first, second]).to_string()
-    );
+    assert_eq!(created.proposal.evidence_message_ids, vec![first, second]);
 }
 
 #[test]
@@ -208,6 +205,7 @@ fn enforces_pending_limit_and_per_field_cooldown() {
     let service = limited_service(
         db,
         ProposalLimits {
+            global_cooldown: Duration::zero(),
             field_cooldown: Duration::days(7),
             max_pending: 3,
         },
@@ -247,6 +245,7 @@ fn field_cooldown_includes_rejected_proposals() {
     let service = limited_service(
         db,
         ProposalLimits {
+            global_cooldown: Duration::zero(),
             field_cooldown: Duration::days(7),
             max_pending: 10,
         },
@@ -256,7 +255,13 @@ fn field_cooldown_includes_rejected_proposals() {
     first.field_key = "personality".to_string();
     let first = service.create_proposal(first, at(0)).unwrap();
     service
-        .decide(&first.proposal.id, ProposalStatus::Rejected, false, at(1))
+        .decide(
+            &first.proposal.id,
+            ProposalStatus::Rejected,
+            false,
+            "test",
+            at(1),
+        )
         .unwrap();
 
     let mut same_field = draft(vec![evidence]);
@@ -294,18 +299,36 @@ fn decision_is_pending_only_and_rejection_has_no_consent_requirement() {
         .unwrap();
 
     let rejected = service
-        .decide(&created.proposal.id, ProposalStatus::Rejected, false, at(1))
+        .decide(
+            &created.proposal.id,
+            ProposalStatus::Rejected,
+            false,
+            "test",
+            at(1),
+        )
         .unwrap();
     assert_eq!(rejected.status, "rejected");
     assert!(
         service
-            .decide(&created.proposal.id, ProposalStatus::Approved, false, at(2))
+            .decide(
+                &created.proposal.id,
+                ProposalStatus::Approved,
+                false,
+                "test",
+                at(2),
+            )
             .is_err(),
         "已决提案不能再次审批"
     );
     assert!(
         service
-            .decide(&created.proposal.id, ProposalStatus::Applied, false, at(3))
+            .decide(
+                &created.proposal.id,
+                ProposalStatus::Applied,
+                false,
+                "test",
+                at(3),
+            )
             .is_err(),
         "审批入口不能直接应用"
     );
@@ -323,12 +346,24 @@ fn relationship_stance_approval_requires_explicit_consent() {
 
     assert!(
         service
-            .decide(&created.proposal.id, ProposalStatus::Approved, false, at(1))
+            .decide(
+                &created.proposal.id,
+                ProposalStatus::Approved,
+                false,
+                "test",
+                at(1),
+            )
             .is_err(),
         "关系姿态缺少明确同意时不能批准"
     );
     let approved = service
-        .decide(&created.proposal.id, ProposalStatus::Approved, true, at(2))
+        .decide(
+            &created.proposal.id,
+            ProposalStatus::Approved,
+            true,
+            "test",
+            at(2),
+        )
         .unwrap();
     assert_eq!(approved.status, "approved");
 }
@@ -340,15 +375,275 @@ fn proposal_view_exposes_structured_evidence() {
     let created = service(db)
         .create_proposal(draft(vec![evidence.clone()]), at(0))
         .unwrap();
-    let view = ProposalView::try_from(&created.proposal).unwrap();
-    assert_eq!(view.evidence_message_ids, vec![evidence]);
-    assert_eq!(view.status, "pending");
-    assert_eq!(view.risk_level, "medium");
+    assert_eq!(created.proposal.evidence_message_ids, vec![evidence]);
+    assert_eq!(created.proposal.status, "pending");
+    assert_eq!(created.proposal.risk_level, "medium");
 }
 
 #[test]
 fn proposal_limits_have_mvp_defaults() {
     let limits = ProposalLimits::default();
+    assert_eq!(limits.global_cooldown, Duration::days(1));
     assert_eq!(limits.field_cooldown, Duration::days(7));
     assert_eq!(limits.max_pending, 3);
+}
+
+#[test]
+fn approve_and_apply_updates_profile_and_invalidates_cache_immediately() {
+    let db = db();
+    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let service = IdentityService::new(db.clone(), profile.clone());
+    let evidence = add_message(&db, "user", "我喜欢短一点的回复");
+    let created = service
+        .create_proposal(draft(vec![evidence]), at(0))
+        .unwrap();
+
+    assert_eq!(profile.snapshot().text, "");
+    let applied = service
+        .approve_and_apply(&created.proposal.id, false, "test", at(10))
+        .unwrap();
+    assert_eq!(applied.version, 1);
+    assert_eq!(
+        profile.snapshot(),
+        crate::core::self_profile::ProfileSnapshot {
+            version: Some(1),
+            text: "表达风格：更愿意主动分享自己的看法，但仍然保持短句".to_string(),
+        },
+        "提交后应立即失效缓存，而不是等 TTL"
+    );
+    assert_eq!(service.get(&created.proposal.id).unwrap().status, "applied");
+    assert_eq!(
+        service
+            .get(&created.proposal.id)
+            .unwrap()
+            .decided_by
+            .as_deref(),
+        Some("test"),
+        "审批人必须落入提案审计"
+    );
+}
+
+#[test]
+fn approve_and_apply_rejects_relationship_stance_without_explicit_consent() {
+    let db = db();
+    let evidence = add_message(&db, "user", "我们可以更亲近一点");
+    let service = service(db);
+    let mut draft = draft(vec![evidence]);
+    draft.field_key = "relationship_stance".to_string();
+    draft.after_value = "更亲近，但尊重独处".to_string();
+    let created = service.create_proposal(draft, at(0)).unwrap();
+
+    assert!(
+        service
+            .approve_and_apply(&created.proposal.id, false, "test", at(10))
+            .is_err(),
+        "关系姿态缺少明确同意时不能应用"
+    );
+    assert_eq!(service.get(&created.proposal.id).unwrap().status, "pending");
+    let applied = service
+        .approve_and_apply(&created.proposal.id, true, "test", at(11))
+        .unwrap();
+    assert_eq!(applied.version, 1);
+}
+
+#[test]
+fn reject_changes_only_proposal_status() {
+    let db = db();
+    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let service = IdentityService::new(db.clone(), profile.clone());
+    let evidence = add_message(&db, "user", "先不用改");
+    let created = service
+        .create_proposal(draft(vec![evidence]), at(0))
+        .unwrap();
+    profile.snapshot();
+
+    let rejected = service.reject(&created.proposal.id, "test", at(1)).unwrap();
+    assert_eq!(rejected.status, "rejected");
+    assert_eq!(profile.snapshot().text, "");
+    assert!(
+        crate::db::identity::latest_version(&crate::db::lock_db(&db))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn rollback_service_restores_profile_and_invalidates_cache() {
+    let db = db();
+    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let service = IdentityService::new(db.clone(), profile.clone());
+    let evidence = add_message(&db, "user", "喜欢你短一点");
+    {
+        let guard = crate::db::lock_db(&db);
+        crate::db::self_profile::set(guard.conn(), "语气", "旧语气").unwrap();
+    }
+    assert_eq!(profile.snapshot().text, "语气：旧语气");
+
+    let created = service
+        .create_proposal(draft(vec![evidence]), at(0))
+        .unwrap();
+    service
+        .approve_and_apply(&created.proposal.id, false, "test", at(10))
+        .unwrap();
+    assert_eq!(
+        profile.snapshot().text,
+        "表达风格：更愿意主动分享自己的看法，但仍然保持短句"
+    );
+
+    let rollback = service.rollback("test", at(20)).unwrap();
+    assert_eq!(rollback.source, "rollback");
+    assert_eq!(rollback.operator.as_deref(), Some("test"));
+    assert_eq!(profile.snapshot().text, "表达风格：旧语气");
+    assert_eq!(
+        service.get(&created.proposal.id).unwrap().status,
+        "rolled_back"
+    );
+}
+
+#[test]
+fn rollback_version_restores_requested_snapshot_and_invalidates_cache() {
+    let db = db();
+    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let service = IdentityService::new(db.clone(), profile.clone());
+    {
+        let guard = crate::db::lock_db(&db);
+        crate::db::identity::insert_version(
+            &guard,
+            &IdentityVersion {
+                version: 1,
+                snapshot: r#"{"personality":"慢热","voice_style":"旧语气"}"#.to_string(),
+                proposal_id: None,
+                source: "manual".to_string(),
+                reason: "初始版本".to_string(),
+                created_at: at(0),
+                operator: None,
+                rolled_back_from: None,
+            },
+        )
+        .unwrap();
+        crate::db::identity::insert_version(
+            &guard,
+            &IdentityVersion {
+                version: 2,
+                snapshot: r#"{"personality":"慢热","voice_style":"新语气"}"#.to_string(),
+                proposal_id: None,
+                source: "manual".to_string(),
+                reason: "后续版本".to_string(),
+                created_at: at(1),
+                operator: None,
+                rolled_back_from: None,
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(profile.snapshot().text, "性格：慢热；表达风格：新语气");
+
+    let restored = service.rollback_version(Some(1), "test", at(20)).unwrap();
+    assert_eq!(restored.version, 3);
+    assert_eq!(restored.rolled_back_from, Some(2));
+    assert_eq!(profile.snapshot().text, "性格：慢热；表达风格：旧语气");
+}
+
+#[test]
+fn global_daily_cooldown_blocks_second_proposal_and_gate_reports_reason() {
+    let db = db();
+    let evidence = add_message(&db, "user", "证据");
+    let service = service(db);
+    let mut first = draft(vec![evidence.clone()]);
+    first.field_key = "interests".to_string();
+    service.create_proposal(first, at(0)).unwrap();
+
+    let mut second = draft(vec![evidence]);
+    second.field_key = "voice_style".to_string();
+    let err = service
+        .create_proposal(second, at(60))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("每天最多运行一次"), "{err}");
+    assert_eq!(
+        service.evolution_gate(at(60)).unwrap(),
+        EvolutionGate::GlobalCooldown
+    );
+    assert_eq!(
+        service.evolution_gate(at(86_400)).unwrap(),
+        EvolutionGate::Run
+    );
+}
+
+#[test]
+fn evidence_snapshot_collects_current_identity_messages_and_memories() {
+    let db = db();
+    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let service = IdentityService::new(db.clone(), profile);
+    let sessions = Arc::new(crate::core::session::Sessions::new(db.clone()).unwrap());
+    let session_id = sessions.resolve("telegram", "100").unwrap();
+    let stored = sessions
+        .add_message(&session_id, "user", "我喜欢你有自己的看法")
+        .unwrap();
+    {
+        let guard = crate::db::lock_db(&db);
+        crate::db::self_profile::set(guard.conn(), "性格", "慢热").unwrap();
+        crate::db::memory::create_record(
+            &guard,
+            &crate::db::memory::Memory::new(
+                "用户喜欢有观点的交流".to_string(),
+                crate::db::memory::MemoryKind::Preference,
+                Some(stored.id.clone()),
+                None,
+            ),
+        )
+        .unwrap();
+    }
+
+    let snapshot = service.evidence_snapshot(&sessions, 10, 10).unwrap();
+    assert_eq!(snapshot.identity, "性格：慢热");
+    assert_eq!(snapshot.messages.len(), 1);
+    assert_eq!(snapshot.messages[0].id, stored.id);
+    assert_eq!(snapshot.memories.len(), 1);
+    assert_eq!(
+        snapshot.memories[0].source_message_id.as_deref(),
+        Some(stored.id.as_str())
+    );
+}
+
+#[test]
+fn approve_and_apply_failure_leaves_profile_and_cache_untouched() {
+    let db = db();
+    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let service = IdentityService::new(db.clone(), profile.clone());
+    let evidence = add_message(&db, "user", "证据");
+    let created = service
+        .create_proposal(draft(vec![evidence]), at(0))
+        .unwrap();
+    assert_eq!(profile.snapshot().text, "");
+
+    let guard = crate::db::lock_db(&db);
+    crate::db::identity::insert_version(
+        &guard,
+        &IdentityVersion {
+            version: 1,
+            snapshot: r#"{"personality":"并发修改"}"#.to_string(),
+            proposal_id: None,
+            source: "manual".to_string(),
+            reason: "并发变更".to_string(),
+            created_at: at(5),
+            operator: None,
+            rolled_back_from: None,
+        },
+    )
+    .unwrap();
+    drop(guard);
+
+    assert!(
+        service
+            .approve_and_apply(&created.proposal.id, false, "test", at(10))
+            .is_err(),
+        "基线版本漂移必须拒绝应用"
+    );
+    assert_eq!(service.get(&created.proposal.id).unwrap().status, "pending");
+    assert_eq!(
+        profile.snapshot().text,
+        "",
+        "失败不应清空已有缓存，也不应写入新身份"
+    );
 }

@@ -47,6 +47,7 @@ fn add_version(db: &Arc<Mutex<Database>>, version: i64, snapshot: &str) {
             source: "manual".to_string(),
             reason: "测试".to_string(),
             created_at: at(),
+            operator: None,
             rolled_back_from: None,
         },
     )

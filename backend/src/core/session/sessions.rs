@@ -345,6 +345,30 @@ impl Sessions {
         Ok(out)
     }
 
+    /// 读取所有已映射会话最近的消息，供后台反思角色收集证据。
+    ///
+    /// 后台任务没有当前对话的 session id；这里按 `channel_sessions` 的映射逐个取
+    /// 最近消息，再由调用方按时间排序。只读，不创建会话、不改变轮次状态。
+    pub fn recent_messages_for_mapped_sessions(
+        &self,
+        per_session: usize,
+        total: usize,
+    ) -> Result<Vec<MessageTurn>> {
+        if per_session == 0 || total == 0 {
+            return Ok(Vec::new());
+        }
+        let mappings = crate::db::channel::list_mappings(&lock_db(&self.db))?;
+        let mut out = Vec::new();
+        for (_, _, session_id) in mappings {
+            out.extend(self.recent_messages(&session_id, per_session)?);
+        }
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        if out.len() > total {
+            out.drain(..out.len() - total);
+        }
+        Ok(out)
+    }
+
     // ---------- 运行中轮次（插话） ----------
 
     /// 登记"本会话的一轮对话开始了"，返回该轮的占用凭证；已有轮次在跑则返回 `None`。

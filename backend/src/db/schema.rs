@@ -4,7 +4,8 @@
 //! 新库打开时直接建最新结构；历史逐版本迁移（v6~v16）已压平，不再保留。
 //! 仅 [`migrate`] 里保留 `v17`（删掉三张从未被读写的死表）、`v18`（`messages` 放开
 //! `role='tool'` 并改写历史工具结果行）、`v19`（失败轮次重试队列）、`v20`
-//! （身份提案 / 版本审计）与 `v21`（未版本化身份的提案基线）几段，与末尾的版本戳。
+//! （身份提案 / 版本审计）、`v21`（未版本化身份的提案基线）与 `v22`（审批操作者审计）
+//! 几段，与末尾的版本戳。
 //!
 //! 取舍：旧版本库不再支持平滑升级，需重建（`rm` 后重跑）。对单人单库、且已迁移到最新
 //! 的项目，这比无限累积迁移代码更划算；早期图谱时代残留的 `entities` 等表本就不在本
@@ -16,7 +17,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 21;
+pub(crate) const SCHEMA_VERSION: i64 = 22;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -86,6 +87,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             base_version         INTEGER NOT NULL CHECK (base_version >= 0),
             created_at           TEXT NOT NULL,
             decided_at           TEXT,
+            decided_by           TEXT,
             applied_at           TEXT,
             rolled_back_at       TEXT
         );
@@ -97,6 +99,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             source               TEXT NOT NULL CHECK (source IN ('manual', 'evolution_agent', 'rollback')),
             reason               TEXT NOT NULL,
             created_at           TEXT NOT NULL,
+            operator             TEXT,
             rolled_back_from     INTEGER
         );
 
@@ -324,6 +327,24 @@ fn migrate(conn: &Connection) -> Result<()> {
         tracing::info!("迁移 v21：身份提案允许 base_version=0（未版本化身份）");
     }
 
+    // v22：把审批人 / 版本操作者写入审计。提案保留 `decided_by`，版本保留 `operator`；
+    // 旧行允许为空，因为历史上没有记录操作者。新库也走这里补列，保持建表与迁移一致。
+    if version < 22 {
+        if table_exists(conn, "identity_change_proposals")?
+            && !column_exists(conn, "identity_change_proposals", "decided_by")?
+        {
+            conn.execute_batch(
+                "ALTER TABLE identity_change_proposals ADD COLUMN decided_by TEXT;",
+            )?;
+        }
+        if table_exists(conn, "self_profile_versions")?
+            && !column_exists(conn, "self_profile_versions", "operator")?
+        {
+            conn.execute_batch("ALTER TABLE self_profile_versions ADD COLUMN operator TEXT;")?;
+        }
+        tracing::info!("迁移 v22：身份提案与版本审计新增操作者字段");
+    }
+
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
@@ -344,6 +365,19 @@ fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(n > 0)
+}
+
+/// 列是否已存在；用于让增量迁移可重试，避免半完成迁移再次执行时 ALTER 失败。
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -577,9 +611,9 @@ mod tests {
         let proposal = conn.execute(
             "INSERT INTO identity_change_proposals
              (id, field_key, before_value, after_value, reason, evidence, confidence,
-              risk_level, status, proposer, base_version, created_at)
+              risk_level, status, proposer, base_version, created_at, decided_by)
              VALUES ('p1','voice_style',NULL,'更短','测试','[]','medium',
-                     'critical','pending','test',1,'t')",
+                     'critical','pending','test',1,'t',NULL)",
             [],
         );
         assert!(proposal.is_err(), "非法 risk_level 应被 CHECK 拒绝");
@@ -587,17 +621,18 @@ mod tests {
         let proposal = conn.execute(
             "INSERT INTO identity_change_proposals
              (id, field_key, before_value, after_value, reason, evidence, confidence,
-              risk_level, status, proposer, base_version, created_at)
+              risk_level, status, proposer, base_version, created_at, decided_by)
              VALUES ('p2','voice_style',NULL,'更短','测试','[]','medium',
-                     'low','done','test',1,'t')",
+                     'low','done','test',1,'t',NULL)",
             [],
         );
         assert!(proposal.is_err(), "非法 status 应被 CHECK 拒绝");
 
         let version = conn.execute(
             "INSERT INTO self_profile_versions
-             (version, snapshot, proposal_id, source, reason, created_at, rolled_back_from)
-             VALUES (1,'{}',NULL,'model','测试','t',NULL)",
+             (version, snapshot, proposal_id, source, reason, created_at, operator,
+              rolled_back_from)
+             VALUES (1,'{}',NULL,'model','测试','t',NULL,NULL)",
             [],
         );
         assert!(version.is_err(), "非法 source 应被 CHECK 拒绝");
@@ -649,9 +684,9 @@ mod tests {
         conn.execute(
             "INSERT INTO identity_change_proposals
              (id, field_key, after_value, reason, evidence, confidence, risk_level,
-              status, proposer, base_version, created_at)
+              status, proposer, base_version, created_at, decided_by)
              VALUES ('p2','voice_style','更短','测试','[\"m1\"]','medium',
-                     'low','pending','test',0,'t')",
+                     'low','pending','test',0,'t',NULL)",
             [],
         )
         .unwrap();
@@ -659,5 +694,87 @@ mod tests {
             meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
             SCHEMA_VERSION.to_string()
         );
+    }
+
+    /// v22：操作者字段可重复补列，旧行留空，且不丢既有提案 / 版本。
+    #[test]
+    fn v22_adds_operator_columns_without_touching_existing_audit_rows() {
+        let conn = open_conn();
+        // 先模拟 v21 旧表，避免新库建表时已经带上了操作者列。
+        conn.execute_batch(
+            "CREATE TABLE identity_change_proposals (
+                id TEXT PRIMARY KEY,
+                field_key TEXT NOT NULL,
+                before_value TEXT,
+                after_value TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                risk_level TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
+                status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'applied', 'rolled_back')),
+                proposer TEXT NOT NULL,
+                base_version INTEGER NOT NULL CHECK (base_version >= 0),
+                created_at TEXT NOT NULL,
+                decided_at TEXT,
+                applied_at TEXT,
+                rolled_back_at TEXT
+            );
+            CREATE TABLE self_profile_versions (
+                version INTEGER PRIMARY KEY CHECK (version >= 1),
+                snapshot TEXT NOT NULL,
+                proposal_id TEXT,
+                source TEXT NOT NULL CHECK (source IN ('manual', 'evolution_agent', 'rollback')),
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                rolled_back_from INTEGER
+            );
+            INSERT INTO meta (key, value) VALUES ('schema_version','21');",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        assert!(
+            column_exists(&conn, "identity_change_proposals", "decided_by").unwrap(),
+            "提案表应有审批人字段"
+        );
+        assert!(
+            column_exists(&conn, "self_profile_versions", "operator").unwrap(),
+            "版本表应有操作者字段"
+        );
+
+        conn.execute(
+            "INSERT INTO identity_change_proposals
+             (id, field_key, after_value, reason, evidence, confidence, risk_level,
+              status, proposer, base_version, created_at, decided_by)
+             VALUES ('p1','voice_style','更短','测试','[\"m1\"]','medium',
+                     'low','pending','test',0,'t',NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO self_profile_versions
+             (version, snapshot, proposal_id, source, reason, created_at, operator)
+             VALUES (1,'{}',NULL,'manual','测试','t',NULL)",
+            [],
+        )
+        .unwrap();
+        let proposal_operator: Option<String> = conn
+            .query_row(
+                "SELECT decided_by FROM identity_change_proposals WHERE id='p1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let version_operator: Option<String> = conn
+            .query_row(
+                "SELECT operator FROM self_profile_versions WHERE version=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(proposal_operator, None, "历史提案没有审批人，应允许为空");
+        assert_eq!(version_operator, None, "历史版本没有操作者，应允许为空");
+
+        // 半完成迁移 / 手工建表重复执行也必须幂等。
+        migrate(&conn).unwrap();
     }
 }

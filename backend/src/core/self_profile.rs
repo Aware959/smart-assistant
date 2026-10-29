@@ -80,7 +80,6 @@ impl Profile {
     ///
     /// 身份变更在事务提交后调用；下一轮 `snapshot()` 会立即重读最新身份版本，而不是
     /// 等待 TTL。人工改库仍由 TTL 兜底。
-    #[allow(dead_code)] // 审批生效 / 回滚服务接入前，尚无生产调用点
     pub(crate) fn invalidate(&self) {
         if let Ok(mut guard) = self.cache.lock() {
             *guard = None;

@@ -79,8 +79,8 @@ pub(crate) fn proactive_system_prompt(profile: &str) -> String {
 /// 身份演化角色的 system prompt。
 ///
 /// 这是后台角色，不面向用户，也不复用 [`SPEAK_CONVENTION`]：它没有任何发送工具，
-/// 只能读取证据并产出结构化提案。当前只定义边界，运行入口与提案 schema 由 T5/T6 接入。
-#[allow(dead_code)] // T5/T6 提案运行入口接入前，尚无生产调用点
+/// 只能读取证据并产出结构化提案。`before_value` 与风险等级由代码推导，模型不得
+/// 自报，避免提示词与提案服务形成两套互相漂移的契约。
 pub(crate) fn identity_evolution_system_prompt(profile: &str) -> String {
     let mut s = persona_block(profile);
     s.push_str(
@@ -93,8 +93,10 @@ pub(crate) fn identity_evolution_system_prompt(profile: &str) -> String {
          self_concept, personality, values, voice_style, interests, relationship_stance.\n\
          Never claim that a change is applied. Every change requires human approval, and \
          relationship_stance also requires explicit user consent.\n\
-         A proposal must explain the target field, before value, proposed after value, reason, \
-         evidence, confidence, and risk. If the evidence is insufficient, propose nothing.\n",
+         The application derives the before value and risk level itself. Do not report or invent \
+         either one. A proposal contains exactly: field_key, after_value, reason, \
+         evidence_message_ids, and confidence. Cite only message ids present in the supplied \
+         evidence. If the evidence is insufficient, emit the schema's no-proposal value.\n",
     );
     s
 }

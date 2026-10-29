@@ -8,7 +8,9 @@
 //! - [`crate::core::session::Sessions`]（`session`）：会话服务（入站解析 / 重置 / 消息落库 /
 //!   主动候选派生）。
 //! - [`crate::core::identity_service::IdentityService`]（`identity`）：身份提案校验、
-//!   限流与审批状态转换；不直接应用身份变更。
+//!   限流、审批、事务应用与回滚。
+//! - [`crate::core::identity_evolution::IdentityEvolutionAgent`]（`identity_evolution`）：
+//!   后台反思角色；仅在 `sa-link` 开启配置后调度，不参与对话热路径。
 //!
 //! db 不走壳：各服务经装配对象拿到句柄，能力方法全部收敛在服务上，调用方拿不到
 //! 裸数据连接。本层不提供管理门面——对外只交出已装配的服务，由调用方直接调用
@@ -24,8 +26,10 @@ pub struct App {
     pub chat: Arc<crate::core::agent::Agent>,
     /// 会话服务（入站解析 / 重置 / 消息落库）。
     pub session: Arc<crate::core::session::Sessions>,
-    /// 身份提案与审批服务（只生成 / 审批提案，不直接修改当前身份）。
+    /// 身份提案、审批、事务应用与回滚服务。
     pub identity: Arc<crate::core::identity_service::IdentityService>,
+    /// 后台身份演化角色（默认关闭，由 `sa-link` 按配置调度）。
+    pub identity_evolution: Arc<crate::core::identity_evolution::IdentityEvolutionAgent>,
 }
 
 impl App {
@@ -44,7 +48,21 @@ impl App {
         let llm = Arc::new(crate::llm::chat::Llm);
         let memory = Arc::new(crate::core::memory::Store::new(db.clone()));
         let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
-        let identity = Arc::new(crate::core::identity_service::IdentityService::new(db));
+        let identity = Arc::new(crate::core::identity_service::IdentityService::new(
+            db.clone(),
+            profile.clone(),
+        ));
+        let evolution_config = crate::core::identity_evolution::EvolutionConfig {
+            enabled: crate::config::Config::get().identity_evolution_enabled,
+            model: crate::config::Config::get().llm_model.clone(),
+        };
+        let identity_evolution = Arc::new(
+            crate::core::identity_evolution::IdentityEvolutionAgent::new(
+                evolution_config,
+                llm.clone(),
+                identity.clone(),
+            ),
+        );
         // 贴纸目录是文件不是状态：装配时读一次，之后 `sa-sticker fetch` 拉的新目录
         // 要重启进程才生效。文件不存在 = 没拉过 = 贴纸能力关闭，不是错误。
         let stickers = crate::core::sticker::StickerCatalog::load_default();
@@ -66,6 +84,7 @@ impl App {
             chat,
             session,
             identity,
+            identity_evolution,
         })
     }
 }

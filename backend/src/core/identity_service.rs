@@ -1,8 +1,8 @@
-//! 身份提案服务：校验、限流、持久化与审批状态转换。
+//! 身份提案服务：校验、限流、审批、事务应用与回滚。
 //!
-//! 本服务**不修改当前身份**。它只把模型给出的“想改什么”变成可审计的 pending 提案，
-//! 并由人工审批决定 approved / rejected。事务应用、版本写入与回滚属于 T7，调用方
-//! 仍不能经本服务直接改变提示词。
+//! 模型只能创建 pending 提案；人工审批后，[`IdentityService::approve_and_apply`] 在
+//! 单个 SQLite 事务中写入当前身份和版本审计，[`IdentityService::rollback`] 恢复当前
+//! 生效变更之前的上一条快照。成功提交后显式失效 `Profile` 缓存，失败则整体回滚。
 //!
 //! `before_value`、`base_version`、风险等级和初始状态都由代码推导，不采信模型自报；
 //! 模型只提供目标字段、after 值、理由、证据、置信度和来源。
@@ -17,6 +17,7 @@ use crate::core::identity::{
     AgentIdentity, ChangeSource, IdentityError, IdentityFieldKey, IdentityFieldValue,
     ProposalStatus, RiskLevel,
 };
+use crate::core::self_profile::Profile;
 use crate::db::identity::{IdentityChangeProposal, IdentityVersion};
 use crate::db::Database;
 use crate::error::{Result, SqlError};
@@ -39,12 +40,50 @@ pub struct ProposalDraft {
 /// 提案创建成功后的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedProposal {
-    pub proposal: IdentityChangeProposal,
+    pub proposal: ProposalView,
+}
+
+/// 当前身份的只读视图。
+///
+/// `version = None` 表示 Profile 读取失败或快照损坏后回退到了旧 KV；`Some(0)` 表示
+/// 尚未写入版本审计表的旧 `self_profile`。管理入口只读展示，不直接触碰数据库。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityView {
+    pub version: Option<u64>,
+    pub text: String,
+}
+
+/// 一次生效 / 回滚产生的身份版本只读视图。
+///
+/// 传输层只消费这个视图，不接触版本表行结构。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityVersionView {
+    pub version: i64,
+    pub proposal_id: Option<String>,
+    pub source: String,
+    pub reason: String,
+    pub operator: Option<String>,
+    pub rolled_back_from: Option<i64>,
+}
+
+impl From<&IdentityVersion> for IdentityVersionView {
+    fn from(value: &IdentityVersion) -> Self {
+        Self {
+            version: value.version,
+            proposal_id: value.proposal_id.clone(),
+            source: value.source.clone(),
+            reason: value.reason.clone(),
+            operator: value.operator.clone(),
+            rolled_back_from: value.rolled_back_from,
+        }
+    }
 }
 
 /// 可注入的限流规则。MVP 默认值来自已确认决策。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProposalLimits {
+    /// 任意身份提案之间的全局冷却期。后台任务每 24 小时最多运行一次。
+    pub global_cooldown: Duration,
     /// 同一字段两次提案之间的冷却期。
     pub field_cooldown: Duration,
     /// 当前 pending 提案数量上限。
@@ -54,6 +93,7 @@ pub struct ProposalLimits {
 impl Default for ProposalLimits {
     fn default() -> Self {
         Self {
+            global_cooldown: Duration::days(1),
             field_cooldown: Duration::days(7),
             max_pending: 3,
         }
@@ -63,16 +103,36 @@ impl Default for ProposalLimits {
 /// 身份提案服务。
 pub struct IdentityService {
     db: Arc<Mutex<Database>>,
+    profile: Arc<Profile>,
     limits: ProposalLimits,
 }
 
+/// 后台演化调度是否运行一次的纯策略结果。
+///
+/// 供 `sa-link` 的任务循环记录“为什么跳过”，不把调度细节塞进身份服务。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvolutionGate {
+    Run,
+    PendingLimit,
+    GlobalCooldown,
+    Disabled,
+}
+
 impl IdentityService {
-    pub(crate) fn new(db: Arc<Mutex<Database>>) -> Self {
-        Self::with_limits(db, ProposalLimits::default())
+    pub(crate) fn new(db: Arc<Mutex<Database>>, profile: Arc<Profile>) -> Self {
+        Self::with_limits(db, profile, ProposalLimits::default())
     }
 
-    fn with_limits(db: Arc<Mutex<Database>>, limits: ProposalLimits) -> Self {
-        Self { db, limits }
+    fn with_limits(
+        db: Arc<Mutex<Database>>,
+        profile: Arc<Profile>,
+        limits: ProposalLimits,
+    ) -> Self {
+        Self {
+            db,
+            profile,
+            limits,
+        }
     }
 
     /// 创建一条 pending 提案。不会写 `self_profile` 或身份版本。
@@ -115,26 +175,43 @@ impl IdentityService {
             })?,
             created_at: now,
             decided_at: None,
+            decided_by: None,
             applied_at: None,
             rolled_back_at: None,
         };
         crate::db::identity::insert_proposal(&guard, &proposal)?;
-        Ok(CreatedProposal { proposal })
+        Ok(CreatedProposal {
+            proposal: proposal_view(&proposal)?,
+        })
     }
 
     /// 列出待审批提案，按创建时刻倒序。
-    pub fn pending(&self, limit: usize) -> Result<Vec<IdentityChangeProposal>> {
+    pub fn pending(&self, limit: usize) -> Result<Vec<ProposalView>> {
         let guard = crate::db::lock_db(&self.db);
-        crate::db::identity::list_proposals_by_status(
+        let proposals = crate::db::identity::list_proposals_by_status(
             &guard,
             ProposalStatus::Pending.as_str(),
             limit,
-        )
+        )?;
+        proposals.iter().map(proposal_view).collect()
     }
 
-    pub fn get(&self, id: &str) -> Result<IdentityChangeProposal> {
+    pub fn get(&self, id: &str) -> Result<ProposalView> {
         let guard = crate::db::lock_db(&self.db);
-        crate::db::identity::proposal_or_err(&guard, id)
+        let proposal = crate::db::identity::proposal_or_err(&guard, id)?;
+        proposal_view(&proposal)
+    }
+
+    /// 读取当前身份渲染结果与版本。
+    ///
+    /// 复用 `Profile` 的版本化渲染和 TTL 缓存；命令层只消费这个视图，不直读
+    /// `self_profile` 或版本表。
+    pub fn current(&self) -> IdentityView {
+        let snapshot = self.profile.snapshot();
+        IdentityView {
+            version: snapshot.version,
+            text: snapshot.text,
+        }
     }
 
     /// 人工审批：只允许 pending → approved / rejected。
@@ -145,8 +222,9 @@ impl IdentityService {
         id: &str,
         status: ProposalStatus,
         explicit_consent: bool,
+        operator: &str,
         now: DateTime<Utc>,
-    ) -> Result<IdentityChangeProposal> {
+    ) -> Result<ProposalView> {
         if !matches!(status, ProposalStatus::Approved | ProposalStatus::Rejected) {
             return Err(SqlError::Config(format!(
                 "审批只能产生 approved / rejected，收到 {}",
@@ -167,13 +245,158 @@ impl IdentityService {
             )));
         }
 
-        let changed = crate::db::identity::decide_proposal(&guard, id, status.as_str(), now)?;
+        let operator = required_text("operator", operator)?;
+        let changed =
+            crate::db::identity::decide_proposal(&guard, id, status.as_str(), &operator, now)?;
         if !changed {
             return Err(SqlError::Config(format!(
                 "提案 {id} 不是 pending，不能再次审批"
             )));
         }
-        crate::db::identity::proposal_or_err(&guard, id)
+        let proposal = crate::db::identity::proposal_or_err(&guard, id)?;
+        proposal_view(&proposal)
+    }
+
+    /// 人工批准并在同一事务中应用提案。
+    ///
+    /// `pending` 会先转为 `approved` 再应用；已由 [`Self::decide`] 批准为 `approved`
+    /// 的提案也可直接应用。关系姿态仍要求 `explicit_consent = true`。应用会校验
+    /// `base_version` 与 `before_value`，成功后立即失效当前 Profile 缓存。
+    pub fn approve_and_apply(
+        &self,
+        id: &str,
+        explicit_consent: bool,
+        operator: &str,
+        now: DateTime<Utc>,
+    ) -> Result<IdentityVersionView> {
+        let operator = required_text("operator", operator)?;
+        let version = {
+            let guard = crate::db::lock_db(&self.db);
+            let proposal = crate::db::identity::proposal_or_err(&guard, id)?;
+            let field = IdentityFieldKey::parse(&proposal.field_key).map_err(identity_error)?;
+            if field.spec().requires_explicit_consent && !explicit_consent {
+                return Err(SqlError::Config(format!(
+                    "字段 {} 需要用户明确同意，不能直接应用",
+                    field
+                )));
+            }
+            crate::db::identity::approve_and_apply_proposal(&guard, id, &operator, now)?
+        };
+        self.profile.invalidate();
+        Ok(IdentityVersionView::from(&version))
+    }
+
+    /// 人工拒绝 pending 提案。拒绝不改变当前身份，因此不失效 Profile 缓存。
+    pub fn reject(&self, id: &str, operator: &str, now: DateTime<Utc>) -> Result<ProposalView> {
+        self.decide(id, ProposalStatus::Rejected, false, operator, now)
+    }
+
+    /// 回滚当前最新 applied 提案，恢复上一条完整身份快照。
+    ///
+    /// 回滚版本与提案状态在同一事务内写入；提交后立即失效 Profile 缓存。
+    pub fn rollback(&self, operator: &str, now: DateTime<Utc>) -> Result<IdentityVersionView> {
+        let operator = required_text("operator", operator)?;
+        let version = {
+            let guard = crate::db::lock_db(&self.db);
+            crate::db::identity::rollback_latest_applied(&guard, &operator, now)?
+        };
+        self.profile.invalidate();
+        Ok(IdentityVersionView::from(&version))
+    }
+
+    /// 回滚到指定历史版本。
+    ///
+    /// `None` 只允许回滚最新 applied 演化提案。`Some(target)` 允许恢复任意更早的
+    /// 已审计快照；恢复动作本身追加一个新的 `rollback` 版本，不删除历史。
+    pub fn rollback_version(
+        &self,
+        version: Option<i64>,
+        operator: &str,
+        now: DateTime<Utc>,
+    ) -> Result<IdentityVersionView> {
+        let operator = required_text("operator", operator)?;
+        match version {
+            None => self.rollback(&operator, now),
+            Some(version) => {
+                let restored = {
+                    let guard = crate::db::lock_db(&self.db);
+                    crate::db::identity::rollback_to_version(&guard, version, &operator, now)?
+                };
+                self.profile.invalidate();
+                Ok(IdentityVersionView::from(&restored))
+            }
+        }
+    }
+
+    /// 后台演化是否还应调用模型。
+    ///
+    /// 在调用 LLM 前先挡住全局 24 小时冷却和 pending 上限，避免白跑一次结构化推理；
+    /// 最终落库时 [`Self::create_proposal`] 仍会再次校验，防止并发进程绕过。
+    pub fn evolution_run_allowed(&self, now: DateTime<Utc>) -> Result<bool> {
+        Ok(self.evolution_gate(now)? == EvolutionGate::Run)
+    }
+
+    /// 返回后台演化当前被哪条规则挡住，便于调度日志。
+    pub fn evolution_gate(&self, now: DateTime<Utc>) -> Result<EvolutionGate> {
+        let guard = crate::db::lock_db(&self.db);
+        if self.limits.global_cooldown > Duration::zero()
+            && crate::db::identity::has_any_proposal_between(
+                &guard,
+                now - self.limits.global_cooldown,
+                now,
+            )?
+        {
+            return Ok(EvolutionGate::GlobalCooldown);
+        }
+        let pending = crate::db::identity::list_proposals_by_status(
+            &guard,
+            ProposalStatus::Pending.as_str(),
+            self.limits.max_pending,
+        )?;
+        if pending.len() >= self.limits.max_pending {
+            return Ok(EvolutionGate::PendingLimit);
+        }
+        Ok(EvolutionGate::Run)
+    }
+
+    /// 组装后台演化所需的只读证据快照。
+    ///
+    /// 这里只读会话最近消息、长期记忆和当前身份；不创建会话、不写记忆，也不调用
+    /// LLM。`sessions` 是会话域服务，记忆经 db 适配器读取后只暴露为领域值。
+    pub fn evidence_snapshot(
+        &self,
+        sessions: &crate::core::session::Sessions,
+        message_limit: usize,
+        memory_limit: usize,
+    ) -> Result<crate::core::identity_evolution::EvidenceSnapshot> {
+        use crate::core::identity_evolution::{EvidenceMemory, EvidenceMessage, EvidenceSnapshot};
+
+        let identity = self.current();
+        let messages = sessions
+            .recent_messages_for_mapped_sessions(10, message_limit)?
+            .into_iter()
+            .filter(|m| !m.content.trim().is_empty())
+            .map(|m| EvidenceMessage {
+                id: m.id,
+                role: m.role,
+                content: m.content,
+            })
+            .collect();
+        let memories = {
+            let guard = crate::db::lock_db(&self.db);
+            crate::db::memory::list(&guard, memory_limit)?
+                .into_iter()
+                .map(|m| EvidenceMemory {
+                    content: m.content,
+                    source_message_id: m.message_id,
+                })
+                .collect()
+        };
+        Ok(EvidenceSnapshot {
+            identity: identity.text,
+            messages,
+            memories,
+        })
     }
 }
 
@@ -220,7 +443,7 @@ fn validate_evidence(guard: &Database, ids: &[String]) -> Result<String> {
     Ok(serde_json::to_string(&canonical)?)
 }
 
-/// 频率限制：同一字段 7 天冷却 + 全局 pending 上限。
+/// 频率限制：全局每日冷却 + 同一字段 7 天冷却 + pending 上限。
 ///
 /// 冷却覆盖所有状态的提案，而不只是 pending。否则模型可以先反复提交再拒绝，
 /// 绕过“同一字段 7 天内只提一次”的约束。
@@ -230,6 +453,14 @@ fn enforce_limits(
     now: DateTime<Utc>,
     limits: ProposalLimits,
 ) -> Result<()> {
+    if limits.global_cooldown > Duration::zero()
+        && crate::db::identity::has_any_proposal_between(guard, now - limits.global_cooldown, now)?
+    {
+        return Err(SqlError::Config(format!(
+            "{} 小时内已有身份提案，后台反思每天最多运行一次",
+            limits.global_cooldown.num_hours()
+        )));
+    }
     let pending = crate::db::identity::list_proposals_by_status(
         guard,
         ProposalStatus::Pending.as_str(),
@@ -314,6 +545,9 @@ pub struct ProposalView {
     pub confidence: String,
     pub risk_level: String,
     pub status: String,
+    pub proposer: String,
+    /// 审批人；pending 时为空。MVP 入口为 Telegram，值形如 `telegram:<chat_id>`。
+    pub decided_by: Option<String>,
     pub base_version: i64,
 }
 
@@ -334,14 +568,15 @@ impl TryFrom<&IdentityChangeProposal> for ProposalView {
             confidence: value.confidence.clone(),
             risk_level: value.risk_level.clone(),
             status: value.status.clone(),
+            proposer: value.proposer.clone(),
+            decided_by: value.decided_by.clone(),
             base_version: value.base_version,
         })
     }
 }
 
-/// 只读审计视图：当前身份版本（未版本化返回 None）。
-pub fn latest_version(db: &Database) -> Result<Option<IdentityVersion>> {
-    crate::db::identity::latest_version(db)
+fn proposal_view(value: &IdentityChangeProposal) -> Result<ProposalView> {
+    ProposalView::try_from(value)
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@
 //! - [`agent_role`]：Agent 角色与工具权限边界（对话 / 主动 / 身份演化）；
 //! - [`identity`]：AI 身份契约（字段白名单、长度限制、旧 key 兼容与快照渲染）；
 //! - [`identity_service`]：身份提案校验、限流、审批状态转换（不直接应用变更）；
+//! - [`identity_evolution`]：后台身份演化 Agent（读取证据、生成至多一条提案）；
 //! - [`self_profile`]：AI 自我属性（性格/人格/三观/爱好，人设数据源）；
 //! - [`intent`]：意图判定引擎（是否开口：主动发起 / 回复后延续）；
 //! - [`schema`]：跨领域共享的值类型（无法归到单一领域），如 `message`
@@ -23,6 +24,7 @@ pub mod agent;
 pub mod agent_role;
 pub mod context;
 pub mod identity;
+pub mod identity_evolution;
 pub mod identity_service;
 pub mod intent;
 pub mod memory;

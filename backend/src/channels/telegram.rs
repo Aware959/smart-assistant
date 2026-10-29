@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::core::agent::Agent;
+use crate::core::identity::IdentityFieldKey;
+use crate::core::identity_service::{
+    IdentityService, IdentityVersionView, IdentityView, ProposalView,
+};
 use crate::core::session::{classify_inbound, InboundFreshness, Sessions, TurnTicket};
 use crate::{ChatInput, ChatOutput, Reply};
 
@@ -1458,23 +1462,224 @@ async fn probe_voice_capability(cfg: &VoiceCfg, gateway_url: &str) {
     }
 }
 
-/// 命令类消息的即时回执：`/start` 打招呼、`/new` 重开会话。
+/// Telegram 管理命令的纯解析结果。
 ///
-/// 返回 `Some(文本)` 表示这是命令、已处理完，直接把这段文本发出去即可；`None` 表示普通
-/// 消息，交给 AI 流水线。命令不进 AI 流水线，所以既不必起投递工人，也不必占一个阻塞线程。
-fn command_reply(session: &Sessions, chat_id: i64, text: &str) -> Result<Option<String>, String> {
-    match text.trim() {
-        "/start" => Ok(Some(
-            "你好，我是你的记忆助手。直接发消息聊天，我会记住值得记住的事；发送 /new 开始一段新的对话。"
-                .to_string(),
+/// 通道层只负责把文本解析成动作，再调用 `IdentityService`；这里不读数据库，
+/// 便于在单元测试中覆盖命令边界而不发网络请求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Command {
+    Start,
+    New,
+    Identity,
+    Proposals,
+    Approve { id: String, consent: bool },
+    Reject { id: String },
+    Rollback { version: Option<i64> },
+    Help,
+}
+
+/// 解析一条命令。普通消息返回 `None`；未知斜杠命令返回 [`Command::Help`]。
+fn parse_command(text: &str) -> Result<Option<Command>, String> {
+    let mut parts = text.split_whitespace();
+    let Some(raw) = parts.next() else {
+        return Ok(None);
+    };
+    if !raw.starts_with('/') {
+        return Ok(None);
+    }
+    let command = raw.trim_start_matches('/').split('@').next().unwrap_or("");
+    let command = command.to_ascii_lowercase();
+    let args: Vec<&str> = parts.collect();
+    let command = match command.as_str() {
+        "start" => Command::Start,
+        "new" => Command::New,
+        "identity" => Command::Identity,
+        "proposals" => Command::Proposals,
+        "approve" => {
+            let id = args
+                .first()
+                .ok_or_else(|| "用法：/approve <提案 id> [consent|--consent]".to_string())?
+                .to_string();
+            let consent = args
+                .iter()
+                .skip(1)
+                .any(|arg| matches!(*arg, "consent" | "--consent"));
+            Command::Approve { id, consent }
+        }
+        "reject" => {
+            let id = args
+                .first()
+                .ok_or_else(|| "用法：/reject <提案 id>".to_string())?
+                .to_string();
+            Command::Reject { id }
+        }
+        "rollback" => {
+            let version = match args.first() {
+                None => None,
+                Some(raw) => Some(
+                    raw.parse::<i64>()
+                        .map_err(|_| "用法：/rollback [正整数版本]".to_string())?,
+                ),
+            };
+            Command::Rollback { version }
+        }
+        "help" => Command::Help,
+        _ => Command::Help,
+    };
+    Ok(Some(command))
+}
+
+fn format_identity(view: &IdentityView) -> String {
+    let version = match view.version {
+        Some(0) => "未版本化（旧 self_profile）".to_string(),
+        Some(v) => format!("v{v}"),
+        None => "未知".to_string(),
+    };
+    let body = if view.text.trim().is_empty() {
+        "（当前身份为空）"
+    } else {
+        view.text.as_str()
+    };
+    format!("当前身份（{version}）\n{body}")
+}
+
+fn format_proposal(view: &ProposalView) -> String {
+    let before = view.before_value.as_deref().unwrap_or("（未设置）");
+    let evidence = if view.evidence_message_ids.is_empty() {
+        "（无）".to_string()
+    } else {
+        view.evidence_message_ids.join(", ")
+    };
+    format!(
+        "{}\n字段：{}（{}）\n风险：{}；置信度：{}；基线：v{}\n变更：{} → {}\n理由：{}\n证据：{}",
+        view.id,
+        IdentityFieldKey::parse(&view.field_key)
+            .map(|key| key.label())
+            .unwrap_or("未知字段"),
+        view.field_key,
+        view.risk_level,
+        view.confidence,
+        view.base_version,
+        before,
+        view.after_value,
+        view.reason,
+        evidence,
+    )
+}
+
+fn format_proposals(views: &[ProposalView]) -> String {
+    if views.is_empty() {
+        return "当前没有待审批的身份提案。".to_string();
+    }
+    let mut out = format!("待审批身份提案（{} 条）", views.len());
+    for view in views {
+        out.push_str("\n\n");
+        out.push_str(&format_proposal(view));
+    }
+    out
+}
+
+fn format_approved(proposal: &ProposalView, version: &IdentityVersionView) -> String {
+    format!(
+        "已批准并应用提案 {}，身份版本 v{}。\n变更字段：{}\n新值：{}",
+        proposal.id, version.version, proposal.field_key, proposal.after_value
+    )
+}
+
+fn format_rejected(proposal: &ProposalView) -> String {
+    format!("已拒绝提案 {}，当前身份未改变。", proposal.id)
+}
+
+fn format_rollback(version: &IdentityVersionView) -> String {
+    format!(
+        "已回滚到身份版本 v{}。\n回滚来源：{}\n原因：{}",
+        version.version, version.source, version.reason
+    )
+}
+
+fn format_help() -> String {
+    "可用命令：\n/identity 查看当前身份（仅管理员）\n/proposals 查看待审批提案（仅管理员）\n/approve <id> [consent|--consent] 批准提案（仅管理员；关系姿态必须带 consent）\n/reject <id> 拒绝提案（仅管理员）\n/rollback 撤销最新生效提案（仅管理员）\n/rollback <version> 恢复到指定历史版本（仅管理员）\n/new 开始新对话".to_string()
+}
+
+fn execute_command(
+    session: &Sessions,
+    identity: &IdentityService,
+    is_admin: bool,
+    chat_id: i64,
+    command: Command,
+) -> Result<String, String> {
+    let now = Utc::now();
+    let operator = format!("telegram:{chat_id}");
+    match command {
+        command if is_admin_command(&command) && !is_admin => Ok(admin_denied()),
+        Command::Start => Ok(format!(
+            "你好，我是你的记忆助手。直接发消息聊天，我会记住值得记住的事；发送 /new 开始一段新的对话。\n\n{}",
+            format_help()
         )),
-        "/new" => {
+        Command::New => {
             session
                 .reset(CHANNEL, &chat_id.to_string())
                 .map_err(|e| e.to_string())?;
-            Ok(Some("已开始新对话，之前的记录保留在记忆库里。".to_string()))
+            Ok("已开始新对话，之前的记录保留在记忆库里。".to_string())
         }
-        _ => Ok(None),
+        Command::Identity => Ok(format_identity(&identity.current())),
+        Command::Proposals => {
+            let proposals = identity.pending(10).map_err(|e| e.to_string())?;
+            Ok(format_proposals(&proposals))
+        }
+        Command::Approve { id, consent } => {
+            let proposal = identity.get(&id).map_err(|e| e.to_string())?;
+            let version = identity
+                .approve_and_apply(&id, consent, &operator, now)
+                .map_err(|e| e.to_string())?;
+            Ok(format_approved(&proposal, &version))
+        }
+        Command::Reject { id } => {
+            let proposal = identity
+                .reject(&id, &operator, now)
+                .map_err(|e| e.to_string())?;
+            Ok(format_rejected(&proposal))
+        }
+        Command::Rollback { version } => {
+            let result = identity
+                .rollback_version(version, &operator, now)
+                .map_err(|e| e.to_string())?;
+            Ok(format_rollback(&result))
+        }
+        Command::Help => Ok(format_help()),
+    }
+}
+
+/// 哪些命令属于身份管理，必须走管理员门禁。
+fn is_admin_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Identity
+            | Command::Proposals
+            | Command::Approve { .. }
+            | Command::Reject { .. }
+            | Command::Rollback { .. }
+    )
+}
+
+/// 身份管理命令的统一拒绝文案。
+fn admin_denied() -> String {
+    "身份管理命令只允许白名单管理员使用。".to_string()
+}
+
+/// 命令类消息的即时回执：管理命令不进 AI 流水线。
+///
+/// 返回 `Some(文本)` 表示这是命令、已处理完；`None` 表示普通消息，交给 AI 流水线。
+fn command_reply(
+    session: &Sessions,
+    identity: &IdentityService,
+    is_admin: bool,
+    chat_id: i64,
+    text: &str,
+) -> Result<Option<String>, String> {
+    match parse_command(text)? {
+        Some(command) => execute_command(session, identity, is_admin, chat_id, command).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -1656,13 +1861,13 @@ fn spawn_turn(
 
 /// 长轮询入口。token 为空时直接返回，由 server 入口决定是否调用。
 /// 异常退出后自动重连（启动期网络抖动不再导致永久掉线）。
-pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>) {
+pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, identity: Arc<IdentityService>) {
     let token = Config::get().telegram_bot_token.trim().to_string();
     if token.is_empty() {
         return;
     }
     loop {
-        match run_loop(chat.clone(), session.clone(), &token).await {
+        match run_loop(chat.clone(), session.clone(), identity.clone(), &token).await {
             Ok(()) => break,
             Err(e) => {
                 tracing::error!(error = %e, "telegram 轮询异常退出，60s 后重连");
@@ -1672,7 +1877,12 @@ pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>) {
     }
 }
 
-async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Result<(), String> {
+async fn run_loop(
+    chat: Arc<Agent>,
+    session: Arc<Sessions>,
+    identity: Arc<IdentityService>,
+    token: &str,
+) -> Result<(), String> {
     let client = build_client()?;
     let base = api_base(token);
 
@@ -1847,9 +2057,10 @@ async fn run_loop(chat: Arc<Agent>, session: Arc<Sessions>, token: &str) -> Resu
                 continue;
             };
 
-            // 命令类消息（`/start` / `/new`）在异步侧直接回执，不进 AI 流水线，
+            // 命令类消息（`/start` / `/new` / 身份管理）在异步侧直接回执，不进 AI 流水线，
             // 也就不必起投递工人与阻塞线程。
-            match command_reply(&session, chat_id, &text) {
+            let is_admin = allowed.is_empty() || allowed.contains(&chat_id);
+            match command_reply(&session, &identity, is_admin, chat_id, &text) {
                 Ok(Some(reply)) => {
                     send_typing(&client, &base, chat_id).await;
                     if let Err(e) = send_text(&client, &base, chat_id, &reply).await {

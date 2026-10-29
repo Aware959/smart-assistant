@@ -120,6 +120,10 @@ pub struct Config {
     /// 这条的存在是为了满足 FR-003 的"不能长时间无响应"：若只靠超时兜底，一条几分钟的
     /// 语音会一路跑到超时才静默失败，用户长时间什么也收不到。
     pub voice_transcribe_max_secs: u64,
+    /// 身份演化后台任务总开关：`1`/`true` 才启动；缺省关闭。
+    pub identity_evolution_enabled: bool,
+    /// 身份演化任务的检查周期（小时）。默认 24 小时，任务本身还会按最近提案做冷却。
+    pub identity_evolution_interval_hours: i64,
 }
 
 impl Config {
@@ -245,6 +249,13 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(120),
+            identity_evolution_enabled: std::env::var("IDENTITY_EVOLUTION_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            identity_evolution_interval_hours: std::env::var("IDENTITY_EVOLUTION_INTERVAL_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(24),
         }
     }
 

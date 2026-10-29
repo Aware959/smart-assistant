@@ -1,7 +1,8 @@
 # AI 自我演化与多 Agent 体系需求分析
 
-> 状态：MVP 方向与首批边界已确认；身份契约、v21 持久化、版本化渲染、角色工具边界、
-> 显式缓存失效，以及提案校验/限流/人工审批已实现；事务应用与回滚仍待实现。
+> 状态：MVP 方向与首批边界已确认；身份契约、v22 持久化、版本化渲染、角色工具边界、
+> 显式缓存失效、提案校验/限流/人工审批、后台提案生成、事务应用与回滚闭环均已实现。
+> 后台演化默认关闭，只在 `sa-link` 中按周期运行。
 > 日期：2026-10-29（初稿 2026-10-27）。  
 > 适用范围：`smart-assistant` 当前 Telegram 主线；共享代码可演进，但不主动改 Web / iLink。  
 > 关联文档：`docs/architecture.md`、`docs/问题和待决策.md`、`docs/archive/agent-tool-loop-architecture-review.md`。
@@ -92,7 +93,7 @@
 | 主动工具 | `send_message`、`get_now`、`recall_memory`，刻意不含 `remember` |
 | 工具循环 | 对话和主动路径共用 `Agent::run_tool_loop`，用 `ToolPolicy` 区分“必须回复”和“可以沉默” |
 | 主动触发 | 仅 `sa-link` 启动，受 `INTENT_ENABLED` 控制，默认关闭 |
-| 版本与审计 | v21 已有 `identity_change_proposals` / `self_profile_versions`；提案校验、限流与审批状态机已接入 `IdentityService`，事务应用和回滚尚未实现 |
+| 版本与审计 | v22 已有 `identity_change_proposals` / `self_profile_versions`；提案校验、限流、审批、事务应用、版本回滚和 Telegram 管理命令均已接入，审批人与版本操作者写入审计 |
 | 记忆边界 | 用户事实在 `memories`；AI 自我属性在 `self_profile`；两者不应重新混合 |
 
 关键结论：
@@ -449,8 +450,8 @@ core/agent_runtime
 
 ## 7. 数据模型候选
 
-以下设计的持久化部分已落地到 v21：提案表、版本审计表及对应 DAO 已实现；提案
-校验、限流与审批状态转换由 `IdentityService` 负责。事务应用与回滚仍属于 T7。
+以下设计的持久化部分已落地到 v22：提案表、版本审计表及对应 DAO 已实现；提案
+校验、限流、审批、事务应用与回滚由 `IdentityService` 负责。
 
 ### 7.1 保留 `self_profile` 作为当前快照
 
@@ -473,6 +474,7 @@ core/agent_runtime
 | `risk_level` | low / medium / high |
 | `status` | pending / approved / rejected / applied / rolled_back |
 | `proposer` | 产生提案的 Agent / 模型 / 版本 |
+| `decided_by` | 审批操作者；MVP 为 `telegram:<chat_id>`，旧行为空 |
 | `created_at` | 创建时间 |
 | `decided_at` | 审批时间 |
 | `applied_at` | 生效时间 |
@@ -487,6 +489,7 @@ core/agent_runtime
 - `change_id` / `proposal_id`；
 - `source`（manual / evolution_agent / rollback）；
 - `reason`；
+- `operator`（写入该版本的审批人或回滚操作者）；
 - `created_at`；
 - `rolled_back_from`。
 
@@ -629,17 +632,27 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 | 审批策略 | 六个字段全部只允许“提案 + 人工批准”，MVP 不做低风险自动生效 |
 | 高风险字段 | `self_concept` / `values` / `relationship_stance` 必须人工批准；关系姿态还要求用户明确同意 |
 | 用户入口 | 首版只做 Telegram 管理命令；不做 Web 管理页 |
-| 触发方式 | `sa-link` 后台低频任务，默认关闭；建议每天最多 1 次、最多 3 条待审提案、同一字段 7 天冷却 |
+| 触发方式 | `sa-link` 后台低频任务，默认关闭；每天最多 1 次、最多 3 条待审提案、同一字段 7 天冷却 |
 | 情绪/精力 | 属于 L3 短期状态，不写入永久身份；MVP 不做 |
 | Memory Curator | 本次不拆分，`remember` 继续留在对话 Agent |
-| 评估方式 | MVP 记录提案通过率、拒绝率、回滚率、人格一致性与越界行为；暂不建离线评测集 |
+| 评估方式 | MVP 持久化提案状态、审批人、时间戳与版本来源，可通过这些审计数据推导通过率 / 拒绝率 / 回滚率；人格一致性与越界行为暂靠人工抽查，不建离线评测集 |
 
 身份契约已按上述结论落地于 `backend/src/core/identity.rs`：字段白名单、长度限制、
 控制字符拒绝、旧 key alias 映射、关系姿态明确同意标记和 canonical 渲染顺序均已固定。
 `Profile::snapshot()` 已按最新身份版本渲染，并在无版本或快照损坏时兼容回退旧 KV。
-`IdentityService` 已实现提案创建、真实消息证据校验、风险推导、单字段 7 天冷却、
-最多 3 条 pending 提案，以及 `pending -> approved/rejected` 的人工审批；
-它不会修改当前身份。事务应用、版本写入、缓存失效与回滚仍属于 T7，尚未实现。
+`IdentityService` 已实现提案创建、真实消息证据校验、风险推导、全局每日限流、
+单字段 7 天冷却、最多 3 条 pending 提案，以及 `pending -> approved/rejected`
+的人工审批。批准后的 `approve_and_apply` 在单个 SQLite 事务内更新
+`self_profile`、写入完整快照版本、推进提案状态，提交后立即失效 `Profile` 缓存；
+`rollback` 撤销最新 applied 提案，`rollback <version>` 可恢复任意更早的已审计快照，
+两者都会追加 rollback 版本，不删除历史。审批人写入提案 `decided_by`，应用 / 回滚
+操作者写入版本 `operator`；Telegram 身份管理命令仅允许 `TELEGRAM_ALLOWED_IDS`
+内的会话使用（白名单留空时为单人部署兼容模式，仍可操作）。
+
+后台 `IdentityEvolutionAgent` 已接入 `sa-link`：`IDENTITY_EVOLUTION_ENABLED=1`
+才启动，首次运行前等待 `IDENTITY_EVOLUTION_INTERVAL_HOURS`（默认 24 小时）；
+证据来自已映射会话的最近消息、长期记忆与当前身份。模型只能产出六字段结构化
+提案，不能发送消息、写用户记忆、直接应用身份或修改工具权限。
 
 ---
 
@@ -670,7 +683,9 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 
 ## 12. 任务拆分草案
 
-以下任务仅作为后续编码计划，当前不实现、不提交。
+以下任务表保留为交付追踪；MVP 已完成 T1-T7，T8 明确不做。T4 的“通用执行机制抽取”
+没有另造通用编排器：现有 `run_tool_loop` 继续作为对话 / 主动的共享底层，身份演化
+走独立的结构化 LLM 调用；三角色边界由代码白名单与派发校验固定。
 
 | ID | 阶段 | 任务 | 依赖 | 验收 |
 |---|---|---|---|---|
@@ -681,17 +696,17 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 | T5 | 提案 | 新增提案数据结构与持久化，不直接修改 `self_profile` | T2、T4 | 提案可查询、可审计，状态机可测试 |
 | T6 | 演化 | 实现后台 Identity Evolution Agent，读取证据并产出提案 | T5 | 不发送用户消息，不直接写入当前身份 |
 | T7 | 生效 | 实现人工审批、事务应用、版本记录和回滚 | T5、T6 | 审批后生效；失败回滚；缓存立即失效 |
-| T8 | 可选 | 评估低风险自动生效与风险分级 | T7 | 有频率限制、审计和回滚，不绕过平台边界 |
+| T8 | 可选 | 评估低风险自动生效与风险分级 | T7 | 未实现；MVP 六字段全部人工批准 |
 
 推荐执行顺序：**T2 → T3 → T4 → T5 → T6 → T7**。  
 不要先做 T6 再补身份模型，否则会在一个不稳定的文本结构上叠加自动写入。
 
-当前进度：T1（决策冻结）、T2（身份契约）、v21 持久化（提案表 / 版本审计表 / DAO）、
+当前进度：T1（决策冻结）、T2（身份契约）、v22 持久化（提案表 / 版本审计表 / DAO）、
 T3（按身份版本渲染、旧 KV 兼容、版本化缓存与显式失效）、T4 的角色工具边界
-（三角色白名单、定义裁剪、派发硬校验、身份演化 prompt）与 T5（提案校验、限流、
-人工审批服务）均已完成；T4 的通用执行机制抽取仍待与 T6 一起收敛。
-T7 的事务应用、版本写入与回滚尚未实现。真实库已升到 v21，两张身份表为空；
-文档中的 v17 仅指历史基线，不是本次起点。
+（三角色白名单、定义裁剪、派发硬校验、身份演化 prompt）、T5（提案校验、限流、
+人工审批服务）、T6（后台提案生成与 `sa-link` 低频调度）和 T7（事务应用、版本写入、
+Telegram 审批命令、最新/指定版本回滚）均已完成。T8（低风险自动生效）不在 MVP，
+未实现。真实库已升到 v22，两张身份表为空；文档中的 v17 仅指历史基线，不是本次起点。
 
 ---
 

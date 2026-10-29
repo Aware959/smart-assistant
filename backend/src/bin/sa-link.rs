@@ -51,6 +51,7 @@ async fn main() {
         handles.push(tokio::spawn(smart_assistant::channels::telegram::run(
             app.chat.clone(),
             app.session.clone(),
+            app.identity.clone(),
         )));
         // 失败轮次重试扫表：与长轮询并列，静默重试待重试队列里的轮次。
         handles.push(tokio::spawn(
@@ -78,6 +79,14 @@ async fn main() {
             app.chat.clone(),
             app.session.clone(),
             Arc::new(smart_assistant::channels::ChannelsPusher),
+        )));
+    }
+
+    // 身份演化：默认关闭；开启后由独立后台角色低频生成待审提案，绝不直接应用。
+    if cfg.identity_evolution_enabled {
+        handles.push(tokio::spawn(app.identity_evolution.clone().run_scheduled(
+            app.session.clone(),
+            cfg.identity_evolution_interval_hours,
         )));
     }
 
