@@ -7,8 +7,8 @@
 //! 读路径：`block()` 命中 TTL 缓存时直接返回上次渲染结果，不再碰 DB；未命中或已过期
 //! 才持锁读完整张小表 → 渲染成「性格：…；人格：…」纯文本 → 立即释放锁，
 //! **绝不跨 LLM 调用持锁**（与历史/召回同一约束）。
-//! 写路径 v1 无接线（人工改库）；aiworld 重设计后 AI 可经
-//! [`crate::db::self_profile`] 的 `set` / `delete` 自我演化。
+//! 写路径 v1 无接线（人工改库）；身份演化生效后由调用方显式 [`Profile::invalidate`]，
+//! 不等 TTL 过期，保证下一轮提示词立即使用新快照。
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -61,6 +61,17 @@ impl Profile {
         let text = self.render();
         self.store(text.clone());
         text
+    }
+
+    /// 丢弃当前渲染缓存。
+    ///
+    /// 身份变更在事务提交后调用；下一轮 `block()` 会立即重读 `self_profile`，而不是
+    /// 等待 TTL。人工改库仍由 TTL 兜底。
+    #[allow(dead_code)] // 审批生效 / 回滚服务接入前，尚无生产调用点
+    pub(crate) fn invalidate(&self) {
+        if let Ok(mut guard) = self.cache.lock() {
+            *guard = None;
+        }
     }
 
     /// 读缓存：命中且未过期则返回 Some。

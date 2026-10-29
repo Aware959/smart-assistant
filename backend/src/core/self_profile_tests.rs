@@ -1,4 +1,4 @@
-//! `core/self_profile.rs` 渲染缓存测试：命中复用、过期刷新、读取失败降级。
+//! `core/self_profile.rs` 渲染缓存测试：命中复用、过期刷新、显式失效。
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -60,6 +60,31 @@ fn cache_is_reused_without_rereading_db() {
         crate::db::self_profile::set(guard.conn(), "性格", "新值").unwrap();
     }
     assert_eq!(profile.block(), "性格：旧值", "TTL 内应命中缓存，不回读 DB");
+}
+
+#[test]
+fn invalidate_forces_next_read_within_ttl() {
+    let db = db_with(&[("性格", "旧值")]);
+    let profile = sticky(db.clone());
+    assert_eq!(profile.block(), "性格：旧值");
+
+    {
+        let guard = crate::db::lock_db(&db);
+        crate::db::self_profile::set(guard.conn(), "性格", "新值").unwrap();
+    }
+    profile.invalidate();
+    assert_eq!(
+        profile.block(),
+        "性格：新值",
+        "显式失效后应立即重读，不能等 TTL"
+    );
+}
+
+#[test]
+fn invalidate_is_idempotent_on_empty_cache() {
+    let profile = sticky(db_with(&[]));
+    profile.invalidate();
+    assert_eq!(profile.block(), "");
 }
 
 #[test]

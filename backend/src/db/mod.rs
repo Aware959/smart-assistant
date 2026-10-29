@@ -1,4 +1,5 @@
 pub mod channel;
+pub mod identity;
 pub mod memory;
 pub mod message;
 pub mod pending_retry;

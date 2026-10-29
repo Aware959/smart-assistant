@@ -3,7 +3,8 @@
 //! 当前 schema 完全由 [`init_schema`] 里的 `CREATE TABLE IF NOT EXISTS` 定义（单一真源），
 //! 新库打开时直接建最新结构；历史逐版本迁移（v6~v16）已压平，不再保留。
 //! 仅 [`migrate`] 里保留 `v17`（删掉三张从未被读写的死表）、`v18`（`messages` 放开
-//! `role='tool'` 并改写历史工具结果行）两段，与末尾的版本戳。
+//! `role='tool'` 并改写历史工具结果行）、`v19`（失败轮次重试队列）与 `v20`
+//! （身份提案 / 版本审计）几段，与末尾的版本戳。
 //!
 //! 取舍：旧版本库不再支持平滑升级，需重建（`rm` 后重跑）。对单人单库、且已迁移到最新
 //! 的项目，这比无限累积迁移代码更划算；早期图谱时代残留的 `entities` 等表本就不在本
@@ -15,7 +16,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 19;
+pub(crate) const SCHEMA_VERSION: i64 = 20;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -71,6 +72,34 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS identity_change_proposals (
+            id                   TEXT PRIMARY KEY,
+            field_key            TEXT NOT NULL,
+            before_value         TEXT,
+            after_value          TEXT NOT NULL,
+            reason               TEXT NOT NULL,
+            evidence             TEXT NOT NULL,
+            confidence           TEXT NOT NULL,
+            risk_level           TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
+            status               TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'applied', 'rolled_back')),
+            proposer             TEXT NOT NULL,
+            base_version         INTEGER NOT NULL CHECK (base_version >= 1),
+            created_at           TEXT NOT NULL,
+            decided_at           TEXT,
+            applied_at           TEXT,
+            rolled_back_at       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS self_profile_versions (
+            version              INTEGER PRIMARY KEY CHECK (version >= 1),
+            snapshot             TEXT NOT NULL,
+            proposal_id          TEXT,
+            source               TEXT NOT NULL CHECK (source IN ('manual', 'evolution_agent', 'rollback')),
+            reason               TEXT NOT NULL,
+            created_at           TEXT NOT NULL,
+            rolled_back_from     INTEGER
+        );
+
         CREATE TABLE IF NOT EXISTS pending_retry (
             id              TEXT PRIMARY KEY,
             session_id      TEXT NOT NULL,
@@ -85,6 +114,14 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
+        CREATE INDEX IF NOT EXISTS idx_identity_proposals_status_created
+            ON identity_change_proposals(status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_identity_proposals_field_status
+            ON identity_change_proposals(field_key, status);
+        CREATE INDEX IF NOT EXISTS idx_identity_proposals_base_version
+            ON identity_change_proposals(base_version);
+        CREATE INDEX IF NOT EXISTS idx_self_profile_versions_created
+            ON self_profile_versions(created_at);
         "#,
     )?;
 
@@ -199,6 +236,50 @@ fn migrate(conn: &Connection) -> Result<()> {
             );",
         )?;
         tracing::info!("迁移 v19：新增 pending_retry 表（失败轮次持久重试队列）");
+    }
+
+    // v20：身份变更提案与版本审计。只加表与索引，不碰 self_profile 当前快照；
+    // 提案的 before/after 与版本快照都由后续身份服务在同一事务内写入。
+    if version < 20 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS identity_change_proposals (
+                id                   TEXT PRIMARY KEY,
+                field_key            TEXT NOT NULL,
+                before_value         TEXT,
+                after_value          TEXT NOT NULL,
+                reason               TEXT NOT NULL,
+                evidence             TEXT NOT NULL,
+                confidence           TEXT NOT NULL,
+                risk_level           TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
+                status               TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'applied', 'rolled_back')),
+                proposer             TEXT NOT NULL,
+                base_version         INTEGER NOT NULL CHECK (base_version >= 1),
+                created_at           TEXT NOT NULL,
+                decided_at           TEXT,
+                applied_at           TEXT,
+                rolled_back_at       TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS self_profile_versions (
+                version              INTEGER PRIMARY KEY CHECK (version >= 1),
+                snapshot             TEXT NOT NULL,
+                proposal_id          TEXT,
+                source               TEXT NOT NULL CHECK (source IN ('manual', 'evolution_agent', 'rollback')),
+                reason               TEXT NOT NULL,
+                created_at           TEXT NOT NULL,
+                rolled_back_from     INTEGER
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_identity_proposals_status_created
+                ON identity_change_proposals(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_identity_proposals_field_status
+                ON identity_change_proposals(field_key, status);
+            CREATE INDEX IF NOT EXISTS idx_identity_proposals_base_version
+                ON identity_change_proposals(base_version);
+            CREATE INDEX IF NOT EXISTS idx_self_profile_versions_created
+                ON self_profile_versions(created_at);",
+        )?;
+        tracing::info!("迁移 v20：新增身份变更提案与版本审计表");
     }
 
     if version >= SCHEMA_VERSION {
@@ -401,5 +482,82 @@ mod tests {
             meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
             SCHEMA_VERSION.to_string()
         );
+    }
+
+    /// v20：增量新增身份提案与版本审计表，既有 self_profile / messages 不动。
+    #[test]
+    fn v20_creates_identity_tables_and_preserves_profile() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE self_profile (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, created_at TEXT);
+             INSERT INTO self_profile VALUES ('性格','慢热','t');
+             INSERT INTO messages VALUES ('m1','s1','user','在吗','t');
+             INSERT INTO meta (key, value) VALUES ('schema_version','19');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        assert!(
+            table_exists(&conn, "identity_change_proposals").unwrap(),
+            "identity_change_proposals 应被 v20 建出"
+        );
+        assert!(
+            table_exists(&conn, "self_profile_versions").unwrap(),
+            "self_profile_versions 应被 v20 建出"
+        );
+        let kept: String = conn
+            .query_row(
+                "SELECT value FROM self_profile WHERE key='性格'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "慢热", "self_profile 当前快照不能丢");
+        let messages: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(messages, 1, "messages 一条不能少");
+        assert_eq!(
+            meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
+            SCHEMA_VERSION.to_string()
+        );
+    }
+
+    /// v20 的 CHECK 约束必须挡住非法风险等级 / 状态 / 来源；后续 DAO 的错误不能是
+    /// 唯一防线，直接改库也要被 schema 拒绝。
+    #[test]
+    fn v20_constraints_reject_invalid_enums() {
+        let conn = open_conn();
+        migrate(&conn).unwrap();
+
+        let proposal = conn.execute(
+            "INSERT INTO identity_change_proposals
+             (id, field_key, before_value, after_value, reason, evidence, confidence,
+              risk_level, status, proposer, base_version, created_at)
+             VALUES ('p1','voice_style',NULL,'更短','测试','[]','medium',
+                     'critical','pending','test',1,'t')",
+            [],
+        );
+        assert!(proposal.is_err(), "非法 risk_level 应被 CHECK 拒绝");
+
+        let proposal = conn.execute(
+            "INSERT INTO identity_change_proposals
+             (id, field_key, before_value, after_value, reason, evidence, confidence,
+              risk_level, status, proposer, base_version, created_at)
+             VALUES ('p2','voice_style',NULL,'更短','测试','[]','medium',
+                     'low','done','test',1,'t')",
+            [],
+        );
+        assert!(proposal.is_err(), "非法 status 应被 CHECK 拒绝");
+
+        let version = conn.execute(
+            "INSERT INTO self_profile_versions
+             (version, snapshot, proposal_id, source, reason, created_at, rolled_back_from)
+             VALUES (1,'{}',NULL,'model','测试','t',NULL)",
+            [],
+        );
+        assert!(version.is_err(), "非法 source 应被 CHECK 拒绝");
     }
 }
