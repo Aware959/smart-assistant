@@ -1,6 +1,6 @@
 # AI 自我演化与多 Agent 体系需求分析
 
-> 状态：MVP 方向与首批边界已确认；身份契约、v20 持久化与显式缓存失效已实现，提案/审批/演化尚未实现。  
+> 状态：MVP 方向与首批边界已确认；身份契约、v20 持久化、版本化渲染与显式缓存失效已实现，提案/审批/演化尚未实现。  
 > 日期：2026-10-29（初稿 2026-10-27）。  
 > 适用范围：`smart-assistant` 当前 Telegram 主线；共享代码可演进，但不主动改 Web / iLink。  
 > 关联文档：`docs/architecture.md`、`docs/问题和待决策.md`、`docs/archive/agent-tool-loop-architecture-review.md`。
@@ -82,7 +82,7 @@
 | 项目 | 当前事实 |
 |---|---|
 | 人设存储 | `backend/src/db/self_profile.rs` 维护 `self_profile(key, value, updated_at)` KV 表 |
-| 人设读取 | `backend/src/core/self_profile.rs::Profile::block()` 按插入序渲染为 `key：value；...`，带 10 秒 TTL 缓存 |
+| 人设读取 | `backend/src/core/self_profile.rs::Profile::snapshot()` 优先按最新身份版本渲染 canonical 字段；无版本记录时兼容旧 KV 插入序，带 10 秒 TTL 缓存 |
 | 提示词注入 | `backend/src/core/context/prompt.rs::persona_block()` 将人设作为最高优先级稳定人格注入 |
 | 对话提示词 | `system_prompt(profile)`：共享基底 + 对话示例 + 输出约定 |
 | 主动提示词 | `proactive_system_prompt(profile)`：共享基底 + 主动沉默规则 + 输出约定 |
@@ -218,7 +218,7 @@ IdentityField
 
 ### 4.3 渲染与缓存
 
-当前 `Profile::block()` 用 10 秒 TTL 处理人工改库后的不一致。自动演化上线后，
+当前 `Profile::snapshot()` 用 10 秒 TTL 处理人工改库后的不一致。自动演化上线后，
 不能只依赖 TTL：
 
 - 每次身份变更必须产生新的 `identity_version`；
@@ -634,7 +634,8 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 
 身份契约已按上述结论落地于 `backend/src/core/identity.rs`：字段白名单、长度限制、
 控制字符拒绝、旧 key alias 映射、关系姿态明确同意标记和 canonical 渲染顺序均已固定。
-提案状态机、数据库版本、审批与回滚仍属于后续任务，尚未实现。
+`Profile::snapshot()` 已按最新身份版本渲染，并在无版本或快照损坏时兼容回退旧 KV。
+提案生成、审批、事务应用与回滚仍属于后续任务，尚未实现。
 
 ---
 
@@ -671,7 +672,7 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 |---|---|---|---|---|
 | T1 | 设计 | 拍板身份范围、字段清单、审批策略和触发频率 | 无 | 本文件相关待决策项有明确结论 |
 | T2 | 身份 | 定义 `AgentIdentity`、字段白名单、限制和错误类型 | T1 | 单测覆盖合法/非法字段和边界 |
-| T3 | 身份 | 将 `Profile::block()` 改为基于身份版本渲染，并保留兼容路径 | T2 | 现有数据可正常注入，缓存可失效 |
+| T3 | 身份 | 将 `Profile::snapshot()` 改为基于身份版本渲染，并保留兼容路径 | T2 | 现有数据可正常注入，缓存可失效 |
 | T4 | Agent | 抽出可复用的 LLM/工具执行机制，定义三个角色的 prompt/tool policy | T1、T3 | 对话/主动现有行为通过回归测试；身份角色无发送工具 |
 | T5 | 提案 | 新增提案数据结构与持久化，不直接修改 `self_profile` | T2、T4 | 提案可查询、可审计，状态机可测试 |
 | T6 | 演化 | 实现后台 Identity Evolution Agent，读取证据并产出提案 | T5 | 不发送用户消息，不直接写入当前身份 |
@@ -681,8 +682,8 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 推荐执行顺序：**T2 → T3 → T4 → T5 → T6 → T7**。  
 不要先做 T6 再补身份模型，否则会在一个不稳定的文本结构上叠加自动写入。
 
-当前进度：T1（决策冻结）、T2（身份契约）与 v20 持久化（提案表 / 版本审计表 / DAO）
-已完成；T3 的显式缓存失效入口（`Profile::invalidate`）也已落地，按版本渲染尚未开始。
+当前进度：T1（决策冻结）、T2（身份契约）、v20 持久化（提案表 / 版本审计表 / DAO）
+与 T3（按身份版本渲染、旧 KV 兼容、版本化缓存与显式失效）均已完成。
 真实库已升到 v20，两张新表为空；文档中的 v17 仅指历史基线，不是本次起点。
 
 ---

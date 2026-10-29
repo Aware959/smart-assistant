@@ -190,10 +190,17 @@ pub(crate) fn get_version(db: &Database, version: i64) -> Result<Option<Identity
 
 /// 最新版本记录；没有版本时返回 None。
 pub(crate) fn latest_version(db: &Database) -> Result<Option<IdentityVersion>> {
+    latest_version_on(db.conn())
+}
+
+/// 在调用方已持有的连接上读取最新版本。
+///
+/// 供 `Profile` 读路径复用现有 DB 锁；不构造第二个 `Database`，也不额外加锁。
+pub(crate) fn latest_version_on(conn: &rusqlite::Connection) -> Result<Option<IdentityVersion>> {
     let sql = format!(
         "SELECT {VERSION_COLUMNS} FROM self_profile_versions ORDER BY version DESC LIMIT 1"
     );
-    let mut stmt = db.conn().prepare(&sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map([], map_version)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),

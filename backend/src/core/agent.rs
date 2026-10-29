@@ -144,11 +144,6 @@ impl Agent {
         }
     }
 
-    /// 自我属性人设区块文本（主动决策复用同一人设数据源）。
-    pub(crate) fn profile_block(&self) -> String {
-        self.profile.block()
-    }
-
     /// 最近 `limit` 条对话的渲染文本（主动决策只需历史的场景，避免白跑一次召回）。
     pub(crate) fn recent_history_text(&self, session_id: &str, limit: usize) -> String {
         context::recent_history_text(self.conversation.as_ref(), session_id, limit)
@@ -285,12 +280,16 @@ impl Agent {
             history: history_turns,
             memories: Vec::new(),
         };
-        tracing::info!(session = %session.id, "对话阶段：提示词组装完成");
-        let profile = self.profile_block();
+        let profile = self.profile.snapshot();
+        tracing::info!(
+            session = %session.id,
+            identity_version = profile.version.unwrap_or(0),
+            "对话阶段：提示词组装完成"
+        );
         // 延迟消息（离线积压）才追加时差说明，让模型知道"这条是几小时前发的"。
         let system = match delay_notice(input.user_time.as_deref(), chrono::Utc::now()) {
-            Some(notice) => format!("{}{notice}", context::system_prompt(&profile)),
-            None => context::system_prompt(&profile),
+            Some(notice) => format!("{}{notice}", context::system_prompt(&profile.text)),
+            None => context::system_prompt(&profile.text),
         };
         let mut messages = vec![ChatMessage::system(system)];
         // 历史轮次**原样**并入：`role='tool'` 的结果行必须带着 `tool_call_id`，声明它的
@@ -382,8 +381,8 @@ impl Agent {
         F: FnMut(&Reply) -> std::result::Result<Option<u8>, String> + Send,
     {
         let recent = self.recent_history_text(session_id, PROACTIVE_HISTORY_TURNS);
-        let profile = self.profile_block();
-        let system = context::proactive_system_prompt(&profile);
+        let profile = self.profile.snapshot();
+        let system = context::proactive_system_prompt(&profile.text);
         let user =
             context::proactive_user_prompt(&recent, now, last_user_reply_at, last_assistant_at);
         let messages = vec![ChatMessage::system(system), ChatMessage::user(user)];
@@ -391,6 +390,7 @@ impl Agent {
             target: "trace",
             stage = "proactive_prompt",
             session_id,
+            identity_version = profile.version.unwrap_or(0),
             n = messages.len(),
             "主动决策：提示词已组装"
         );

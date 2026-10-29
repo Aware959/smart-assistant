@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use thiserror::Error;
 
 /// 身份字段的 canonical key。
@@ -286,6 +287,9 @@ impl AgentIdentity {
     /// MVP 初始版本号。
     pub const INITIAL_VERSION: u64 = 1;
 
+    /// 尚未写入版本审计表的旧 `self_profile` 数据。
+    pub const UNVERSIONED: u64 = 0;
+
     /// 构造一个空身份。
     pub fn empty(version: u64, updated_at: DateTime<Utc>) -> Self {
         Self {
@@ -345,6 +349,46 @@ impl AgentIdentity {
         Ok(Self::new(version, updated_at, fields))
     }
 
+    /// 从 `self_profile_versions.snapshot` 解析完整身份快照。
+    ///
+    /// 快照必须是 JSON object，字段值必须是字符串；未知字段、非字符串值和字段约束
+    /// 校验失败都会返回错误。调用方在读取当前身份时可以选择回退到旧 KV 渲染，但
+    /// 不应把损坏的版本快照当成有效身份继续使用。
+    pub fn from_snapshot_json(
+        version: u64,
+        updated_at: DateTime<Utc>,
+        snapshot: &str,
+    ) -> Result<Self, IdentityError> {
+        let raw: BTreeMap<String, Value> = serde_json::from_str(snapshot)
+            .map_err(|e| IdentityError::InvalidSnapshot(e.to_string()))?;
+        let mut fields = BTreeMap::new();
+
+        for (raw_key, raw_value) in raw {
+            let key = IdentityFieldKey::parse(&raw_key)?;
+            let value = raw_value.as_str().ok_or_else(|| {
+                IdentityError::InvalidSnapshot(format!("field `{raw_key}` must be a string"))
+            })?;
+            let value = IdentityFieldValue::new(key, value)?;
+            if fields.insert(key, value).is_some() {
+                return Err(IdentityError::DuplicateField { field: key });
+            }
+        }
+
+        Ok(Self::new(version, updated_at, fields))
+    }
+
+    /// 序列化为可写入 `self_profile_versions.snapshot` 的 canonical JSON。
+    ///
+    /// 只写当前存在的字段；空身份序列化为 `{}`，读取时仍可得到空身份。
+    pub fn to_snapshot_json(&self) -> Result<String, serde_json::Error> {
+        let raw = self
+            .fields
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        serde_json::to_string(&raw)
+    }
+
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -367,8 +411,8 @@ impl AgentIdentity {
 
     /// 按固定字段顺序渲染为「标签：值；…」文本。
     ///
-    /// 这是领域层的 canonical 渲染；现有 `Profile::block()` 仍保持原输出，直到版本化
-    /// 渲染任务接入后再切换，避免本次改动改变线上提示词。
+    /// 这是领域层的 canonical 渲染；`Profile::snapshot()` 在存在版本记录时使用它，
+    /// 无版本记录或快照损坏时仍回退到旧 KV 的插入序渲染。
     pub fn render_block(&self) -> String {
         IdentityFieldKey::ALL
             .into_iter()
@@ -396,6 +440,10 @@ pub enum IdentityError {
     },
     #[error("identity field `{field}` contains forbidden character U+{code:04X}")]
     ForbiddenCharacter { field: IdentityFieldKey, code: u32 },
+    #[error("identity snapshot is invalid: {0}")]
+    InvalidSnapshot(String),
+    #[error("identity snapshot contains duplicate field `{field}`")]
+    DuplicateField { field: IdentityFieldKey },
     #[error("unknown proposal status `{0}`")]
     UnknownProposalStatus(String),
     #[error("unknown risk level `{0}`")]
@@ -561,6 +609,76 @@ mod tests {
                 [("性格", "   ")]
             ),
             Err(IdentityError::EmptyValue {
+                field: IdentityFieldKey::Personality
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_json_roundtrips_with_canonical_field_order() {
+        let identity = AgentIdentity::from_legacy_rows(
+            7,
+            at(),
+            [("兴趣", "旧书店"), ("性格", "慢热"), ("三观", "真诚")],
+        )
+        .unwrap();
+
+        let snapshot = identity.to_snapshot_json().unwrap();
+        assert_eq!(
+            snapshot,
+            r#"{"interests":"旧书店","personality":"慢热","values":"真诚"}"#
+        );
+        assert_eq!(
+            AgentIdentity::from_snapshot_json(7, at(), &snapshot).unwrap(),
+            identity
+        );
+        assert_eq!(
+            AgentIdentity::from_snapshot_json(7, at(), &snapshot)
+                .unwrap()
+                .render_block(),
+            "性格：慢热；价值观：真诚；兴趣：旧书店"
+        );
+    }
+
+    #[test]
+    fn snapshot_json_rejects_malformed_unknown_and_non_string_values() {
+        for snapshot in [
+            "not-json",
+            r#"{"mood":"低落"}"#,
+            r#"{"personality":42}"#,
+            r#"{"personality":null}"#,
+        ] {
+            assert!(matches!(
+                AgentIdentity::from_snapshot_json(1, at(), snapshot),
+                Err(IdentityError::InvalidSnapshot(_)) | Err(IdentityError::UnknownField(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn snapshot_json_rejects_empty_or_oversized_values() {
+        assert!(matches!(
+            AgentIdentity::from_snapshot_json(1, at(), r#"{"personality":"  "}"#),
+            Err(IdentityError::EmptyValue {
+                field: IdentityFieldKey::Personality
+            })
+        ));
+        let too_long = "字".repeat(IdentityFieldKey::Interests.spec().max_chars + 1);
+        let snapshot = serde_json::json!({ "interests": too_long }).to_string();
+        assert!(matches!(
+            AgentIdentity::from_snapshot_json(1, at(), &snapshot),
+            Err(IdentityError::ValueTooLong {
+                field: IdentityFieldKey::Interests,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn snapshot_json_rejects_duplicate_canonical_aliases() {
+        assert_eq!(
+            AgentIdentity::from_snapshot_json(1, at(), r#"{"personality":"慢热","性格":"INFP"}"#),
+            Err(IdentityError::DuplicateField {
                 field: IdentityFieldKey::Personality
             })
         );
