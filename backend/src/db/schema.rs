@@ -3,8 +3,8 @@
 //! 当前 schema 完全由 [`init_schema`] 里的 `CREATE TABLE IF NOT EXISTS` 定义（单一真源），
 //! 新库打开时直接建最新结构；历史逐版本迁移（v6~v16）已压平，不再保留。
 //! 仅 [`migrate`] 里保留 `v17`（删掉三张从未被读写的死表）、`v18`（`messages` 放开
-//! `role='tool'` 并改写历史工具结果行）、`v19`（失败轮次重试队列）与 `v20`
-//! （身份提案 / 版本审计）几段，与末尾的版本戳。
+//! `role='tool'` 并改写历史工具结果行）、`v19`（失败轮次重试队列）、`v20`
+//! （身份提案 / 版本审计）与 `v21`（未版本化身份的提案基线）几段，与末尾的版本戳。
 //!
 //! 取舍：旧版本库不再支持平滑升级，需重建（`rm` 后重跑）。对单人单库、且已迁移到最新
 //! 的项目，这比无限累积迁移代码更划算；早期图谱时代残留的 `entities` 等表本就不在本
@@ -16,7 +16,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 20;
+pub(crate) const SCHEMA_VERSION: i64 = 21;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -83,7 +83,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             risk_level           TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
             status               TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'applied', 'rolled_back')),
             proposer             TEXT NOT NULL,
-            base_version         INTEGER NOT NULL CHECK (base_version >= 1),
+            base_version         INTEGER NOT NULL CHECK (base_version >= 0),
             created_at           TEXT NOT NULL,
             decided_at           TEXT,
             applied_at           TEXT,
@@ -253,7 +253,7 @@ fn migrate(conn: &Connection) -> Result<()> {
                 risk_level           TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
                 status               TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'applied', 'rolled_back')),
                 proposer             TEXT NOT NULL,
-                base_version         INTEGER NOT NULL CHECK (base_version >= 1),
+                base_version         INTEGER NOT NULL CHECK (base_version >= 0),
                 created_at           TEXT NOT NULL,
                 decided_at           TEXT,
                 applied_at           TEXT,
@@ -280,6 +280,48 @@ fn migrate(conn: &Connection) -> Result<()> {
                 ON self_profile_versions(created_at);",
         )?;
         tracing::info!("迁移 v20：新增身份变更提案与版本审计表");
+    }
+
+    // v21：提案的 `base_version` 允许 0，表示当前身份仍是未写入版本审计表的旧 KV。
+    // 真实库的提案表为空，因此直接重建表最干净；若已有数据，原样迁移，不丢审计。
+    if version < 21 && table_exists(conn, "identity_change_proposals")? {
+        conn.execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             BEGIN;
+             CREATE TABLE identity_change_proposals_new (
+                 id                   TEXT PRIMARY KEY,
+                 field_key            TEXT NOT NULL,
+                 before_value         TEXT,
+                 after_value          TEXT NOT NULL,
+                 reason               TEXT NOT NULL,
+                 evidence             TEXT NOT NULL,
+                 confidence           TEXT NOT NULL,
+                 risk_level           TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
+                 status               TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'applied', 'rolled_back')),
+                 proposer             TEXT NOT NULL,
+                 base_version         INTEGER NOT NULL CHECK (base_version >= 0),
+                 created_at           TEXT NOT NULL,
+                 decided_at           TEXT,
+                 applied_at           TEXT,
+                 rolled_back_at       TEXT
+             );
+             INSERT INTO identity_change_proposals_new
+                 SELECT id, field_key, before_value, after_value, reason, evidence,
+                        confidence, risk_level, status, proposer, base_version,
+                        created_at, decided_at, applied_at, rolled_back_at
+                 FROM identity_change_proposals;
+             DROP TABLE identity_change_proposals;
+             ALTER TABLE identity_change_proposals_new RENAME TO identity_change_proposals;
+             CREATE INDEX IF NOT EXISTS idx_identity_proposals_status_created
+                 ON identity_change_proposals(status, created_at);
+             CREATE INDEX IF NOT EXISTS idx_identity_proposals_field_status
+                 ON identity_change_proposals(field_key, status);
+             CREATE INDEX IF NOT EXISTS idx_identity_proposals_base_version
+                 ON identity_change_proposals(base_version);
+             COMMIT;
+             PRAGMA foreign_keys=ON;",
+        )?;
+        tracing::info!("迁移 v21：身份提案允许 base_version=0（未版本化身份）");
     }
 
     if version >= SCHEMA_VERSION {
@@ -559,5 +601,63 @@ mod tests {
             [],
         );
         assert!(version.is_err(), "非法 source 应被 CHECK 拒绝");
+    }
+
+    /// v21：旧 KV 身份没有版本记录，提案必须能用 `base_version=0` 表达这一事实，
+    /// 且迁移不能丢掉已有提案。
+    #[test]
+    fn v21_allows_unversioned_base_and_preserves_proposals() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE identity_change_proposals (
+                id TEXT PRIMARY KEY,
+                field_key TEXT NOT NULL,
+                before_value TEXT,
+                after_value TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                risk_level TEXT NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
+                status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'applied', 'rolled_back')),
+                proposer TEXT NOT NULL,
+                base_version INTEGER NOT NULL CHECK (base_version >= 1),
+                created_at TEXT NOT NULL,
+                decided_at TEXT,
+                applied_at TEXT,
+                rolled_back_at TEXT
+            );
+            INSERT INTO identity_change_proposals
+                (id, field_key, after_value, reason, evidence, confidence, risk_level,
+                 status, proposer, base_version, created_at)
+                VALUES ('p1','voice_style','更短','测试','[\"m1\"]','medium',
+                        'low','pending','test',1,'t');
+            INSERT INTO meta (key, value) VALUES ('schema_version','20');",
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM identity_change_proposals WHERE id='p1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "迁移不能丢已有提案");
+
+        conn.execute(
+            "INSERT INTO identity_change_proposals
+             (id, field_key, after_value, reason, evidence, confidence, risk_level,
+              status, proposer, base_version, created_at)
+             VALUES ('p2','voice_style','更短','测试','[\"m1\"]','medium',
+                     'low','pending','test',0,'t')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            meta::get(&conn, KEY_SCHEMA_VERSION).unwrap().unwrap(),
+            SCHEMA_VERSION.to_string()
+        );
     }
 }

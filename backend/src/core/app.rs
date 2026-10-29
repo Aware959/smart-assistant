@@ -7,9 +7,12 @@
 //!   聊天接口（对话 / 记忆写入 / 纯 LLM 决策 / 上下文取数）；
 //! - [`crate::core::session::Sessions`]（`session`）：会话服务（入站解析 / 重置 / 消息落库 /
 //!   主动候选派生）。
+//! - [`crate::core::identity_service::IdentityService`]（`identity`）：身份提案校验、
+//!   限流与审批状态转换；不直接应用身份变更。
 //!
 //! db 不走壳：各服务经装配对象拿到句柄，能力方法全部收敛在服务上，调用方拿不到
-//! 裸数据连接。本层不提供管理门面——对外能力只剩主线聊天（`chat`）。
+//! 裸数据连接。本层不提供管理门面——对外只交出已装配的服务，由调用方直接调用
+//! 各自的方法。
 
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +24,8 @@ pub struct App {
     pub chat: Arc<crate::core::agent::Agent>,
     /// 会话服务（入站解析 / 重置 / 消息落库）。
     pub session: Arc<crate::core::session::Sessions>,
+    /// 身份提案与审批服务（只生成 / 审批提案，不直接修改当前身份）。
+    pub identity: Arc<crate::core::identity_service::IdentityService>,
 }
 
 impl App {
@@ -38,7 +43,8 @@ impl App {
         let session = Arc::new(crate::core::session::Sessions::new(db.clone())?);
         let llm = Arc::new(crate::llm::chat::Llm);
         let memory = Arc::new(crate::core::memory::Store::new(db.clone()));
-        let profile = Arc::new(crate::core::self_profile::Profile::new(db));
+        let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+        let identity = Arc::new(crate::core::identity_service::IdentityService::new(db));
         // 贴纸目录是文件不是状态：装配时读一次，之后 `sa-sticker fetch` 拉的新目录
         // 要重启进程才生效。文件不存在 = 没拉过 = 贴纸能力关闭，不是错误。
         let stickers = crate::core::sticker::StickerCatalog::load_default();
@@ -56,6 +62,10 @@ impl App {
             profile,
             stickers,
         ));
-        Ok(Self { chat, session })
+        Ok(Self {
+            chat,
+            session,
+            identity,
+        })
     }
 }

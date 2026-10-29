@@ -116,6 +116,29 @@ pub(crate) fn list_proposals_by_status(
         .map_err(Into::into)
 }
 
+/// 指定字段在 `[since, until]` 内是否已有提案（不论状态）。
+///
+/// 身份服务用这个查询执行字段级冷却，避免被拒绝的提案不计入频率限制。
+pub(crate) fn has_proposal_for_field_between(
+    db: &Database,
+    field_key: &str,
+    since: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Result<bool> {
+    if since > until {
+        return Ok(false);
+    }
+    let exists: i64 = db.conn().query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM identity_change_proposals
+            WHERE field_key = ?1 AND created_at >= ?2 AND created_at <= ?3
+        )",
+        rusqlite::params![field_key, since.to_rfc3339(), until.to_rfc3339()],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
 /// 只更新审批决定（pending → approved / rejected），不动应用时间。
 pub(crate) fn decide_proposal(
     db: &Database,
@@ -356,6 +379,22 @@ mod tests {
         assert!(list_proposals_by_status(&db, "unknown", 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn field_cooldown_query_includes_all_statuses_and_respects_window() {
+        let db = Database::in_memory().unwrap();
+        let mut rejected = proposal("rejected", "rejected");
+        rejected.created_at = at(1);
+        insert_proposal(&db, &rejected).unwrap();
+
+        assert!(
+            has_proposal_for_field_between(&db, "voice_style", at(0), at(2)).unwrap(),
+            "rejected 提案也必须计入冷却"
+        );
+        assert!(!has_proposal_for_field_between(&db, "personality", at(0), at(2)).unwrap());
+        assert!(!has_proposal_for_field_between(&db, "voice_style", at(2), at(3)).unwrap());
+        assert!(!has_proposal_for_field_between(&db, "voice_style", at(2), at(0)).unwrap());
     }
 
     #[test]
