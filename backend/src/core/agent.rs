@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use crate::core::agent_role::AgentRole;
 use crate::core::context::{self, AgentContext};
 use crate::core::memory::{MemoryKind, MemoryRecord, Store};
 use crate::core::schema::message::{ChatCall, ChatMessage};
@@ -315,13 +316,14 @@ impl Agent {
         //
         // 插话游标从本条用户消息起算：这一轮在跑的时候用户还能接着说，那些消息到达即落库
         // （通道侧），由循环在迭代边界并进 live 上下文（见 [`ingest_steers`]）。
-        let tools = crate::llm::tool::definitions(&self.stickers);
+        let tools = crate::llm::tool::definitions_for(AgentRole::Conversation, &self.stickers);
         let (delivered, last_memory) = self.run_tool_loop(
             &session.id,
             &user_message_id,
             messages,
             &tools,
             ToolPolicy::MustReply,
+            AgentRole::Conversation,
             Some(user_message_id.clone()),
             deliver,
         )?;
@@ -395,13 +397,14 @@ impl Agent {
             "主动决策：提示词已组装"
         );
 
-        let tools = crate::llm::tool::proactive_definitions();
+        let tools = crate::llm::tool::definitions_for(AgentRole::Proactive, &self.stickers);
         let (delivered, _) = self.run_tool_loop(
             session_id,
             "",
             messages,
             &tools,
             ToolPolicy::MayStaySilent,
+            AgentRole::Proactive,
             // 主动轮次不并入用户消息：它的提示词是"该不该开口"的主动语境，
             // 用户此刻真发了话该由对话轮次接（那一轮会自己起）。
             None,
@@ -434,6 +437,7 @@ impl Agent {
         mut messages: Vec<ChatMessage>,
         tools: &[genai::chat::Tool],
         tool_policy: ToolPolicy,
+        role: AgentRole,
         steer_after: Option<String>,
         mut deliver: F,
     ) -> Result<(Vec<Reply>, Option<MemoryRecord>)>
@@ -606,6 +610,7 @@ impl Agent {
                 );
                 let progress = match self.dispatch_call(
                     session_id,
+                    role,
                     call,
                     &tool_ctx,
                     &mut deliver,
@@ -683,16 +688,18 @@ impl Agent {
     ///
     /// 落库顺序由调用方把关（assistant 调用行先入库），本函数只负责本调用的结果行与投递；
     /// 任何失败都直接上抛，由调用方补行——见 [`Self::backfill_tool_rows`]。
+    #[allow(clippy::too_many_arguments)] // 角色与投递/配对管线同源；拆包只会让唯一调用点多写几行
     fn dispatch_call(
         &self,
         session_id: &str,
+        role: AgentRole,
         call: &ChatCall,
         tool_ctx: &dyn crate::llm::tool::ToolContext,
         deliver: &mut impl FnMut(&Reply) -> std::result::Result<Option<u8>, String>,
         delivered: &mut Vec<Reply>,
         paired: &mut Vec<String>,
     ) -> Result<CallProgress> {
-        match crate::llm::tool::dispatch(call, tool_ctx) {
+        match crate::llm::tool::dispatch_for(role, call, tool_ctx) {
             crate::llm::tool::ToolOutcome::Sent(text) => {
                 // 已投递的正文另记一条：这是用户实际看到的内容，
                 // 与"入参"分开记，便于核对投递前是否被归一化改写。

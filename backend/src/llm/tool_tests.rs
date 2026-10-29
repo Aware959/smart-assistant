@@ -1,4 +1,5 @@
 use super::*;
+use crate::core::agent_role::AgentRole;
 
 /// 记录写入调用的桩：把 remember 的入参抄下来，才能断言派发确实传对了。
 struct Stub {
@@ -132,6 +133,98 @@ fn recall_query_为空被拒绝() {
 fn 未知工具被拒绝而不是panic() {
     let out = dispatch(&call("rm_rf", serde_json::json!({})), &stub());
     assert!(matches!(out, ToolOutcome::Rejected(m) if m.contains("rm_rf")));
+}
+
+#[test]
+fn 身份演化角色越权调用发送工具被拒绝() {
+    for name in [
+        SEND_MESSAGE,
+        SEND_DICE,
+        SEND_STICKER,
+        GENERATE_IMAGE,
+        GENERATE_VOICE,
+        REMEMBER,
+    ] {
+        let out = dispatch_for(
+            AgentRole::IdentityEvolution,
+            &call(name, serde_json::json!({ "text": "越权", "key": "😀" })),
+            &sticker_stub(),
+        );
+        assert!(
+            matches!(out, ToolOutcome::Rejected(ref m)
+                if m.contains("identity_evolution") && m.contains(name)),
+            "身份角色调用 {name} 应被硬拒绝：{out:?}"
+        );
+    }
+}
+
+#[test]
+fn 身份演化角色仍可使用只读证据工具() {
+    let now = dispatch_for(
+        AgentRole::IdentityEvolution,
+        &call(GET_NOW, serde_json::json!({})),
+        &stub(),
+    );
+    assert!(matches!(now, ToolOutcome::Filled(t) if t == "2026-10-04 20:15"));
+
+    let recall = dispatch_for(
+        AgentRole::IdentityEvolution,
+        &call(
+            RECALL_MEMORY,
+            serde_json::json!({ "query": "用户近期的表达偏好" }),
+        ),
+        &stub(),
+    );
+    assert!(matches!(recall, ToolOutcome::Filled(t) if t == "· 喜欢手冲"));
+}
+
+#[test]
+fn 主动角色不能写记忆() {
+    let ctx = stub();
+    let out = dispatch_for(
+        AgentRole::Proactive,
+        &call(
+            REMEMBER,
+            serde_json::json!({ "kind": "trait", "content": "用户喜欢手冲" }),
+        ),
+        &ctx,
+    );
+    assert!(matches!(out, ToolOutcome::Rejected(_)));
+    assert!(ctx.writes.borrow().is_empty(), "越权调用不得写记忆");
+}
+
+#[test]
+fn 角色定义裁剪掉无权工具() {
+    let catalog = StickerCatalog::empty();
+    let conversation = definitions_for(AgentRole::Conversation, &catalog);
+    assert!(
+        conversation.iter().any(|d| d.name.as_str() == REMEMBER),
+        "对话角色应保留 remember"
+    );
+
+    let proactive = definitions_for(AgentRole::Proactive, &catalog);
+    assert!(
+        !proactive.iter().any(|d| d.name.as_str() == REMEMBER),
+        "主动角色不应看到 remember"
+    );
+
+    let evolution = definitions_for(AgentRole::IdentityEvolution, &catalog);
+    let names = evolution
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec![GET_NOW, RECALL_MEMORY]);
+    assert!(
+        !names.contains(&SEND_MESSAGE),
+        "身份角色不应看到任何发送工具"
+    );
+}
+
+#[test]
+fn 主动工具集与主动角色白名单一致() {
+    let defs = proactive_definitions();
+    let names = defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>();
+    assert_eq!(names, AgentRole::Proactive.allowed_tools());
 }
 
 #[test]

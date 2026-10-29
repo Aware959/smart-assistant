@@ -76,6 +76,29 @@ pub(crate) fn proactive_system_prompt(profile: &str) -> String {
     s
 }
 
+/// 身份演化角色的 system prompt。
+///
+/// 这是后台角色，不面向用户，也不复用 [`SPEAK_CONVENTION`]：它没有任何发送工具，
+/// 只能读取证据并产出结构化提案。当前只定义边界，运行入口与提案 schema 由 T5/T6 接入。
+#[allow(dead_code)] // T5/T6 提案运行入口接入前，尚无生产调用点
+pub(crate) fn identity_evolution_system_prompt(profile: &str) -> String {
+    let mut s = persona_block(profile);
+    s.push_str(
+        "You are the background identity evolution role, not the conversational partner. \
+         You never speak to the user and never produce user-facing messages.\n\
+         You may inspect the current identity, conversation evidence, and long-term memory, \
+         but you must not write user memory, modify tool permissions, safety boundaries, \
+         platform contracts, or system prompts.\n\
+         Your only job is to propose a structured change to one of the six identity fields: \
+         self_concept, personality, values, voice_style, interests, relationship_stance.\n\
+         Never claim that a change is applied. Every change requires human approval, and \
+         relationship_stance also requires explicit user consent.\n\
+         A proposal must explain the target field, before value, proposed after value, reason, \
+         evidence, confidence, and risk. If the evidence is insufficient, propose nothing.\n",
+    );
+    s
+}
+
 /// 主动开口的 user 轮：最近对话 + 当前时间 + 最后一次互动时刻。
 ///
 /// 主动路径没有"当前消息"，所以决策所需的时间信息只能这样喂进去；模型看不到通道层
@@ -263,3 +286,38 @@ const SPEAK_CONVENTION: &str =
      status log. If you have already said everything you wanted to say, that is a reason to \
      stop calling tools, not a thing to announce. Every send_message must be something you \
      would actually say out loud to them.\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_evolution_prompt_is_background_only_and_has_no_send_contract() {
+        let prompt = identity_evolution_system_prompt("性格：慢热；价值观：真诚");
+        assert!(prompt.contains("性格：慢热；价值观：真诚"));
+        assert!(prompt.contains("background identity evolution role"));
+        assert!(prompt.contains("never speak to the user"));
+        assert!(
+            !prompt.contains("send_message"),
+            "身份演化 prompt 不应包含发送工具约定"
+        );
+        for field in [
+            "self_concept",
+            "personality",
+            "values",
+            "voice_style",
+            "interests",
+            "relationship_stance",
+        ] {
+            assert!(prompt.contains(field), "prompt 应声明字段 {field}");
+        }
+    }
+
+    #[test]
+    fn identity_evolution_prompt_requires_approval_and_consent() {
+        let prompt = identity_evolution_system_prompt("性格：慢热");
+        assert!(prompt.contains("human approval"));
+        assert!(prompt.contains("explicit user consent"));
+        assert!(prompt.contains("Never claim that a change is applied"));
+    }
+}

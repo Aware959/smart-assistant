@@ -12,12 +12,16 @@
 //! - **写入工具** [`REMEMBER`]：模型主动沉淀一条长期记忆。改状态，但改的是
 //!   助手的记忆而不是用户可见的输出，所以归在"内部"这一侧。
 //!
+//! 工具是否可见、是否可执行由 [`crate::core::agent_role::AgentRole`] 决定：
+//! [`definitions_for`] 只下发角色白名单内的工具，[`dispatch_for`] 在派发前再校验一次。
+//!
 //! 终止判据**不依赖任何工具**：一轮响应没有 `tool_calls` 即结束
 //! （与 OpenAI Agents SDK / Anthropic 的 `stop_reason != tool_use` 同构）。
 //! 曾评估过 `finish` 工具做乐观终止，实测命中率仅 1/10，不足以承担判据。
 
 use genai::chat::Tool;
 
+use crate::core::agent_role::AgentRole;
 use crate::core::memory::{MemoryKind, WriteKind};
 use crate::core::schema::message::ChatCall;
 use crate::core::sticker::StickerCatalog;
@@ -120,13 +124,24 @@ pub fn definitions(stickers: &StickerCatalog) -> Vec<Tool> {
     defs
 }
 
-/// 主动开口路径的工具集：去掉 `remember`。
+/// 按 Agent 角色裁剪工具定义。
+///
+/// 这是第一道边界：模型根本看不到无权使用的工具。派发前还有第二道硬校验
+/// （[`dispatch_for`]），防止模型幻觉调用未下发的工具。
+pub fn definitions_for(role: AgentRole, stickers: &StickerCatalog) -> Vec<Tool> {
+    definitions(stickers)
+        .into_iter()
+        .filter(|def| role.allows_tool(def.name.as_str()))
+        .collect()
+}
+
+/// 主动开口路径的工具集：去掉 `remember` 与非文本输出。
 ///
 /// 主动路径没有新的用户输入可沉淀——`remember` 的来源消息 id 为空，写出来的记忆
 /// 会是一条无源事实，且"从自己单方面的推断里记用户的事"本就不该发生。其余三个
 /// 工具照旧：说话走 `send_message`，需要时可按需查时间、查记忆。
 pub fn proactive_definitions() -> Vec<Tool> {
-    vec![send_message_tool(), get_now_tool(), recall_memory_tool()]
+    definitions_for(AgentRole::Proactive, &StickerCatalog::empty())
 }
 
 fn send_message_tool() -> Tool {
@@ -334,6 +349,19 @@ fn remember_tool() -> Tool {
 
 /// 执行一次工具调用。
 pub fn dispatch(call: &ChatCall, ctx: &dyn ToolContext) -> ToolOutcome {
+    dispatch_for(AgentRole::Conversation, call, ctx)
+}
+
+/// 按角色执行一次工具调用；越权调用在进入任何业务分支前就被拒绝。
+pub fn dispatch_for(role: AgentRole, call: &ChatCall, ctx: &dyn ToolContext) -> ToolOutcome {
+    if !role.allows_tool(&call.fn_name) {
+        return ToolOutcome::Rejected(format!(
+            "角色 {} 无权调用工具 {}",
+            role.as_str(),
+            call.fn_name
+        ));
+    }
+
     match call.fn_name.as_str() {
         SEND_MESSAGE => match call.arg_str("text") {
             Some(raw) => {
