@@ -13,14 +13,14 @@
 //! - 无 AppSecret，只能扫码登录；token 失效（会话过期）后需重新扫码；
 //! - **主动推送是"窗口式"的**：需要用户先发消息拿到 `context_token`，服务端缓存后
 //!   可在窗口内（约 24h / 10 次外发的保守取值）主动发送；超窗或超次数须等用户
-//!   再次入站刷新。对外表现由 [`super::IlinkRegistry`] 管理；
+//!   再次入站刷新。对外表现由 [`push`] 模块管理；
 //! - 每个请求头需携带随机 `X-WECHAT-UIN`。
 
 mod protocol;
 mod push;
 mod session;
 
-pub(crate) use push::{push_send, set_session};
+pub(crate) use push::{push_send, pushable, set_session};
 pub(crate) use session::SavedSession;
 
 use std::sync::Arc;

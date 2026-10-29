@@ -800,5 +800,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "sessions_tests.rs"]
-mod sessions_tests;
+#[path = "sessions_runtime_tests.rs"]
+mod sessions_runtime_tests;

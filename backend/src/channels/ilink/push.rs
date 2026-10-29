@@ -1,14 +1,59 @@
 //! iLink 主动推送（窗口式）：维护登录会话 + 每个用户的最近 context_token 缓存。
 //!
 //! iLink 的主动发送是"窗口式"的：用户先发消息拿到 `context_token`，缓存后可在窗口内
-//! （约 24h / `ILINK_MAX_SENDS_PER_REFRESH` 次的保守取值）主动发送；超窗或超次数须等
-//! 用户再次入站刷新。窗口可用性由 [`super::super::IlinkContact::is_fresh`] 判定。
+//! （约 24h / `MAX_SENDS_PER_REFRESH` 次的保守取值）主动发送；超窗或超次数须等
+//! 用户再次入站刷新。窗口可用性由 [`IlinkContact::is_fresh`] 判定。
 
-use super::super::{IlinkContact, IlinkRegistry};
 use super::protocol;
 use super::session::SavedSession;
 use super::DEFAULT_BASE;
 use crate::config::Config;
+use std::sync::OnceLock;
+
+/// 每次入站刷新后，最多允许的主动外发条数（协议窗口约束的保守取值）。
+const MAX_SENDS_PER_REFRESH: usize = 10;
+
+#[derive(Default)]
+struct IlinkRegistry {
+    sess: Option<SavedSession>,
+    contacts: std::collections::HashMap<String, IlinkContact>,
+}
+
+#[derive(Clone)]
+struct IlinkContact {
+    context_token: String,
+    /// 该 token 最后被（入站消息）刷新的时刻。
+    observed_at: chrono::DateTime<chrono::Utc>,
+    /// 自上次刷新以来已主动发送的条数。
+    sends_since_refresh: usize,
+}
+
+impl IlinkContact {
+    /// context_token 是否仍在新鲜窗口内（时效 + 次数上限）。
+    fn is_fresh(&self, now: chrono::DateTime<chrono::Utc>, max_age_hours: i64) -> bool {
+        let age = chrono::Duration::max(
+            now.signed_duration_since(self.observed_at),
+            chrono::Duration::zero(),
+        );
+        age < chrono::Duration::hours(max_age_hours)
+            && self.sends_since_refresh < MAX_SENDS_PER_REFRESH
+    }
+}
+
+fn push_registry() -> &'static std::sync::Mutex<Option<IlinkRegistry>> {
+    static REGISTRY: OnceLock<std::sync::Mutex<Option<IlinkRegistry>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 该用户是否持有仍在窗口内的 context_token。
+pub(crate) fn pushable(external_id: &str) -> bool {
+    let cfg = Config::get();
+    let reg = push_registry().lock().unwrap_or_else(|p| p.into_inner());
+    reg.as_ref()
+        .and_then(|r| r.contacts.get(external_id))
+        .map(|c| c.is_fresh(chrono::Utc::now(), cfg.ilink_context_max_age_hours))
+        .unwrap_or(false)
+}
 
 /// 登录会话更新：登录/重登录后调用（重登录时清空全部用户 token 缓存）。
 pub(crate) fn set_session(sess: SavedSession, drop_contacts: bool) {
@@ -93,8 +138,4 @@ pub(crate) async fn push_send(external_id: &str, text: &str) -> Result<(), Strin
             Err(e)
         }
     }
-}
-
-fn push_registry() -> &'static std::sync::Mutex<Option<IlinkRegistry>> {
-    &super::super::shared_push().ilink
 }

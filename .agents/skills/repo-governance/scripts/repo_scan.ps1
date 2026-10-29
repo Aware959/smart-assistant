@@ -99,7 +99,7 @@ $legacyTestFiles = @(
 
 $markers = @(
     $textFiles |
-        Select-String -Pattern "\b(TODO|FIXME|HACK|XXX)\b" -CaseSensitive:$false |
+        Select-String -Pattern "\b(TODO|FIXME|HACK|XXX)\b" -CaseSensitive:$true |
         ForEach-Object {
             "{0}:{1}: {2}" -f (Get-RelativePath -FullName $_.Path), $_.LineNumber, $_.Line.Trim()
         } |

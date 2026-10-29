@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::retry::SendRetry;
 use super::*;
 
 /// 零等待的策略：让重试次数的断言不掺入真实退避时长。

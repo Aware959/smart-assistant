@@ -6,7 +6,7 @@
 //!   对应模块）、`llm` 模型调用（对话 / 向量化）、`channels` / `api` 传输层，
 //!   `config` 环境配置、`error` 共享错误类型。
 //!
-//! 依赖方向（硬规则，见 `AGENTS.md`「分层与依赖」）：core 不反向依赖传输层
+//! 依赖方向由 `tests/layer_guard.rs` 固化：core 不反向依赖传输层
 //! （`channels` / `api`），唯一例外是主动外发的具体能力 [`channels::ChannelsPusher`]；
 //! 传输层直接持主线聊天服务（[`core::agent::Agent`]）与必要的服务引用走方法调用，
 //! 不碰 db，数据一律经各服务方法读写，db 不出壳。
