@@ -23,7 +23,7 @@ fn banner(title: &str) {
 
 fn usage() {
     println!(
-        "用法:\n  sa-sticker fetch <贴纸包名>...  拉取贴纸包并写入目录文件（覆盖）\n  sa-sticker show                 打印当前目录"
+        "用法:\n  sa-sticker fetch <贴纸包名>...  拉取贴纸包并写入目录文件（覆盖）\n  sa-sticker show                 打印当前目录\n  sa-sticker --version            打印版本"
     );
 }
 
@@ -95,6 +95,11 @@ fn cmd_show(cfg: &Config) -> ExitCode {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("{}", smart_assistant::utils::version::display());
+        return ExitCode::SUCCESS;
+    }
+
     dotenvy::dotenv().ok();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cfg = Config::get();

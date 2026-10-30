@@ -93,6 +93,11 @@ fn cmd_rebuild(cfg: &Config, force: bool) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("{}", smart_assistant::utils::version::display());
+        return ExitCode::SUCCESS;
+    }
+
     dotenvy::dotenv().ok();
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -117,7 +122,7 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            println!("用法:\n  sa-mem check          巡检签名与现状（只读）\n  sa-mem rebuild [--force]  重建 memory_vectors（建议先停 server）");
+            println!("用法:\n  sa-mem check          巡检签名与现状（只读）\n  sa-mem rebuild [--force]  重建 memory_vectors（建议先停 server）\n  sa-mem --version       打印版本");
             ExitCode::FAILURE
         }
     }

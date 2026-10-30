@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use smart_assistant::config::Config;
 use smart_assistant::utils::runtime::bootstrap;
+use smart_assistant::utils::version;
 use smart_assistant::App;
 
 /// 优雅收尾上限：超过直接强制退出（阻塞线程池里的 LLM 调用等不到结果时兜底）。
@@ -27,6 +28,11 @@ static EXIT_SIGNAL_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("{}", version::display());
+        return;
+    }
+
     // 启动脚手架：panic hook + dotenv + 文本/链路日志 + 心跳探针。
     let _rt = bootstrap();
 

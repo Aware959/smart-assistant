@@ -79,6 +79,8 @@ pub fn bootstrap() -> Runtime {
     // 加载运行目录下的 .env 文件（不存在则静默跳过，环境变量优先）。
     dotenvy::dotenv().ok();
 
+    tracing::info!(version = %crate::utils::version::VERSION, "application started");
+
     // 全局 panic hook：把 panic 位置（含线程名）通过 tracing 记录，便于与各阶段
     // 日志对照时间轴定位崩溃环节。默认 hook 同时保留，panic 信息也会打到 stderr。
     let default_hook = std::panic::take_hook();

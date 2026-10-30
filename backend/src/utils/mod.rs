@@ -7,3 +7,4 @@ pub mod runtime;
 pub mod textflow;
 pub mod time;
 pub mod trace;
+pub mod version;

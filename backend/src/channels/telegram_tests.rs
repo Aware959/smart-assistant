@@ -689,6 +689,7 @@ fn 解析身份管理命令并区分普通消息() {
         parse_command("/rollback 7"),
         Ok(Some(Command::Rollback { version: Some(7) }))
     );
+    assert_eq!(parse_command("/version"), Ok(Some(Command::Version)));
     assert_eq!(
         parse_command("/identity@my_bot"),
         Ok(Some(Command::Identity)),
@@ -760,7 +761,12 @@ fn 非白名单管理员不能查看或修改身份() {
             "身份管理动作都必须经过管理员门禁"
         );
     }
-    for command in [Command::Start, Command::New, Command::Help] {
+    for command in [
+        Command::Start,
+        Command::New,
+        Command::Version,
+        Command::Help,
+    ] {
         assert!(!is_admin_command(&command));
     }
     assert!(admin_denied().contains("只允许白名单管理员"));

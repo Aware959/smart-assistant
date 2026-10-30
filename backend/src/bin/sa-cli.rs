@@ -8,6 +8,11 @@ use smart_assistant::{App, ChatInput};
 /// - 无参数：进入交互式 REPL（流式输出到终端）；
 /// - `sa-cli "一句话"`：单发问答，打印完整回复后退出。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("{}", smart_assistant::utils::version::display());
+        return Ok(());
+    }
+
     // 加载运行目录下的 .env 文件（不存在则静默跳过，环境变量优先）。
     dotenvy::dotenv().ok();
 

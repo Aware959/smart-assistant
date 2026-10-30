@@ -15,6 +15,7 @@ pub(super) enum Command {
     Approve { id: String, consent: bool },
     Reject { id: String },
     Rollback { version: Option<i64> },
+    Version,
     Help,
 }
 
@@ -64,6 +65,7 @@ pub(super) fn parse_command(text: &str) -> Result<Option<Command>, String> {
             Command::Rollback { version }
         }
         "help" => Command::Help,
+        "version" => Command::Version,
         _ => Command::Help,
     };
     Ok(Some(command))
@@ -138,7 +140,7 @@ pub(super) fn format_rollback(version: &IdentityVersionView) -> String {
 }
 
 pub(super) fn format_help() -> String {
-    "可用命令：\n/identity 查看当前身份（仅管理员）\n/proposals 查看待审批提案（仅管理员）\n/approve <id> [consent|--consent] 批准提案（仅管理员；关系姿态必须带 consent）\n/reject <id> 拒绝提案（仅管理员）\n/rollback 撤销最新生效提案（仅管理员）\n/rollback <version> 恢复到指定历史版本（仅管理员）\n/new 开始新对话".to_string()
+    "可用命令：\n/identity 查看当前身份（仅管理员）\n/proposals 查看待审批提案（仅管理员）\n/approve <id> [consent|--consent] 批准提案（仅管理员；关系姿态必须带 consent）\n/reject <id> 拒绝提案（仅管理员）\n/rollback 撤销最新生效提案（仅管理员）\n/rollback <version> 恢复到指定历史版本（仅管理员）\n/version 查看程序版本\n/new 开始新对话".to_string()
 }
 
 pub(super) fn execute_command(
@@ -186,6 +188,7 @@ pub(super) fn execute_command(
                 .map_err(|e| e.to_string())?;
             Ok(format_rollback(&result))
         }
+        Command::Version => Ok(crate::utils::version::display()),
         Command::Help => Ok(format_help()),
     }
 }
