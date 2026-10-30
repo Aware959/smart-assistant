@@ -49,7 +49,6 @@ Use this checklist after the deterministic scanner has produced its summary. Rea
 
 - `README.md`: introduction, components, quick start only.
 - `docs/architecture.md`: update only when explicitly requested.
-- `docs/api-doc.md`: update only when explicitly requested.
 - `docs/archive/`: point-in-time records; do not update them to match current code.
 - `backend/.env.example`: every new environment variable must be represented.
 

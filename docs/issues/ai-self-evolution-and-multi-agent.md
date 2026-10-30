@@ -5,7 +5,7 @@
 > 后台演化默认关闭，只在 `sa-link` 中按周期运行。
 > 日期：2026-10-29（初稿 2026-10-27）。  
 > 适用范围：`smart-assistant` 当前 Telegram 主线；共享代码可演进，但不主动改 Web / iLink。  
-> 关联文档：`docs/architecture.md`、`docs/问题和待决策.md`、`docs/archive/agent-tool-loop-architecture-review.md`。
+> 关联文档：`docs/architecture.md`、`docs/archive/agent-tool-loop-architecture-review.md`。
 
 ---
 

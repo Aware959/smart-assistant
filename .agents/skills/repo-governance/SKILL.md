@@ -67,7 +67,7 @@ The per-edit guard is intentionally separate from the audit. A full scan on ever
 
 - The active development line is Telegram. Do not modify `backend/src/api/**`, `backend/src/channels/ilink/**`, or `frontend/**` unless the user explicitly asks for those areas.
 - Shared code may be maintained, but verify Telegram behavior; do not add compatibility branches for Web/iLink.
-- Keep `README.md` for introduction only. Do not update `docs/architecture.md` or `docs/api-doc.md` unless explicitly requested.
+- Keep `README.md` for introduction only. Do not update `docs/architecture.md` unless explicitly requested.
 - `docs/archive/` directory names must be English words. Archived documents are point-in-time records and do not need to track current code.
 - New environment variables must be added to `backend/.env.example`.
 - Do not use the real `smart_assistant.db` for validation. Use `Database::in_memory()` or a temporary `SMART_ASSISTANT_DB`; clean up test messages, memories, sessions, and vectors.

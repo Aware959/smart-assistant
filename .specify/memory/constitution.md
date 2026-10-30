@@ -70,8 +70,7 @@ Rationale：改动范围可预期，审查聚焦在"改了什么"，而不是被
 ## 补充约束（文档与环境变量）
 
 - `README.md` 只保留项目介绍（简介 / 组成 / 快速启动）。
-- `docs/api-doc.md`（后端接口、数据模型、环境变量配置）与 `docs/architecture.md` MUST 只在
-  用户明确要求同步时才更新，不随代码实现变动自动跟进。
+- `docs/architecture.md` MUST 只在用户明确要求同步时才更新，不随代码实现变动自动跟进。
 - `docs/archive/` 存放已定稿但不再随代码跟进的文档，目录名一律用英文单词，归档文档不再更新。
 - `AGENTS.md` 只写长期稳定的硬约束，MUST NOT 在其中冻结随代码演进的架构规则。
 - 新增任何环境变量 MUST 同步到 `backend/.env.example`。

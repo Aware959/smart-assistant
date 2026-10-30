@@ -17,4 +17,4 @@ make test     # 后端测试
 
 `scripts/dev.ps1` 与 `Makefile` 等价（无 make 时直接 `powershell -File scripts/dev.ps1`）。后端日志写入 `.dev-server.log`；退出 `npm run dev` 时自动停止本次启动的后端。
 
-接口与配置详见 [`docs/api-doc.md`](docs/api-doc.md)；开发约定见 [`AGENTS.md`](AGENTS.md)。
+开发约定见 [`AGENTS.md`](AGENTS.md)。
