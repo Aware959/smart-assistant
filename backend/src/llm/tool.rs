@@ -23,7 +23,7 @@ use genai::chat::Tool;
 
 use crate::core::agent_role::AgentRole;
 use crate::core::memory::{MemoryKind, WriteKind};
-use crate::core::schema::message::ChatCall;
+use crate::core::message::ChatCall;
 use crate::core::sticker::StickerCatalog;
 
 /// 对外输出工具：模型调用它即向用户投递一条消息。

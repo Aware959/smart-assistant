@@ -28,6 +28,6 @@ pub mod api;
 
 pub use crate::core::agent::{Agent, ChatInput, ChatOutput, Reply};
 pub use crate::core::app::App;
-pub use crate::core::intent::IntentCandidate;
 pub use crate::core::memory::{MemoryHit, MemoryRecord};
-pub use crate::core::schema::message::ChatMessage;
+pub use crate::core::message::ChatMessage;
+pub use crate::core::proactive::ProactiveCandidate;

@@ -29,12 +29,12 @@ use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::session::Sessions;
 
-/// 意图候选：某一外部用户（channel × external_id）当前的状态快照。
+/// 主动开口候选：某一外部用户（channel × external_id）当前的状态快照。
 ///
-/// 由消息时间线派生、经频率过滤后产出，意图引擎（决策 / 派发）消费；
-/// 业务形状归属意图领域，不长期在 SQL 层。
+/// 由消息时间线派生、经频率过滤后产出，主动开口引擎（决策 / 派发）消费；
+/// 业务形状归属主动开口领域，不长期在 SQL 层。
 #[derive(Debug, Clone)]
-pub struct IntentCandidate {
+pub struct ProactiveCandidate {
     pub channel: String,
     pub external_id: String,
     pub session_id: String,
@@ -113,7 +113,7 @@ async fn run_once(chat: Arc<Agent>, session: &Sessions, pusher: &ChannelsPusher)
 ///
 /// 上下文（最近历史 / 当前时间 / 最后互动时刻）由 [`Agent::proactive_stream`] 内部
 /// 组装；记忆不再预召回，改由模型按需调 `recall_memory`。
-async fn propose(chat: Arc<Agent>, cand: &IntentCandidate) -> Vec<String> {
+async fn propose(chat: Arc<Agent>, cand: &ProactiveCandidate) -> Vec<String> {
     let trace_id = crate::utils::trace::new_id();
     let step_start = std::time::Instant::now();
     tracing::debug!(

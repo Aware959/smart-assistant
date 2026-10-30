@@ -21,10 +21,10 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 
-use crate::core::intent::{filter, IntentCandidate};
 use crate::db::message::Message as DbMessage;
 
 use super::{ConversationSession, MessageTurn, StoredMessage};
+use crate::core::proactive::{filter, ProactiveCandidate};
 use crate::db::{lock_db, Database};
 use crate::error::Result;
 
@@ -445,8 +445,8 @@ impl Sessions {
     ///
     /// 时间账本直接由 `messages` 派生，不再有独立状态表：候选人从 `channel_sessions`
     /// 取（有会话映射即候选），静默起点取该会话最后一条用户消息的**真实发出时刻**。
-    /// 判定规则见 [`crate::core::intent::filter::filter_eligible`]。
-    pub fn proactive_candidates(&self, now: DateTime<Utc>) -> Result<Vec<IntentCandidate>> {
+    /// 判定规则见 [`crate::core::proactive::filter::filter_eligible`]。
+    pub fn proactive_candidates(&self, now: DateTime<Utc>) -> Result<Vec<ProactiveCandidate>> {
         let rows = crate::db::channel::list_proactive_rows(&lock_db(&self.db))?;
         Ok(filter::filter_eligible(rows, now))
     }
@@ -622,7 +622,7 @@ mod tests {
         let failed = sessions
             .add_message(&s.id, "user", "这条要不要重试")
             .unwrap();
-        let calls = serde_json::to_string(&vec![crate::core::schema::message::ChatCall::new(
+        let calls = serde_json::to_string(&vec![crate::core::message::ChatCall::new(
             "c1",
             "send_message",
             serde_json::json!({}),

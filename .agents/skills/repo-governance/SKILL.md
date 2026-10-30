@@ -23,9 +23,10 @@ Use when the user asks for a repository review, a "复盘", a health check, a na
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .agents/skills/repo-governance/scripts/repo_scan.ps1
    ```
 
-4. Read only the files needed to verify scanner findings. Do not equate a large file with a bad design.
-5. Produce a concise report with severity, `file:line` evidence, whether the issue is new or pre-existing, fix cost, risk, and verification.
-6. Write the report to `docs/repo-governance-report.md` only when the user asked for a persisted report or the audit workflow calls for one.
+4. Review domain cohesion with [references/audit-checklist.md](references/audit-checklist.md). The scanner cannot decide whether a directory still represents a meaningful boundary.
+5. Read only the files needed to verify scanner and cohesion findings. Do not equate a large file with a bad design.
+6. Produce a concise report with severity, `file:line` evidence, whether the issue is new or pre-existing, fix cost, risk, and verification.
+7. Write the report to `docs/repo-governance-report.md` only when the user asked for a persisted report or the audit workflow calls for one.
 
 Audit is read-only by default. Do not rename, move, delete, or bulk-edit during audit.
 

@@ -64,7 +64,7 @@ fn 只取水位线之后的用户消息() {
             "",
             &crate::db::message::ToolMeta {
                 tool_calls: Some(
-                    serde_json::to_string(&vec![crate::core::schema::message::ChatCall::new(
+                    serde_json::to_string(&vec![crate::core::message::ChatCall::new(
                         "c1",
                         "send_message",
                         serde_json::json!({}),

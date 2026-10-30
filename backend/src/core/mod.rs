@@ -13,9 +13,8 @@
 //! - [`identity_service`]：身份提案校验、限流、审批与事务应用/回滚；
 //! - [`identity_evolution`]：后台身份演化 Agent（读取证据、生成至多一条提案）；
 //! - [`self_profile`]：AI 自我属性（性格/人格/三观/爱好，人设数据源）；
-//! - [`intent`]：意图判定引擎（是否开口：主动发起 / 回复后延续）；
-//! - [`schema`]：跨领域共享的值类型（无法归到单一领域），如 `message`
-//!   ——LLM 对话消息值契约（内核与模型能力的契约）；
+//! - [`proactive`]：主动开口引擎（节奏、候选过滤与通道派发）；
+//! - [`message`]：LLM 对话消息值契约（内核与模型能力的协议）；
 //! - [`app`]：组装层 `App`（纯装配，装配后组件直接持服务引用）；
 //! - 外部能力按具体类型直接接线：LLM = [`crate::llm::chat::Llm`]，
 //!   记忆 = [`crate::core::memory::Store`]，主动推送 = [`crate::channels::ChannelsPusher`]。
@@ -26,9 +25,9 @@ pub mod context;
 pub mod identity;
 pub mod identity_evolution;
 pub mod identity_service;
-pub mod intent;
 pub mod memory;
-pub mod schema;
+pub mod message;
+pub mod proactive;
 pub mod self_profile;
 pub mod session;
 pub mod sticker;

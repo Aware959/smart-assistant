@@ -8,21 +8,21 @@
 
 use chrono::{DateTime, Duration, Utc};
 
+use super::ProactiveCandidate;
 use crate::config::Config;
-use crate::core::intent::IntentCandidate;
 use crate::db::channel::ProactiveRow;
 
 /// 频率规则过滤：返回"当前值得考虑主动开口"的用户。
 ///
 /// 由调用方再按通道可推性（telegram 随时可推 / ilink 需新鲜 context_token）二次筛选。
-pub fn filter_eligible(rows: Vec<ProactiveRow>, now: DateTime<Utc>) -> Vec<IntentCandidate> {
+pub fn filter_eligible(rows: Vec<ProactiveRow>, now: DateTime<Utc>) -> Vec<ProactiveCandidate> {
     let cfg = Config::get();
     let min_silence = Duration::hours(cfg.intent_min_silence_hours);
     let max_idle = Duration::days(cfg.intent_max_idle_days);
     let min_gap = Duration::minutes(cfg.intent_min_minutes);
 
     rows.into_iter()
-        .map(|r| IntentCandidate {
+        .map(|r| ProactiveCandidate {
             channel: r.channel,
             external_id: r.external_id,
             session_id: r.session_id,

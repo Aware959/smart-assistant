@@ -75,7 +75,7 @@ async fn main() {
     #[cfg(any(feature = "telegram", feature = "ilink"))]
     if cfg.intent_enabled {
         tracing::info!("INTENT_ENABLED 已开启，启动意图判定引擎");
-        handles.push(tokio::spawn(smart_assistant::core::intent::run(
+        handles.push(tokio::spawn(smart_assistant::core::proactive::run(
             app.chat.clone(),
             app.session.clone(),
             Arc::new(smart_assistant::channels::ChannelsPusher),

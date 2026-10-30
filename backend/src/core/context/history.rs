@@ -4,7 +4,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::core::schema::message::{ChatCall, ChatMessage};
+use crate::core::message::{ChatCall, ChatMessage};
 use crate::core::session::MessageTurn;
 use crate::core::session::Sessions;
 use crate::error::Result;
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn turn_to_chat_restores_tool_roundtrip() {
         // assistant 轮携带工具调用列表，应还原成 role='assistant' + tool_calls。
-        let calls = serde_json::to_string(&vec![crate::core::schema::message::ChatCall::new(
+        let calls = serde_json::to_string(&vec![crate::core::message::ChatCall::new(
             "c1",
             "recall_memory",
             serde_json::json!({"q": "爱好"}),

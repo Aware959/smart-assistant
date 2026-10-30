@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use crate::core::agent_role::AgentRole;
-use crate::core::context::{self, AgentContext};
+use crate::core::context;
 use crate::core::memory::{MemoryKind, MemoryRecord, Store};
-use crate::core::schema::message::{ChatCall, ChatMessage};
+use crate::core::message::{ChatCall, ChatMessage};
 use crate::core::self_profile::Profile;
 use crate::core::session::Sessions;
 use crate::core::sticker::StickerCatalog;
@@ -277,10 +277,6 @@ impl Agent {
         // embedding + 向量检索，也不再每轮灌入 5 条大概率无关的记忆（实测平均 4.7 条
         // 里约 3.3 条是噪音）。代价是模型可能忘记调工具，这个风险由工具描述里的
         // 「不确定用户相关信息时先查」兜住。
-        let ctx = AgentContext {
-            history: history_turns,
-            memories: Vec::new(),
-        };
         let profile = self.profile.snapshot();
         tracing::info!(
             session = %session.id,
@@ -297,7 +293,7 @@ impl Agent {
         // assistant 轮必须带着 `tool_calls`——两者任缺其一，provider 都会按 400 拒绝
         // （这正是"工具结果里 tool_call_id 对不上"报错的来源）。所以这里只能 clone，
         // 不能再用 `ChatMessage::new(role, content)` 重造（那会把工具字段全丢掉）。
-        for turn in ctx.history.iter().chain(input.history.iter()) {
+        for turn in history_turns.iter().chain(input.history.iter()) {
             messages.push(turn.clone());
         }
         // 本条用户消息统一在末尾 push：重试场景下它已从历史里按 id 剔除（见上），这里补回，
@@ -1058,7 +1054,7 @@ impl crate::llm::tool::ToolContext for TurnTools<'_> {
     /// 回填**带 id**：模型要改写一条旧记忆时，唯一的 id 来源就是召回结果。
     fn recall(&self, query: &str) -> String {
         let started = std::time::Instant::now();
-        match context::fetch_recall(self.memory, query, context::RECALL_LIMIT) {
+        match self.memory.search(query, context::RECALL_LIMIT) {
             Ok(hits) => {
                 tracing::info!(
                     query = %crate::utils::trace::Text(query),

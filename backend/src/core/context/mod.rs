@@ -16,23 +16,9 @@ pub(crate) use history::{fetch as fetch_history, USER_OFFSET_MINUTES};
 pub(crate) use prompt::{
     local_time_text, proactive_system_prompt, proactive_user_prompt, system_prompt,
 };
-pub(crate) use recall::{fetch as fetch_recall, id_lines, RECALL_LIMIT};
+pub(crate) use recall::{id_lines, RECALL_LIMIT};
 
-use crate::core::memory::MemoryHit;
-use crate::core::schema::message::ChatMessage;
 use crate::core::session::Sessions;
-
-/// 一轮对话 / 决策所需的上下文：由本模块只读组装。
-///
-/// 把"历史消息 / 召回记忆"两个来源收拢成一份可移植值，
-/// 让对话流水线与主动决策共用同一套组装结果，而不是各自手拼一份。
-#[derive(Debug, Clone, Default)]
-pub struct AgentContext {
-    /// 历史消息轮次（对话路径按"今天"时间线整理并压缩；决策路径为最近 N 条）。
-    pub history: Vec<ChatMessage>,
-    /// 与当前话题相关的记忆召回（已过滤相关度、剔除过期；不召回时为空）。
-    pub memories: Vec<MemoryHit>,
-}
 
 /// 最近 `limit` 条对话的渲染文本（供主动决策与延续判断阅读）。
 ///

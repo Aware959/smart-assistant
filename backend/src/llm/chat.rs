@@ -8,10 +8,10 @@ use crate::config::Config;
 use crate::error::{Result, SqlError};
 use crate::llm::genai_client;
 
-use crate::core::schema::message::ChatCall;
+use crate::core::message::ChatCall;
 /// 一条发给 LLM 的对话消息（作用域本体默认 system / user / assistant）。
-/// 定义在 [`crate::core::schema::message`]，此处 re-export 保持 `llm::chat::ChatMessage` 兼容。
-pub use crate::core::schema::message::ChatMessage;
+/// 定义在 [`crate::core::message`]，此处 re-export 保持 `llm::chat::ChatMessage` 兼容。
+pub use crate::core::message::ChatMessage;
 
 /// 把内核消息序列翻译成 provider 请求。
 ///
@@ -82,6 +82,9 @@ fn retry_backoff_ms(attempt: u32) -> u64 {
 /// - `webc::Error::Reqwest(_)`：请求根本没完成（连接超时 / 重置 / DNS / 代理抖动）。
 ///   genai 把"传输层失败"与"成功但状态码异常"拆成了两个 variant，所以走到这里的必然
 ///   是传输层失败，天然可重试。
+/// - `WebStream`：流式请求在首字节前断开时由 streamer 包装的传输错误。它的 `cause`
+///   是字符串、`error` 是 boxed error，无法统一映射回 `webc::Error`；OpenAI streamer
+///   只在该流读取失败时构造它，因此按可重试处理。解析类错误另有 `StreamParse`。
 ///
 /// 其余（鉴权 401、参数 400、响应体解析、流解析）视为致命，立刻上抛交给上层兜底。
 fn is_genai_retryable(e: &genai::Error) -> bool {
@@ -91,6 +94,7 @@ fn is_genai_retryable(e: &genai::Error) -> bool {
         G::WebAdapterCall { webc_error, .. } | G::WebModelCall { webc_error, .. } => {
             is_webc_retryable(webc_error)
         }
+        G::WebStream { .. } => true,
         _ => false,
     }
 }
@@ -296,6 +300,15 @@ where
                 Ok(r) => r,
                 Err(e) => {
                     if attempt >= LLM_MAX_RETRIES || !is_genai_retryable(&e) {
+                        tracing::error!(
+                            target: "trace",
+                            stage = "llm_error",
+                            phase = "request",
+                            model = %model,
+                            attempt,
+                            error = %e,
+                            "LLM 请求失败"
+                        );
                         return Err(e);
                     }
                     attempt += 1;
@@ -378,6 +391,15 @@ where
                 Some(e) => {
                     // 中道流式错误：传输层断开（WebStream）可重试；流解析等致命错误不重试。
                     if attempt >= LLM_MAX_RETRIES || !is_genai_retryable(&e) {
+                        tracing::error!(
+                            target: "trace",
+                            stage = "llm_error",
+                            phase = "stream",
+                            model = %model,
+                            attempt,
+                            error = %e,
+                            "LLM 流式失败"
+                        );
                         return Err(e);
                     }
                     attempt += 1;
@@ -479,5 +501,41 @@ impl Llm {
         on_delta: &mut (dyn FnMut(&str) + Send),
     ) -> Result<StreamOutcome> {
         crate::llm::chat::complete_stream_with_tools(messages, tools, tool_choice, on_delta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use genai::adapter::AdapterKind;
+
+    fn web_stream_error() -> genai::Error {
+        genai::Error::WebStream {
+            model_iden: genai::ModelIden::new(AdapterKind::OpenAI, "test-model"),
+            cause: "connection reset".to_string(),
+            error: "connection reset".into(),
+        }
+    }
+
+    #[test]
+    fn web_stream_transport_error_is_retryable() {
+        assert!(
+            is_genai_retryable(&web_stream_error()),
+            "流式建连/读取中的传输错误必须重试"
+        );
+    }
+
+    #[test]
+    fn stream_parse_error_is_not_retryable() {
+        let err = serde_json::from_str::<serde_json::Value>("{")
+            .map_err(|serde_error| genai::Error::StreamParse {
+                model_iden: genai::ModelIden::new(AdapterKind::OpenAI, "test-model"),
+                serde_error,
+            })
+            .unwrap_err();
+        assert!(
+            !is_genai_retryable(&err),
+            "流解析错误是确定性错误，不应重试"
+        );
     }
 }

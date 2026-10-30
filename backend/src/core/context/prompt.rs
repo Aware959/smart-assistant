@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Datelike, Utc};
 
-use crate::core::schema::message::ChatMessage;
+use crate::core::message::ChatMessage;
 
 /// 把自我属性文本渲染为人设区块；属性为空时返回空串（整体省略，回落无角色基线）。
 ///

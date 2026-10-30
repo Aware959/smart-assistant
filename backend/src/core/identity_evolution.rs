@@ -17,7 +17,7 @@ use serde_json::json;
 use crate::core::context::prompt::identity_evolution_system_prompt;
 use crate::core::identity::ChangeSource;
 use crate::core::identity_service::{CreatedProposal, IdentityService, ProposalDraft};
-use crate::core::schema::message::ChatMessage;
+use crate::core::message::ChatMessage;
 use crate::core::session::Sessions;
 use crate::error::{Result, SqlError};
 use crate::llm::chat::Llm;

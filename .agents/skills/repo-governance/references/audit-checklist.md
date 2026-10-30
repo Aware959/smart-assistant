@@ -14,6 +14,9 @@ Use this checklist after the deterministic scanner has produced its summary. Rea
 - Map top-level directories to responsibilities and entry points.
 - Check whether files live near the code that owns their behavior.
 - Check module boundaries: transport, application, capability, storage, configuration.
+- For each application-core module or directory, verify its reason to exist: the domain it owns, its primary type or entry point, invariants or state that belong only there, and its real consumers. A directory that cannot answer these is a weak boundary, not automatically a cleanup target.
+- Build the module dependency view with targeted searches such as `rg -n '^use crate::' <module>`. Flag cycles between domain modules, thin wrappers that only forward to another module, and fields or functions that no production path uses.
+- Compare domain names with current behavior. Flag conceptual drift such as a module named for a removed decision process when it now only schedules and dispatches a related behavior.
 - Flag files that mix unrelated responsibilities, not merely files that are long.
 - Look for duplicate implementations, abandoned modules, and re-export-only layers.
 - Check whether shared code changes have a clear Telegram-first validation path.
@@ -61,6 +64,8 @@ For each finding include:
 - new or pre-existing;
 - impact and affected boundary;
 - recommended phase, cost, risk, and verification.
+
+Classify weak domain cohesion as `P2` unless it causes a real boundary violation, an import cycle that blocks a feature, or a public contract that misleads callers.
 
 End with:
 
