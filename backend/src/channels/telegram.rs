@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::core::agent::Agent;
-use crate::core::identity::IdentityFieldKey;
-use crate::core::identity_service::{
+use crate::core::identity::service::{
     IdentityService, IdentityVersionView, IdentityView, ProposalView,
 };
+use crate::core::identity::IdentityFieldKey;
 use crate::core::session::{classify_inbound, InboundFreshness, Sessions, TurnTicket};
 use crate::{ChatInput, ChatOutput, Reply};
 

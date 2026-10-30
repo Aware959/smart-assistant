@@ -40,12 +40,12 @@ fn draft(evidence: Vec<String>) -> ProposalDraft {
 }
 
 fn service(db: Arc<Mutex<Database>>) -> IdentityService {
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     IdentityService::new(db, profile)
 }
 
 fn limited_service(db: Arc<Mutex<Database>>, limits: ProposalLimits) -> IdentityService {
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     IdentityService::with_limits(db, profile, limits)
 }
 
@@ -391,7 +391,7 @@ fn proposal_limits_have_mvp_defaults() {
 #[test]
 fn approve_and_apply_updates_profile_and_invalidates_cache_immediately() {
     let db = db();
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     let service = IdentityService::new(db.clone(), profile.clone());
     let evidence = add_message(&db, "user", "我喜欢短一点的回复");
     let created = service
@@ -405,7 +405,7 @@ fn approve_and_apply_updates_profile_and_invalidates_cache_immediately() {
     assert_eq!(applied.version, 1);
     assert_eq!(
         profile.snapshot(),
-        crate::core::self_profile::ProfileSnapshot {
+        crate::core::identity::profile::ProfileSnapshot {
             version: Some(1),
             text: "表达风格：更愿意主动分享自己的看法，但仍然保持短句".to_string(),
         },
@@ -449,7 +449,7 @@ fn approve_and_apply_rejects_relationship_stance_without_explicit_consent() {
 #[test]
 fn reject_changes_only_proposal_status() {
     let db = db();
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     let service = IdentityService::new(db.clone(), profile.clone());
     let evidence = add_message(&db, "user", "先不用改");
     let created = service
@@ -470,7 +470,7 @@ fn reject_changes_only_proposal_status() {
 #[test]
 fn rollback_service_restores_profile_and_invalidates_cache() {
     let db = db();
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     let service = IdentityService::new(db.clone(), profile.clone());
     let evidence = add_message(&db, "user", "喜欢你短一点");
     {
@@ -503,7 +503,7 @@ fn rollback_service_restores_profile_and_invalidates_cache() {
 #[test]
 fn rollback_version_restores_requested_snapshot_and_invalidates_cache() {
     let db = db();
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     let service = IdentityService::new(db.clone(), profile.clone());
     {
         let guard = crate::db::lock_db(&db);
@@ -573,7 +573,7 @@ fn global_daily_cooldown_blocks_second_proposal_and_gate_reports_reason() {
 #[test]
 fn evidence_snapshot_collects_current_identity_messages_and_memories() {
     let db = db();
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     let service = IdentityService::new(db.clone(), profile);
     let sessions = Arc::new(crate::core::session::Sessions::new(db.clone()).unwrap());
     let session_id = sessions.resolve("telegram", "100").unwrap();
@@ -609,7 +609,7 @@ fn evidence_snapshot_collects_current_identity_messages_and_memories() {
 #[test]
 fn approve_and_apply_failure_leaves_profile_and_cache_untouched() {
     let db = db();
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     let service = IdentityService::new(db.clone(), profile.clone());
     let evidence = add_message(&db, "user", "证据");
     let created = service

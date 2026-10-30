@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use crate::core::agent_role::AgentRole;
 use crate::core::context;
+use crate::core::identity::profile::Profile;
 use crate::core::memory::{MemoryKind, MemoryRecord, Store};
 use crate::core::message::{ChatCall, ChatMessage};
-use crate::core::self_profile::Profile;
 use crate::core::session::Sessions;
 use crate::core::sticker::StickerCatalog;
 use crate::error::Result;

@@ -179,5 +179,5 @@ fn version_number(version: i64) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[path = "self_profile_tests.rs"]
-mod self_profile_tests;
+#[path = "profile_tests.rs"]
+mod tests;

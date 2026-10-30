@@ -13,11 +13,11 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::core::identity::profile::Profile;
 use crate::core::identity::{
     AgentIdentity, ChangeSource, IdentityError, IdentityFieldKey, IdentityFieldValue,
     ProposalStatus, RiskLevel,
 };
-use crate::core::self_profile::Profile;
 use crate::db::identity::{IdentityChangeProposal, IdentityVersion};
 use crate::db::Database;
 use crate::error::{Result, SqlError};
@@ -368,8 +368,8 @@ impl IdentityService {
         sessions: &crate::core::session::Sessions,
         message_limit: usize,
         memory_limit: usize,
-    ) -> Result<crate::core::identity_evolution::EvidenceSnapshot> {
-        use crate::core::identity_evolution::{EvidenceMemory, EvidenceMessage, EvidenceSnapshot};
+    ) -> Result<crate::core::identity::evolution::EvidenceSnapshot> {
+        use crate::core::identity::evolution::{EvidenceMemory, EvidenceMessage, EvidenceSnapshot};
 
         let identity = self.current();
         let messages = sessions
@@ -580,5 +580,5 @@ fn proposal_view(value: &IdentityChangeProposal) -> Result<ProposalView> {
 }
 
 #[cfg(test)]
-#[path = "identity_service_tests.rs"]
+#[path = "service_tests.rs"]
 mod tests;

@@ -7,9 +7,9 @@
 //!   聊天接口（对话 / 记忆写入 / 纯 LLM 决策 / 上下文取数）；
 //! - [`crate::core::session::Sessions`]（`session`）：会话服务（入站解析 / 重置 / 消息落库 /
 //!   主动候选派生）。
-//! - [`crate::core::identity_service::IdentityService`]（`identity`）：身份提案校验、
+//! - [`crate::core::identity::service::IdentityService`]（`identity`）：身份提案校验、
 //!   限流、审批、事务应用与回滚。
-//! - [`crate::core::identity_evolution::IdentityEvolutionAgent`]（`identity_evolution`）：
+//! - [`crate::core::identity::evolution::IdentityEvolutionAgent`]（`identity_evolution`）：
 //!   后台反思角色；仅在 `sa-link` 开启配置后调度，不参与对话热路径。
 //!
 //! db 不走壳：各服务经装配对象拿到句柄，能力方法全部收敛在服务上，调用方拿不到
@@ -27,9 +27,9 @@ pub struct App {
     /// 会话服务（入站解析 / 重置 / 消息落库）。
     pub session: Arc<crate::core::session::Sessions>,
     /// 身份提案、审批、事务应用与回滚服务。
-    pub identity: Arc<crate::core::identity_service::IdentityService>,
+    pub identity: Arc<crate::core::identity::service::IdentityService>,
     /// 后台身份演化角色（默认关闭，由 `sa-link` 按配置调度）。
-    pub identity_evolution: Arc<crate::core::identity_evolution::IdentityEvolutionAgent>,
+    pub identity_evolution: Arc<crate::core::identity::evolution::IdentityEvolutionAgent>,
 }
 
 impl App {
@@ -47,17 +47,17 @@ impl App {
         let session = Arc::new(crate::core::session::Sessions::new(db.clone())?);
         let llm = Arc::new(crate::llm::chat::Llm);
         let memory = Arc::new(crate::core::memory::Store::new(db.clone()));
-        let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
-        let identity = Arc::new(crate::core::identity_service::IdentityService::new(
+        let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
+        let identity = Arc::new(crate::core::identity::service::IdentityService::new(
             db.clone(),
             profile.clone(),
         ));
-        let evolution_config = crate::core::identity_evolution::EvolutionConfig {
+        let evolution_config = crate::core::identity::evolution::EvolutionConfig {
             enabled: crate::config::Config::get().identity_evolution_enabled,
             model: crate::config::Config::get().llm_model.clone(),
         };
         let identity_evolution = Arc::new(
-            crate::core::identity_evolution::IdentityEvolutionAgent::new(
+            crate::core::identity::evolution::IdentityEvolutionAgent::new(
                 evolution_config,
                 llm.clone(),
                 identity.clone(),

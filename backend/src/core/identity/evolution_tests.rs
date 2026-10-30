@@ -113,7 +113,7 @@ fn agent(
     config: EvolutionConfig,
     llm: FakeLlm,
 ) -> IdentityEvolutionAgent {
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     let identity = Arc::new(IdentityService::new(db, profile));
     IdentityEvolutionAgent::new(config, Arc::new(llm), identity)
 }
@@ -397,7 +397,7 @@ fn production_run_once_collects_evidence_and_respects_daily_gate() {
         .add_message(&session_id, "user", "我喜欢你有自己的看法")
         .unwrap()
         .id;
-    let profile = Arc::new(crate::core::self_profile::Profile::new(db.clone()));
+    let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
     let identity = Arc::new(IdentityService::new(db.clone(), profile));
     let llm = FakeLlm::returning(proposal_json(&message_id));
     let evolution = IdentityEvolutionAgent::new(

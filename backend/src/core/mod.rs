@@ -9,10 +9,7 @@
 //! - [`memory`]：记忆（模型主动写入/存储/召回 + 关系/作息纯实现）；
 //! - [`sticker`]：贴纸（表情包）目录——选择键 → `file_id` 的缓存映射；
 //! - [`agent_role`]：Agent 角色与工具权限边界（对话 / 主动 / 身份演化）；
-//! - [`identity`]：AI 身份契约（字段白名单、长度限制、旧 key 兼容与快照渲染）；
-//! - [`identity_service`]：身份提案校验、限流、审批与事务应用/回滚；
-//! - [`identity_evolution`]：后台身份演化 Agent（读取证据、生成至多一条提案）；
-//! - [`self_profile`]：AI 自我属性（性格/人格/三观/爱好，人设数据源）；
+//! - [`identity`]：AI 身份域（契约、提案审批、版本回滚、后台演化与自我画像）；
 //! - [`proactive`]：主动开口引擎（节奏、候选过滤与通道派发）；
 //! - [`message`]：LLM 对话消息值契约（内核与模型能力的协议）；
 //! - [`app`]：组装层 `App`（纯装配，装配后组件直接持服务引用）；
@@ -23,12 +20,9 @@ pub mod agent;
 pub mod agent_role;
 pub mod context;
 pub mod identity;
-pub mod identity_evolution;
-pub mod identity_service;
 pub mod memory;
 pub mod message;
 pub mod proactive;
-pub mod self_profile;
 pub mod session;
 pub mod sticker;
 

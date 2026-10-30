@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::core::context::prompt::identity_evolution_system_prompt;
+use crate::core::identity::service::{CreatedProposal, IdentityService, ProposalDraft};
 use crate::core::identity::ChangeSource;
-use crate::core::identity_service::{CreatedProposal, IdentityService, ProposalDraft};
 use crate::core::message::ChatMessage;
 use crate::core::session::Sessions;
 use crate::error::{Result, SqlError};
@@ -134,7 +134,7 @@ impl IdentityEvolutionAgent {
                     continue;
                 }
             };
-            if gate != crate::core::identity_service::EvolutionGate::Run {
+            if gate != crate::core::identity::service::EvolutionGate::Run {
                 tracing::info!(?gate, "身份演化本轮被限流，跳过");
                 continue;
             }
@@ -332,5 +332,5 @@ struct RawProposal {
 }
 
 #[cfg(test)]
-#[path = "identity_evolution_tests.rs"]
+#[path = "evolution_tests.rs"]
 mod tests;
