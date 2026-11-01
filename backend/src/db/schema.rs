@@ -4,7 +4,8 @@
 //! 新库打开时直接建最新结构；历史逐版本迁移（v6~v16）已压平，不再保留。
 //! 仅 [`migrate`] 里保留 `v17`（删掉三张从未被读写的死表）、`v18`（`messages` 放开
 //! `role='tool'` 并改写历史工具结果行）、`v19`（失败轮次重试队列）、`v20`
-//! （身份提案 / 版本审计）、`v21`（未版本化身份的提案基线）与 `v22`（审批操作者审计）
+//! （身份提案 / 版本审计）、`v21`（未版本化身份的提案基线）、`v22`（审批操作者审计）
+//! 与 `v23`（运行时配置及审计）
 //! 几段，与末尾的版本戳。
 //!
 //! 取舍：旧版本库不再支持平滑升级，需重建（`rm` 后重跑）。对单人单库、且已迁移到最新
@@ -17,7 +18,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 22;
+pub(crate) const SCHEMA_VERSION: i64 = 23;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -115,6 +116,30 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             created_at      TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key        TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings_revisions (
+            revision    INTEGER PRIMARY KEY AUTOINCREMENT,
+            operator    TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            changed_keys TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS app_settings_audit (
+            revision    INTEGER NOT NULL,
+            key         TEXT NOT NULL,
+            before_json TEXT,
+            after_json  TEXT NOT NULL,
+            operator    TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            PRIMARY KEY (revision, key)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
         CREATE INDEX IF NOT EXISTS idx_identity_proposals_status_created
@@ -125,6 +150,8 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             ON identity_change_proposals(base_version);
         CREATE INDEX IF NOT EXISTS idx_self_profile_versions_created
             ON self_profile_versions(created_at);
+        CREATE INDEX IF NOT EXISTS idx_app_settings_audit_key_created
+            ON app_settings_audit(key, created_at);
         "#,
     )?;
 
@@ -136,7 +163,7 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
     if let Some(diff) = status.diff_summary() {
         tracing::warn!(
             "记忆向量签名变更：{diff}。程序不会自动重建（memories 的内容/created_at/updated_at 均保留），\
-             记忆检索已暂停。确认重建请运行：cargo run --bin sa-mem -- rebuild"
+             记忆检索已暂停。确认重建请运行：cargo run --bin zhiwei-cli -- db rebuild"
         );
     }
     Ok(())
@@ -345,6 +372,37 @@ fn migrate(conn: &Connection) -> Result<()> {
         tracing::info!("迁移 v22：身份提案与版本审计新增操作者字段");
     }
 
+    // v23：运行时配置落库。配置值、revision 与逐字段审计都放在独立表；
+    // 新库由 init_schema 直接建出，旧库在这里幂等补表，不碰任何业务数据。
+    if version < 23 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS app_settings (
+                key        TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS app_settings_revisions (
+                revision    INTEGER PRIMARY KEY AUTOINCREMENT,
+                operator    TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                changed_keys TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS app_settings_audit (
+                revision    INTEGER NOT NULL,
+                key         TEXT NOT NULL,
+                before_json TEXT,
+                after_json  TEXT NOT NULL,
+                operator    TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY (revision, key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_app_settings_audit_key_created
+                ON app_settings_audit(key, created_at);",
+        )?;
+        tracing::info!("迁移 v23：新增运行时配置与审计表");
+    }
+
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
@@ -420,6 +478,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(content, "不要丢我");
+    }
+
+    #[test]
+    fn v23_adds_runtime_settings_without_touching_business_rows() {
+        let conn = open_conn();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             INSERT INTO sessions VALUES ('keep', '保留', 't', 't');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('schema_version', '22')",
+            [],
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        assert_eq!(stored_version(&conn).unwrap().as_deref(), Some("23"));
+        assert!(table_exists(&conn, "app_settings").unwrap());
+        assert!(table_exists(&conn, "app_settings_revisions").unwrap());
+        assert!(table_exists(&conn, "app_settings_audit").unwrap());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions WHERE id = 'keep'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1, "业务数据必须保留");
     }
 
     /// v17：下线三张死表 relations / world_state / time_profiles，业务表不受影响。

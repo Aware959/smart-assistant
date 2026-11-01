@@ -116,7 +116,7 @@ pub fn definitions(stickers: &StickerCatalog) -> Vec<Tool> {
     }
     // 媒体生成工具：仅在网关开启时下发。与贴纸同理——没起网关时模型调了必失败，
     // 不如整个工具不出现，让它不知道有这能力。
-    if crate::config::Config::get().media_gateway_enabled {
+    if crate::core::settings::snapshot().media_gateway_enabled {
         defs.push(generate_image_tool());
         defs.push(generate_voice_tool());
     }

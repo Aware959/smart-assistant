@@ -83,7 +83,6 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
-use crate::config::Config;
 use crate::db::memory as db_memory;
 use crate::db::memory::Memory;
 use crate::db::Database;
@@ -174,7 +173,7 @@ fn similarity(distance: f32) -> f32 {
 /// 精确到期日（"下周要考试"不该被当成长期事实）。
 ///
 /// 向量签名不匹配（维度或度量变更未重建）时退化为只存 `memories` 内容、不写向量，
-/// 后续由 `sa-mem rebuild` 统一补齐。
+/// 后续由 `zhiwei-cli db rebuild` 统一补齐。
 pub fn store(
     db: &Database,
     content: &str,
@@ -182,7 +181,7 @@ pub fn store(
     supersedes: Option<&str>,
     message_id: Option<&str>,
 ) -> Result<WriteOutcome> {
-    let cfg = Config::get();
+    let cfg = crate::core::settings::snapshot();
     let usable = db.vec_search_usable()?;
 
     // 向量化一次，同时用于去重判定与正式写入。
@@ -269,7 +268,7 @@ pub fn search(db: &Database, query: &str, limit: usize) -> Result<Vec<(Memory, f
         return Ok(Vec::new());
     }
     let vector = embedding::embed_text(query)?;
-    let min_similarity = Config::get().memory_recall_min_similarity;
+    let min_similarity = crate::core::settings::snapshot().memory_recall_min_similarity;
     Ok(db_memory::search_similar(db, &vector, limit)?
         .into_iter()
         .filter(|(_, distance)| similarity(*distance) >= min_similarity)

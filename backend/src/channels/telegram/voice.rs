@@ -201,7 +201,7 @@ pub(super) struct VoiceCfg {
 
 impl VoiceCfg {
     pub(super) fn from_env() -> Self {
-        let c = Config::get();
+        let c = crate::core::settings::snapshot();
         Self {
             enabled: c.voice_transcribe_enabled,
             timeout: c.voice_transcribe_timeout,

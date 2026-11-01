@@ -7,7 +7,7 @@
 | POST | `/generate/voice`  | 音频字节                              |
 | POST | `/transcribe`      | 转写文本（JSON）；请求体是原始音频字节 |
 
-退出语义（对齐 Rust 侧 `sa-link`）：
+退出语义（对齐 Rust 侧 `zhiwei-service`）：
 
 - 第一次 Ctrl+C / Ctrl+Break：停止接收新请求，并等**在途**请求（出图 / 合成）跑完再退出；
 - 第二次：不再等待，直接强制退出。

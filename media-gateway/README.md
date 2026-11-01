@@ -74,7 +74,7 @@ cp .env.example .env       # 按需改 .env（端口 / 后端类型 / ComfyUI �
 python main.py              # 监听 127.0.0.1:8787
 ```
 
-退出（对齐 Rust 侧 `sa-link`）：**Ctrl+C / Ctrl+Break** 走优雅收尾——停止接收新请求，
+退出（对齐 Rust 侧 `zhiwei-service`）：**Ctrl+C / Ctrl+Break** 走优雅收尾——停止接收新请求，
 并等**在途**的出图 / 合成请求跑完再退出（避免把正在传输的图片/语音掐断）；**再按一次**
 不再等待、立即强制退出。
 

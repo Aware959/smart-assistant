@@ -117,15 +117,26 @@ impl IdentityEvolutionAgent {
     ///
     /// 首次运行前先等一个周期，避免进程刚启动就调用模型；关闭时直接返回。
     pub async fn run_scheduled(self: Arc<Self>, sessions: Arc<Sessions>, interval_hours: i64) {
-        if !self.config.enabled {
-            tracing::info!("身份演化未启用（设置 IDENTITY_EVOLUTION_ENABLED=1 开启）");
-            return;
-        }
-        let hours = interval_hours.max(1) as u64;
-        let interval = std::time::Duration::from_secs(hours.saturating_mul(3600));
-        tracing::info!(hours, "身份演化后台任务已启动，首次运行前等待一个周期");
+        let _ = interval_hours;
+        tracing::info!("身份演化后台任务已启动，每分钟检查运行时配置");
+        let mut next_due = None;
         loop {
-            tokio::time::sleep(interval).await;
+            let settings = crate::core::settings::snapshot();
+            if !settings.identity_evolution_enabled {
+                next_due = None;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
+            }
+            let interval = std::time::Duration::from_secs(
+                (settings.identity_evolution_interval_hours.max(1) as u64).saturating_mul(3600),
+            );
+            let due = *next_due.get_or_insert_with(|| std::time::Instant::now() + interval);
+            let now = std::time::Instant::now();
+            if now < due {
+                tokio::time::sleep((due - now).min(std::time::Duration::from_secs(60))).await;
+                continue;
+            }
+            next_due = Some(std::time::Instant::now() + interval);
             let now = Utc::now();
             let gate = match self.identity.evolution_gate(now) {
                 Ok(gate) => gate,

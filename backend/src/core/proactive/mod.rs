@@ -25,7 +25,6 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use crate::channels::ChannelsPusher;
-use crate::config::Config;
 use crate::core::agent::Agent;
 use crate::core::session::Sessions;
 
@@ -51,12 +50,12 @@ const MAX_CANDIDATES_PER_CYCLE: usize = 5;
 ///
 /// `pusher` 是主动外发能力的具体实现（[`crate::channels::ChannelsPusher`]）。
 pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, pusher: Arc<ChannelsPusher>) {
-    if !Config::get().intent_enabled {
-        tracing::info!("意图判定未启用（设置 INTENT_ENABLED=1 开启）");
-        return;
-    }
-    tracing::info!("意图判定引擎已启动");
+    tracing::info!("意图判定引擎已启动，每轮重新读取运行时配置");
     loop {
+        if !crate::core::settings::snapshot().intent_enabled {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            continue;
+        }
         let idle = pace::next_sleep();
         tracing::debug!(next_in_secs = idle.as_secs(), "等待下一轮意图判定");
         tokio::time::sleep(idle).await;

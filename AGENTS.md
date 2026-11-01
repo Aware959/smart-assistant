@@ -25,7 +25,7 @@
   回退或加兼容分支；它们真被要求改时再补。
 - **不主动重构、不主动"顺手修好"未被要求触碰的端**。发现 Web/iLink 端因为共享代码改动而
   行为变化，属预期结果，写进说明即可，不要自己去修。
-- **验证只跑 Telegram 主线**：需要真实通道验证时用 `sa-link --telegram` 路径，别去起 iLink
+- **验证只跑 Telegram 主线**：需要真实通道验证时用 `zhiwei-service --telegram` 路径，别去起 iLink
   或 Web 端做端到端；单测与 `cargo test` 照常全跑。
 
 ## 文档布局
@@ -42,23 +42,24 @@
 
 ```bash
 cd backend
-cargo build --bins             # 一次编译 sa-web / sa-link / sa-cli / sa-mem
+cargo build --bin zhiwei-service  # 运行主程序；工具按需构建，不随每次发布重编
+cargo build --no-default-features --features telegram --bin zhiwei-cli
 cargo test                      # 数据库 + 向量检索冒烟测试；全过 + 零警告是基线
 cargo check --all-targets       # 确认零警告
 cargo clippy --all-targets      # lint
 cargo fmt --all                 # 排版（rustfmt，配置见根目录 rust-toolchain.toml）
-cargo run --bin sa-link         # 通道守护（Telegram 长轮询 + 主动开口）；主线验证走这条
-cargo run --bin sa-cli [-- "一句话"]
-cargo run --bin sa-mem -- check          # 巡检向量签名（只读）
-cargo run --bin sa-mem -- rebuild [--force]  # 重建向量表
-cargo run --bin sa-sticker -- fetch <包名>    # 拉取 Telegram 贴纸包生成表情包目录（写 sticker_catalog.json）
+cargo run --bin zhiwei-service         # 通道守护（Telegram 长轮询 + 主动开口）；主线验证走这条
+cargo run --bin zhiwei-cli -- db check          # 巡检向量签名（只读）
+cargo run --bin zhiwei-cli -- db rebuild [--force]  # 重建向量表
+cargo run --bin zhiwei-cli -- sticker fetch <包名>  # 拉取 Telegram 贴纸包生成表情包目录
+cargo run --bin zhiwei-cli -- config get            # 读取数据库运行时配置
 ```
 
 以下命令属于非主线的 Web / iLink 端，主线开发期间不要用来做验证：
-`cargo run --bin sa-web`、`make dev`、`make stop`、`scripts/dev.ps1`。
+`cargo run --bin zhiwei-web`、`make dev`、`make stop`、`scripts/dev.ps1`。
 
-进程模型：`sa-web` 与 `sa-link` 是两个独立进程，共享同一份 `.env` / `smart_assistant.db`；
-主线只需 `sa-link`。`make dev` 会启动 `sa-web` 与前端，并按 `.env` 决定是否拉起 `sa-link`——
+进程模型：`zhiwei-web` 与 `zhiwei-service` 是两个独立进程，共享同一份 `.env` / `smart_assistant.db`；
+主线只需 `zhiwei-service`。`make dev` 会启动 `zhiwei-web` 与前端，并按 `.env` 决定是否拉起 `zhiwei-service`——
 开发 Telegram 时不要用它当启动方式。
 
 根目录 `make dev / stop / build / test` 与 `scripts/dev.ps1` 等价（无 make 用 `powershell -File scripts/dev.ps1`）。
@@ -72,13 +73,13 @@ cargo run --bin sa-sticker -- fetch <包名>    # 拉取 Telegram 贴纸包生�
 
 ## 验证基线
 
-改动完成后：`cargo test` 全过 + `cargo check --all-targets` 零警告 + `cargo fmt --all -- --check` 无 diff。涉及 schema 改动时，还要 `sa-mem check`（对真实库执行迁移）确认最新版库可正常打开。
+改动完成后：`cargo test` 全过 + `cargo check --all-targets` 零警告 + `cargo fmt --all -- --check` 无 diff。涉及 schema 改动时，还要 `zhiwei-cli db check`（对真实库执行迁移）确认最新版库可正常打开。
 
-> 注：历史迁移已压平到 v17 基线（见 `docs/architecture.md` §7）。`sa-mem check` 只对**新库 / 已升到 v17 的库**干净升级；版本号低于 17 的旧库不再支持平滑升级，需 `rm` 后重建。个人单库场景无影响。
+> 注：历史迁移已压平到 v17 基线（见 `docs/architecture.md` §7）。`zhiwei-cli db check` 只对**新库 / 已升到 v17 的库**干净升级；版本号低于 17 的旧库不再支持平滑升级，需 `rm` 后重建。个人单库场景无影响。
 
 **排版由 rustfmt 决定，不要手改**：仓库已全量 `cargo fmt` 归一（`rust-toolchain.toml` 固定 stable + rustfmt/clippy），改动写完直接跑 `cargo fmt --all`。手写排版会在下次 fmt 时被重排成另一种 diff，白白制造冲突。
 
-**验证不许污染真实库**：`smart_assistant.db` 就是用户的真实数据，`sa-cli` / `sa-web` / `sa-link` 也都默认连它。需要真实调用 LLM 或通道来验证功能时：
+**验证不许污染真实库**：`smart_assistant.db` 就是用户的真实数据，`zhiwei-cli` / `zhiwei-web` / `zhiwei-service` 也都默认连它。需要真实调用 LLM 或通道来验证功能时：
 
 - 优先用 `Database::in_memory()`（`cargo test` 内部已如此，不碰磁盘库）；
 - 确需落盘验证时，改 `SMART_ASSISTANT_DB` 指向临时库跑，别用默认路径；

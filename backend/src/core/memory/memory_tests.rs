@@ -93,7 +93,7 @@ fn cosine_distance_maps_to_similarity() {
 /// 更强。否则召回时看着毫不相干的两条，写入时会被判成重复而互相吞掉。
 #[test]
 fn dedup_threshold_is_stricter_than_recall_threshold() {
-    let cfg = Config::get();
+    let cfg = crate::core::settings::snapshot();
     assert!(
         cfg.memory_dedup_min_similarity > cfg.memory_recall_min_similarity,
         "去重阈值 {} 应严于召回阈值 {}",

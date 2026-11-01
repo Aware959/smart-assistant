@@ -5,6 +5,7 @@ pub mod message;
 pub mod pending_retry;
 pub mod self_profile;
 pub mod session;
+pub mod settings;
 
 mod meta;
 mod schema;
@@ -45,6 +46,7 @@ impl Database {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         schema::init_schema(&conn)?;
 
@@ -63,6 +65,7 @@ impl Database {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         schema::init_schema(&conn)?;
 
@@ -75,7 +78,7 @@ impl Database {
 
     /// 当前向量库巡检状态（配置签名来自运行时 Config）。
     ///
-    /// 会连带 `COUNT(*)` 扫 `memories` 与 `memory_vectors` 两张表——给 `sa-mem`
+    /// 会连带 `COUNT(*)` 扫 `memories` 与 `memory_vectors` 两张表——给 `zhiwei-cli db`
     /// 这类一次性巡检用。热路径（每轮记忆召回）请改用 [`Self::vec_search_usable`]。
     pub fn vec_status(&self) -> Result<VecStatus> {
         let cfg = crate::config::Config::get();

@@ -109,7 +109,7 @@ pub struct IdentityService {
 
 /// 后台演化调度是否运行一次的纯策略结果。
 ///
-/// 供 `sa-link` 的任务循环记录“为什么跳过”，不把调度细节塞进身份服务。
+/// 供 `zhiwei-service` 的任务循环记录“为什么跳过”，不把调度细节塞进身份服务。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvolutionGate {
     Run,

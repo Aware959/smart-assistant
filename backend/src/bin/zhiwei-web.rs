@@ -105,7 +105,7 @@ async fn main() {
             tracing::info!(
                 addr = %addr,
                 cert = %tls.cert.display(),
-                "sa-web HTTPS server started"
+                "zhiwei-web HTTPS server started"
             );
             axum_server::bind_rustls(addr, rustls)
                 .serve(http_app.into_make_service())
@@ -116,7 +116,7 @@ async fn main() {
             let listener = tokio::net::TcpListener::bind(addr)
                 .await
                 .expect("failed to bind address");
-            tracing::info!(addr = %addr, "sa-web HTTP server started（未启用 TLS）");
+            tracing::info!(addr = %addr, "zhiwei-web HTTP server started（未启用 TLS）");
             axum::serve(listener, http_app).await.expect("server error");
         }
     }

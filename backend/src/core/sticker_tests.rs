@@ -17,7 +17,7 @@ fn fixture() -> StickerCatalog {
 /// 每个测试用独立目录（带 pid），避免并行跑时互相踩；目录不存在也顺手补上，
 /// 直接 `fs::write` 到一个还没建出来的目录下只会拿到 NotFound。
 fn temp_path(name: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("sa-sticker-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("zhiwei-cli-sticker-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("创建测试临时目录");
     dir.join(name).to_string_lossy().into_owned()
 }

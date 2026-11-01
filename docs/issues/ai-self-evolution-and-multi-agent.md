@@ -2,7 +2,7 @@
 
 > 状态：MVP 方向与首批边界已确认；身份契约、v22 持久化、版本化渲染、角色工具边界、
 > 显式缓存失效、提案校验/限流/人工审批、后台提案生成、事务应用与回滚闭环均已实现。
-> 后台演化默认关闭，只在 `sa-link` 中按周期运行。
+> 后台演化默认关闭，只在 `zhiwei-service` 中按周期运行。
 > 日期：2026-10-29（初稿 2026-10-27）。  
 > 适用范围：`smart-assistant` 当前 Telegram 主线；共享代码可演进，但不主动改 Web / iLink。  
 > 关联文档：`docs/architecture.md`、`docs/archive/agent-tool-loop-architecture-review.md`。
@@ -92,7 +92,7 @@
 | 对话工具 | `send_message`、`send_dice`、`send_sticker`、`generate_image`、`generate_voice`、`get_now`、`recall_memory`、`remember`（媒体工具受配置开关控制） |
 | 主动工具 | `send_message`、`get_now`、`recall_memory`，刻意不含 `remember` |
 | 工具循环 | 对话和主动路径共用 `Agent::run_tool_loop`，用 `ToolPolicy` 区分“必须回复”和“可以沉默” |
-| 主动触发 | 仅 `sa-link` 启动，受 `INTENT_ENABLED` 控制，默认关闭 |
+| 主动触发 | 仅 `zhiwei-service` 启动，受 `INTENT_ENABLED` 控制，默认关闭 |
 | 版本与审计 | v22 已有 `identity_change_proposals` / `self_profile_versions`；提案校验、限流、审批、事务应用、版本回滚和 Telegram 管理命令均已接入，审批人与版本操作者写入审计 |
 | 记忆边界 | 用户事实在 `memories`；AI 自我属性在 `self_profile`；两者不应重新混合 |
 
@@ -632,7 +632,7 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 | 审批策略 | 六个字段全部只允许“提案 + 人工批准”，MVP 不做低风险自动生效 |
 | 高风险字段 | `self_concept` / `values` / `relationship_stance` 必须人工批准；关系姿态还要求用户明确同意 |
 | 用户入口 | 首版只做 Telegram 管理命令；不做 Web 管理页 |
-| 触发方式 | `sa-link` 后台低频任务，默认关闭；每天最多 1 次、最多 3 条待审提案、同一字段 7 天冷却 |
+| 触发方式 | `zhiwei-service` 后台低频任务，默认关闭；每天最多 1 次、最多 3 条待审提案、同一字段 7 天冷却 |
 | 情绪/精力 | 属于 L3 短期状态，不写入永久身份；MVP 不做 |
 | Memory Curator | 本次不拆分，`remember` 继续留在对话 Agent |
 | 评估方式 | MVP 持久化提案状态、审批人、时间戳与版本来源，可通过这些审计数据推导通过率 / 拒绝率 / 回滚率；人格一致性与越界行为暂靠人工抽查，不建离线评测集 |
@@ -649,7 +649,7 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 操作者写入版本 `operator`；Telegram 身份管理命令仅允许 `TELEGRAM_ALLOWED_IDS`
 内的会话使用（白名单留空时为单人部署兼容模式，仍可操作）。
 
-后台 `IdentityEvolutionAgent` 已接入 `sa-link`：`IDENTITY_EVOLUTION_ENABLED=1`
+后台 `IdentityEvolutionAgent` 已接入 `zhiwei-service`：`IDENTITY_EVOLUTION_ENABLED=1`
 才启动，首次运行前等待 `IDENTITY_EVOLUTION_INTERVAL_HOURS`（默认 24 小时）；
 证据来自已映射会话的最近消息、长期记忆与当前身份。模型只能产出六字段结构化
 提案，不能发送消息、写用户记忆、直接应用身份或修改工具权限。
@@ -704,7 +704,7 @@ Generative Agents 用 memory stream、reflection 和 planning 让角色从经历
 当前进度：T1（决策冻结）、T2（身份契约）、v22 持久化（提案表 / 版本审计表 / DAO）、
 T3（按身份版本渲染、旧 KV 兼容、版本化缓存与显式失效）、T4 的角色工具边界
 （三角色白名单、定义裁剪、派发硬校验、身份演化 prompt）、T5（提案校验、限流、
-人工审批服务）、T6（后台提案生成与 `sa-link` 低频调度）和 T7（事务应用、版本写入、
+人工审批服务）、T6（后台提案生成与 `zhiwei-service` 低频调度）和 T7（事务应用、版本写入、
 Telegram 审批命令、最新/指定版本回滚）均已完成。T8（低风险自动生效）不在 MVP，
 未实现。真实库已升到 v22，两张身份表为空；文档中的 v17 仅指历史基线，不是本次起点。
 

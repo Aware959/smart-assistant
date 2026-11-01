@@ -1,7 +1,7 @@
 //! 记忆向量表（sqlite-vec）的签名、巡检与重建。
 //!
 //! 向量表与 memories 解耦：签名（维度 + 模型 + 度量）不一致时只报告、绝不自动重建，
-//! 由独立工具 `sa-mem rebuild` 处理；重建也只影响 memory_vectors。
+//! 由独立工具 `zhiwei-cli db rebuild` 处理；重建也只影响 memory_vectors。
 
 use rusqlite::{Connection, OptionalExtension};
 
@@ -10,7 +10,7 @@ use crate::error::{Result, SqlError};
 
 /// 向量表的“签名”：embedding 维度 + 模型名 + 距离度量。
 /// 签名与运行时配置不一致时，程序只提醒、绝不自动重建；
-/// 由独立工具 `sa-mem rebuild`（或 --force）处理。
+/// 由独立工具 `zhiwei-cli db rebuild`（或 --force）处理。
 const KEY_EMBEDDING_DIM: &str = "embedding_dim";
 const KEY_EMBEDDING_MODEL: &str = "embedding_model";
 

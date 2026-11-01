@@ -65,7 +65,7 @@ pub struct Config {
     /// Telegram API 代理（如 http://127.0.0.1:7890）。留空则依次尝试 HTTPS_PROXY / ALL_PROXY。
     pub telegram_proxy: Option<String>,
     /// 贴纸（表情包）目录 JSON 文件：模型可见的选择键 → Telegram `file_id`。
-    /// 由 `sa-sticker fetch` 生成；文件不存在即视为"没有贴纸能力"。
+    /// 由 `zhiwei-cli sticker fetch` 生成；文件不存在即视为"没有贴纸能力"。
     pub sticker_catalog_file: String,
     /// 启用微信 iLink 通道（硬开关）：`1` 才连接（有 token 直连，无 token 则扫码登录）；`0`/缺省不启动。
     pub ilink_enabled: bool,
@@ -124,6 +124,14 @@ pub struct Config {
     pub identity_evolution_enabled: bool,
     /// 身份演化任务的检查周期（小时）。默认 24 小时，任务本身还会按最近提案做冷却。
     pub identity_evolution_interval_hours: i64,
+    /// 本地控制接口开关；缺省开启，只监听 loopback。
+    pub control_enabled: bool,
+    /// 本地控制接口监听地址；端口为 0 时由系统分配。
+    pub control_addr: String,
+    /// 控制接口状态文件（PID、端口、版本）；由 zhiwei-service 启动后写入。
+    pub control_state_file: String,
+    /// 控制接口 token 文件；客户端读取后以 Bearer 发送。
+    pub control_token_file: String,
 }
 
 impl Config {
@@ -256,6 +264,15 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(24),
+            control_enabled: std::env::var("CONTROL_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(true),
+            control_addr: std::env::var("CONTROL_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:0".to_string()),
+            control_state_file: std::env::var("CONTROL_STATE_FILE")
+                .unwrap_or_else(|_| "logs/control.json".to_string()),
+            control_token_file: std::env::var("CONTROL_TOKEN_FILE")
+                .unwrap_or_else(|_| "logs/control.token".to_string()),
         }
     }
 

@@ -17,6 +17,7 @@
 
 pub mod channels;
 pub mod config;
+pub mod control;
 pub mod core;
 pub mod db;
 pub mod error;

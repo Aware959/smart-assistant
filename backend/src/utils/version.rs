@@ -32,7 +32,7 @@ pub fn semantic() -> String {
 /// 展示用版本字符串。
 pub fn display() -> String {
     let dirty = if BUILD_DIRTY == "1" { ".dirty" } else { "" };
-    format!("smart-assistant v{}+{BUILD_COMMIT}{dirty}", semantic())
+    format!("Zhiwei v{}+{BUILD_COMMIT}{dirty}", semantic())
 }
 
 #[cfg(test)]
@@ -41,7 +41,7 @@ mod tests {
 
     #[test]
     fn display_matches_cargo_package_version() {
-        assert!(display().starts_with("smart-assistant v0.2."));
+        assert!(display().starts_with("Zhiwei v0.2."));
         assert!(!BUILD_NUMBER.trim().is_empty());
         assert!(!BUILD_COMMIT.trim().is_empty());
         assert!(semantic().split('.').count() == 3);

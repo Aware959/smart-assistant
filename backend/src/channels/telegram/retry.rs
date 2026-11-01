@@ -96,7 +96,7 @@ pub async fn run_retry_sweep(chat: Arc<Agent>, session: Arc<Sessions>) {
     };
     let base = api_base(&token);
     let media_url = Config::get().media_gateway_url.clone();
-    let media_timeout = Config::get().media_gateway_timeout;
+    let media_timeout = crate::core::settings::snapshot().media_gateway_timeout;
 
     let mut ticker = tokio::time::interval(Duration::from_secs(SWEEP_INTERVAL_SECS));
     loop {

@@ -8,8 +8,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Local, Timelike};
 
-use crate::config::Config;
-
 /// 返回下一轮应当等待的时长。
 ///
 /// 安静时段内 → 睡到安静窗口结束（多留 30s 缓冲）；否则 → 随机间隔。
@@ -32,7 +30,11 @@ pub fn in_quiet_hours(now: DateTime<Local>) -> bool {
 /// quiet 窗口为半开区间 `[start, end)`：start < end 为当日窗口，
 /// start > end 表示跨午夜（如 23-7 → 23:00~次日 6:59），start == end 视为禁用。
 pub fn quiet_remainder(hour: u32, minute: u32) -> Option<Duration> {
-    quiet_remainder_for(Config::get().intent_quiet_hours, hour, minute)
+    quiet_remainder_for(
+        crate::core::settings::snapshot().intent_quiet_hours,
+        hour,
+        minute,
+    )
 }
 
 /// 纯函数版，便于测试。
@@ -61,7 +63,7 @@ pub fn quiet_remainder_for(q: (u32, u32), hour: u32, minute: u32) -> Option<Dura
 
 /// `[min, max]`（分钟）区间上的均匀随机；min>max 时对调，相等时取该值。
 fn random_interval() -> Duration {
-    let cfg = Config::get();
+    let cfg = crate::core::settings::snapshot();
     let (mut lo, mut hi) = (cfg.intent_min_minutes, cfg.intent_max_minutes);
     if lo > hi {
         std::mem::swap(&mut lo, &mut hi);

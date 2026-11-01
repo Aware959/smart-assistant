@@ -1,6 +1,6 @@
 //! 通道守护进程：telegram / iLink 长轮询 + 意图主动开口。
 //!
-//! 与 `sa-web`（HTTP 会话主进程）各跑一进程、共享同一个 SQLite 库：
+//! 与 `zhiwei-web`（HTTP 会话主进程）各跑一进程、共享同一个 SQLite 库：
 //! 它只负责收消息 → 调主线聊天服务 → 回消息，以及 `INTENT_ENABLED=1`
 //! 时按节奏主动开口。同一份配置（.env / smart_assistant.db）下，
 //! 可只跑这一个 exe 让 Telegram / 微信通道单独工作，无需启动 HTTP。
@@ -38,9 +38,11 @@ async fn main() {
 
     let cfg = Config::get();
 
-    // 初始化数据库（与 sa-web 共享同一个 smart_assistant.db）。
+    // 初始化数据库（与 zhiwei-web 共享同一个 smart_assistant.db）。
     let start = std::time::Instant::now();
     let app = Arc::new(App::new(&cfg.db_path).expect("failed to open database"));
+    app.initialize_runtime_settings(chrono::Utc::now())
+        .expect("failed to initialize runtime settings");
     tracing::info!(
         db = %cfg.db_path,
         elapsed_ms = start.elapsed().as_millis() as u64,
@@ -77,26 +79,43 @@ async fn main() {
         )));
     }
 
-    // 意图判定引擎：INTENT_ENABLED=1 时开启（依赖通道状态做频率/窗口控制）。
+    // 意图判定引擎常驻；是否开口由数据库中的运行时配置每轮决定。
     #[cfg(any(feature = "telegram", feature = "ilink"))]
-    if cfg.intent_enabled {
-        tracing::info!("INTENT_ENABLED 已开启，启动意图判定引擎");
-        handles.push(tokio::spawn(smart_assistant::core::proactive::run(
-            app.chat.clone(),
-            app.session.clone(),
-            Arc::new(smart_assistant::channels::ChannelsPusher),
-        )));
+    handles.push(tokio::spawn(smart_assistant::core::proactive::run(
+        app.chat.clone(),
+        app.session.clone(),
+        Arc::new(smart_assistant::channels::ChannelsPusher),
+    )));
+
+    // 身份演化常驻；开关和周期来自数据库运行时配置，每轮重新读取。
+    handles.push(tokio::spawn(app.identity_evolution.clone().run_scheduled(
+        app.session.clone(),
+        cfg.identity_evolution_interval_hours,
+    )));
+
+    // 本地控制接口：桌面 / Linux / Android 客户端的唯一配置入口。
+    {
+        let settings = app.settings.clone();
+        let addr = cfg.control_addr.clone();
+        let state_file = cfg.control_state_file.clone();
+        let token_file = cfg.control_token_file.clone();
+        let enabled = cfg.control_enabled;
+        handles.push(tokio::spawn(async move {
+            if let Err(error) =
+                smart_assistant::control::serve(settings, enabled, &addr, &state_file, &token_file)
+                    .await
+            {
+                tracing::error!(error = %error, "本地控制接口退出");
+            }
+        }));
     }
 
-    // 身份演化：默认关闭；开启后由独立后台角色低频生成待审提案，绝不直接应用。
-    if cfg.identity_evolution_enabled {
-        handles.push(tokio::spawn(app.identity_evolution.clone().run_scheduled(
-            app.session.clone(),
-            cfg.identity_evolution_interval_hours,
-        )));
-    }
+    tracing::info!(
+        revision = app.settings.current().revision,
+        "运行时配置已加载（数据库优先，.env 仅首次初始化）"
+    );
 
-    tracing::info!("sa-link 通道守护已就绪，Ctrl+C / Ctrl+Break 退出");
+    tracing::info!("zhiwei-service 通道守护已就绪，Ctrl+C / Ctrl+Break 退出");
 
     // 退出信号：ctrlc 在 Windows 下同时捕获 Ctrl+C 与 Ctrl+Break（tokio 的
     // `signal::ctrl_c` 只认 Ctrl+C）。第一次信号走优雅收尾，第二次强制退出。
@@ -104,7 +123,7 @@ async fn main() {
     ctrlc::set_handler(move || {
         let n = EXIT_SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
         if n >= 2 {
-            eprintln!("[sa-link] 收到第二次退出信号，强制退出");
+            eprintln!("[zhiwei-service] 收到第二次退出信号，强制退出");
             std::process::exit(130);
         }
         let _ = sig_tx.try_send(());
@@ -118,7 +137,7 @@ async fn main() {
     // worker 已不再调度 tokio 任务，OS 线程不受影响，超时一定会响。
     std::thread::spawn(|| {
         std::thread::sleep(SHUTDOWN_GRACE);
-        eprintln!("[sa-link] 收尾超时，强制退出");
+        eprintln!("[zhiwei-service] 收尾超时，强制退出");
         std::process::exit(130);
     });
 
@@ -136,5 +155,5 @@ async fn main() {
         }
     }
 
-    tracing::info!("sa-link 退出完毕");
+    tracing::info!("zhiwei-service 退出完毕");
 }

@@ -10,7 +10,7 @@
 //! - [`crate::core::identity::service::IdentityService`]（`identity`）：身份提案校验、
 //!   限流、审批、事务应用与回滚。
 //! - [`crate::core::identity::evolution::IdentityEvolutionAgent`]（`identity_evolution`）：
-//!   后台反思角色；仅在 `sa-link` 开启配置后调度，不参与对话热路径。
+//!   后台反思角色；仅在 `zhiwei-service` 开启配置后调度，不参与对话热路径。
 //!
 //! db 不走壳：各服务经装配对象拿到句柄，能力方法全部收敛在服务上，调用方拿不到
 //! 裸数据连接。本层不提供管理门面——对外只交出已装配的服务，由调用方直接调用
@@ -28,14 +28,26 @@ pub struct App {
     pub session: Arc<crate::core::session::Sessions>,
     /// 身份提案、审批、事务应用与回滚服务。
     pub identity: Arc<crate::core::identity::service::IdentityService>,
-    /// 后台身份演化角色（默认关闭，由 `sa-link` 按配置调度）。
+    /// 后台身份演化角色（默认关闭，由 `zhiwei-service` 按配置调度）。
     pub identity_evolution: Arc<crate::core::identity::evolution::IdentityEvolutionAgent>,
+    /// 共享运行时配置（DB 持久化、revision 与审计）。
+    pub settings: Arc<crate::core::settings::SettingsService>,
 }
 
 impl App {
     /// 打开或创建数据库、初始化 schema 后装配。
     pub fn new(db_path: &str) -> Result<Self> {
-        Self::assemble(Arc::new(Mutex::new(crate::db::Database::open(db_path)?)))
+        let app = Self::assemble(Arc::new(Mutex::new(crate::db::Database::open(db_path)?)))?;
+        crate::core::settings::install_runtime(app.settings.runtime());
+        Ok(app)
+    }
+
+    /// 由 runtime host（`zhiwei-service`）显式初始化数据库配置。
+    ///
+    /// 其他进程只读运行时快照，不在启动时写配置表；这样桌面/CLI/Web
+    /// 不会成为第二个配置写者。
+    pub fn initialize_runtime_settings(&self, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        self.settings.seed_from_bootstrap(now)
     }
 
     pub fn new_in_memory() -> Result<Self> {
@@ -44,6 +56,7 @@ impl App {
 
     /// 装配主线路：会话 / 能力（Llm、记忆 Store、自我属性 Profile）→ 注入主线 Agent。
     fn assemble(db: Arc<Mutex<crate::db::Database>>) -> Result<Self> {
+        let settings = Arc::new(crate::core::settings::SettingsService::new(db.clone())?);
         let session = Arc::new(crate::core::session::Sessions::new(db.clone())?);
         let llm = Arc::new(crate::llm::chat::Llm);
         let memory = Arc::new(crate::core::memory::Store::new(db.clone()));
@@ -52,10 +65,10 @@ impl App {
             db.clone(),
             profile.clone(),
         ));
-        let evolution_config = crate::core::identity::evolution::EvolutionConfig {
-            enabled: crate::config::Config::get().identity_evolution_enabled,
-            model: crate::config::Config::get().llm_model.clone(),
-        };
+        // 开关由数据库运行时配置控制；`enabled` 只表示装配时已具备模型能力。
+        let evolution_config = crate::core::identity::evolution::EvolutionConfig::enabled(
+            crate::config::Config::get().llm_model.clone(),
+        );
         let identity_evolution = Arc::new(
             crate::core::identity::evolution::IdentityEvolutionAgent::new(
                 evolution_config,
@@ -63,7 +76,7 @@ impl App {
                 identity.clone(),
             ),
         );
-        // 贴纸目录是文件不是状态：装配时读一次，之后 `sa-sticker fetch` 拉的新目录
+        // 贴纸目录是文件不是状态：装配时读一次，之后 `zhiwei-cli sticker fetch` 拉的新目录
         // 要重启进程才生效。文件不存在 = 没拉过 = 贴纸能力关闭，不是错误。
         let stickers = crate::core::sticker::StickerCatalog::load_default();
         if !stickers.is_empty() {
@@ -85,6 +98,7 @@ impl App {
             session,
             identity,
             identity_evolution,
+            settings,
         })
     }
 }

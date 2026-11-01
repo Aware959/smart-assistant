@@ -32,6 +32,12 @@ frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo
 
+# Tauri desktop (desktop/)
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+
 # Python 媒体网关 (media-gateway/)
 media-gateway/**/__pycache__/
 media-gateway/**/*.pyc

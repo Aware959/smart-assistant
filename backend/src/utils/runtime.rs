@@ -1,6 +1,6 @@
 //! 进程运行时启动脚手架：panic hook / dotenv / 文本日志 / 链路追踪 / 心跳探针。
 //!
-//! `sa-web`（HTTP 会话）与 `sa-link`（通道守护）共用同一套启动逻辑，
+//! `zhiwei-web`（HTTP 会话）与 `zhiwei-service`（通道守护）共用同一套启动逻辑，
 //! 避免两个 bin 各自重复一段 150 行的初始化。约定只在 `#[tokio::main]`
 //! 的入口里调用 [`bootstrap`]，返回的 [`Runtime`] 必须持有到进程退出
 //! （其内部保存 tracing 非阻塞 writer 的 WorkerGuard，一旦 drop 会冲刷并

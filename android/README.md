@@ -25,6 +25,10 @@ android/
 3. Android NDK + cargo-ndk 交叉编译 `.so`；
 4. Kotlin 侧加载绑定，调用 `Assistant` 的对话能力。
 
+运行时配置复用 `core::settings::SettingsService`：Android 不启动 `zhiwei-service.exe`，
+也不直接写数据库，而是由应用内 runtime host 调用同一个 service。桌面 / Linux
+通过 `zhiwei-service` 的 loopback `/control/v1/settings` 使用同一份 schema 与 revision 契约。
+
 ## 现状 TODO
 
 - [ ] 内核与对话稳定（当前阶段目标）

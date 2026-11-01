@@ -2418,6 +2418,7 @@ dependencies = [
  "sqlite-vec",
  "thiserror",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-appender",

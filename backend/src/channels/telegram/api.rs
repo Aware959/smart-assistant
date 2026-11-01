@@ -262,7 +262,7 @@ pub(super) fn encode_set_name(name: &str) -> String {
 
 /// 拉取一个公开贴纸包，生成**当前 bot 可用**的贴纸目录。
 ///
-/// 这是 `sa-sticker fetch` 的网络侧。`file_id` 是 bot 专属的——同一张贴纸换个
+/// 这是 `zhiwei-cli sticker fetch` 的网络侧。`file_id` 是 bot 专属的——同一张贴纸换个
 /// bot 就发不出去——所以目录只能由当前 bot 现场拉，不能从别处拷一份静态数据来用。
 pub async fn fetch_sticker_set(name: &str) -> Result<crate::core::sticker::StickerCatalog, String> {
     let token = Config::get().telegram_bot_token.trim().to_string();

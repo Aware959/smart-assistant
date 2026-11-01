@@ -33,7 +33,7 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .agents/skills/repo-governance/scripts/repo_scan.ps1
 ```
 
-`sa-mem check` 可用于检查向量签名，但 `Database::open` 会执行幂等 schema 迁移，因此它不能算完全只读。只有用户批准或确实需要核对真实库状态时才运行，并明确说明这一点。扫描输出只作为证据，不把「文件大」直接等同于「应该拆」。报告至少应包含：
+`zhiwei-cli db check` 可用于检查向量签名，但 `Database::open` 会执行幂等 schema 迁移，因此它不能算完全只读。只有用户批准或确实需要核对真实库状态时才运行，并明确说明这一点。扫描输出只作为证据，不把「文件大」直接等同于「应该拆」。报告至少应包含：
 
 - `file:line` 级别的问题；
 - 影响范围和严重度；

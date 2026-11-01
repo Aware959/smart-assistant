@@ -24,6 +24,7 @@ pub mod memory;
 pub mod message;
 pub mod proactive;
 pub mod session;
+pub mod settings;
 pub mod sticker;
 
 pub mod app;

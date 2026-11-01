@@ -105,7 +105,7 @@ pub(super) fn spawn_turn(
             base,
             chat_id,
             Config::get().media_gateway_url.clone(),
-            Config::get().media_gateway_timeout,
+            crate::core::settings::snapshot().media_gateway_timeout,
             deliver_rx,
         ));
         let started = std::time::Instant::now();

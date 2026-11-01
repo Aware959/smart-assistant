@@ -142,13 +142,7 @@ fn no_proposal_json() -> String {
 
 #[test]
 fn config_is_disabled_by_default_and_disabled_run_skips_llm() {
-    assert_eq!(
-        EvolutionConfig::default(),
-        EvolutionConfig {
-            enabled: false,
-            model: String::new()
-        }
-    );
+    assert!(!EvolutionConfig::default().enabled);
     let (db, _id, snapshot) = setup();
     let llm = FakeLlm::returning(proposal_json("unused"));
     let agent = agent(db, EvolutionConfig::disabled(), llm.clone());
