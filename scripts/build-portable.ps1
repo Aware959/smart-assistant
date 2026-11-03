@@ -4,15 +4,19 @@
 
 .DESCRIPTION
     Produces a directly runnable directory containing zhiwei-desktop.exe and
-    zhiwei-service.exe. This is not an installer: existing .env and database files in
-    the output directory are preserved.
+    zhiwei-service.exe. This is not an installer: existing .env and data files in
+    the output directory are preserved. The database lives under data/.
 #>
 [CmdletBinding()]
 param(
     [string]$OutputDir = 'D:\Zhiwei',
-    [string]$MigrationSource = 'D:\SmartAssistant',
+    [string]$MigrationSource = 'D:\Zhiwei',
     [switch]$SkipBuild,
     [switch]$SkipTests,
+    [switch]$WithMediaGateway,
+    [ValidateSet('onefile', 'onedir')]
+    [string]$MediaGatewayMode = 'onefile',
+    [switch]$MediaGatewayWithAsr,
     [switch]$WithTools,
     [switch]$NoShortcut
 )
@@ -93,6 +97,15 @@ if (-not $SkipBuild) {
     finally {
         Pop-Location
     }
+
+    if ($WithMediaGateway) {
+        Write-Host '.. Building media-gateway.exe' -ForegroundColor Yellow
+        & (Join-Path $PSScriptRoot 'build-media-gateway.ps1') `
+            -OneDir:($MediaGatewayMode -eq 'onedir') `
+            -WithAsr:$MediaGatewayWithAsr `
+            -SkipTests:$SkipTests
+        Assert-LastExitCode 'build media-gateway'
+    }
 }
 
 $desktopExe = Join-Path $tauri 'target\release\zhiwei-desktop.exe'
@@ -127,6 +140,21 @@ foreach ($binary in $binaries) {
     Copy-Item -LiteralPath (Join-Path $backend "target\release\$binary") `
         -Destination $OutputDir -Force
 }
+if ($WithMediaGateway) {
+    if ($MediaGatewayMode -eq 'onedir') {
+        $gatewaySource = Join-Path $root 'media-gateway\dist\media-gateway'
+        if (-not (Test-Path -LiteralPath $gatewaySource)) {
+            throw "Missing media-gateway build directory: $gatewaySource"
+        }
+        Copy-Item -LiteralPath $gatewaySource -Destination $OutputDir -Recurse -Force
+    } else {
+        $gatewaySource = Join-Path $root 'media-gateway\dist\media-gateway.exe'
+        if (-not (Test-Path -LiteralPath $gatewaySource)) {
+            throw "Missing media-gateway executable: $gatewaySource"
+        }
+        Copy-Item -LiteralPath $gatewaySource -Destination $OutputDir -Force
+    }
+}
 
 $releaseEnv = Join-Path $OutputDir '.env'
 if (-not (Test-Path -LiteralPath $releaseEnv)) {
@@ -139,8 +167,11 @@ if (-not (Test-Path -LiteralPath $releaseEnv)) {
     }
     Copy-Item -LiteralPath $sourceEnv -Destination $releaseEnv
 }
+$releaseDataDir = Join-Path $OutputDir 'data'
+New-Item -ItemType Directory -Path $releaseDataDir -Force | Out-Null
+$releaseDb = Join-Path $releaseDataDir 'smart_assistant.db'
 Set-EnvValue -Path $releaseEnv -Name 'SMART_ASSISTANT_DB' `
-    -Value (Join-Path $OutputDir 'smart_assistant.db').Replace('\', '/')
+    -Value $releaseDb.Replace('\', '/')
 Set-EnvValue -Path $releaseEnv -Name 'SMART_ASSISTANT_LOG_FILE' -Value 'logs/zhiwei-service.log'
 Set-EnvValue -Path $releaseEnv -Name 'SMART_ASSISTANT_WATCHDOG_FILE' -Value 'logs/zhiwei-service.heartbeat'
 Set-EnvValue -Path $releaseEnv -Name 'CONTROL_ENABLED' -Value '1'
@@ -148,9 +179,36 @@ Set-EnvValue -Path $releaseEnv -Name 'CONTROL_ADDR' -Value '127.0.0.1:0'
 Set-EnvValue -Path $releaseEnv -Name 'CONTROL_STATE_FILE' -Value 'logs/control.json'
 Set-EnvValue -Path $releaseEnv -Name 'CONTROL_TOKEN_FILE' -Value 'logs/control.token'
 
-$releaseDb = Join-Path $OutputDir 'smart_assistant.db'
+if ($WithMediaGateway) {
+    $gatewayEnvDest = if ($MediaGatewayMode -eq 'onedir') {
+        Join-Path $OutputDir 'media-gateway\media-gateway.env'
+    } else {
+        Join-Path $OutputDir 'media-gateway.env'
+    }
+    if (-not (Test-Path -LiteralPath $gatewayEnvDest)) {
+        $gatewayEnvSource = @(
+            (Join-Path $root 'media-gateway\.env'),
+            (Join-Path $root 'media-gateway\.env.example')
+        ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if (-not $gatewayEnvSource) {
+            throw 'Missing media-gateway/.env and media-gateway/.env.example.'
+        }
+        Copy-Item -LiteralPath $gatewayEnvSource -Destination $gatewayEnvDest
+    }
+    $gatewayPort = 8787
+    $portLine = Get-Content -LiteralPath $gatewayEnvDest -Encoding UTF8 |
+        Where-Object { $_ -match '^\s*PORT\s*=\s*\d+\s*$' } |
+        Select-Object -Last 1
+    if ($portLine -and $portLine -match '=\s*(\d+)') {
+        $gatewayPort = [int]$Matches[1]
+    }
+    Set-EnvValue -Path $releaseEnv -Name 'MEDIA_GATEWAY_URL' `
+        -Value "http://127.0.0.1:$gatewayPort"
+}
+
 if (-not (Test-Path -LiteralPath $releaseDb)) {
     $sourceDb = @(
+        (Join-Path $MigrationSource 'data\smart_assistant.db'),
         (Join-Path $MigrationSource 'smart_assistant.db'),
         (Join-Path $backend 'smart_assistant.db')
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1

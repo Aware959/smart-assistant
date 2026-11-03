@@ -37,12 +37,17 @@ desktop/node_modules/
 desktop/dist/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+desktop/preview.html
 
 # Python 媒体网关 (media-gateway/)
 media-gateway/**/__pycache__/
 media-gateway/**/*.pyc
 # ASR 依赖装在本地 venv 里（uv venv --python 3.13 media-gateway/.venv），绝不能入库
 media-gateway/.venv/
+media-gateway/.build-venv/
+media-gateway/build/
+media-gateway/dist/
+media-gateway/.smoke/
 
 # Android (android/)
 android/.gradle/

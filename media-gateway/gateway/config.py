@@ -28,11 +28,24 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# media-gateway/ 目录（本包位于其下的 gateway/ 子目录）
-BASE_DIR = Path(__file__).resolve().parent.parent
+
+def base_dir() -> Path:
+    """配置与相对路径的基准目录。
+
+    源码运行时是 `media-gateway/`（本包位于其下的 `gateway/` 子目录）；
+    PyInstaller 冻结后 `__file__` 位于临时解包目录，必须改用 exe 所在目录，
+    否则用户的 `.env` / 工作流文件永远找不到。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+BASE_DIR = base_dir()
 
 
 def load_dotenv(path: str | os.PathLike[str] = ".env") -> None:
@@ -58,6 +71,24 @@ def load_dotenv(path: str | os.PathLike[str] = ".env") -> None:
                 val = val[1:-1]
             if key and key not in os.environ:
                 os.environ[key] = val
+
+
+def env_file() -> Path:
+    """定位网关配置文件。
+
+    优先级：
+    1. `MEDIA_GATEWAY_ENV`（桌面壳显式传入，相对路径按 [`BASE_DIR`] 解析）
+    2. `media-gateway.env`（发布目录推荐，与 `.env` 分开，避免和后端 env 混用）
+    3. `.env`（开发目录沿用旧约定）
+    """
+    explicit = os.getenv("MEDIA_GATEWAY_ENV", "").strip()
+    if explicit:
+        path = Path(explicit)
+        return path if path.is_absolute() else BASE_DIR / path
+    packaged = BASE_DIR / "media-gateway.env"
+    if packaged.exists():
+        return packaged
+    return BASE_DIR / ".env"
 
 
 @dataclass(frozen=True)
@@ -117,5 +148,5 @@ class Settings:
         )
 
 
-load_dotenv()  # 必须在 from_env 之前
+load_dotenv(env_file())  # 必须在 from_env 之前
 settings = Settings.from_env()

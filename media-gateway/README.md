@@ -74,6 +74,21 @@ cp .env.example .env       # 按需改 .env（端口 / 后端类型 / ComfyUI �
 python main.py              # 监听 127.0.0.1:8787
 ```
 
+### 打包为可执行文件
+
+```powershell
+pwsh -File scripts\build-media-gateway.ps1            # 单文件 dist\media-gateway.exe
+pwsh -File scripts\build-media-gateway.ps1 -OneDir    # 目录形态，启动更快
+pwsh -File scripts\build-media-gateway.ps1 -WithAsr   # 连 faster-whisper 依赖一起打包
+```
+
+脚本用 PyInstaller 打包（缺了会自动装），先跑一遍零依赖单测再构建。冻结运行时
+配置文件从 exe 所在目录解析，优先级：`MEDIA_GATEWAY_ENV` 指定路径 → 同目录
+`media-gateway.env` → 同目录 `.env`；`COMFYUI_WORKFLOW_FILE` 等相对路径也按
+exe 目录解析。`-WithAsr` 会把 ctranslate2 / av 等原生依赖收进包里，Whisper 模型
+仍在首次使用时下载（或提前放好 `ASR_MODEL_DIR`）。`zhiwei-desktop` 放置同目录的
+`media-gateway.exe` 后即可自动托管（启停、退避、健康检查与配置编辑）。
+
 退出（对齐 Rust 侧 `zhiwei-service`）：**Ctrl+C / Ctrl+Break** 走优雅收尾——停止接收新请求，
 并等**在途**的出图 / 合成请求跑完再退出（避免把正在传输的图片/语音掐断）；**再按一次**
 不再等待、立即强制退出。

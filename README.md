@@ -43,13 +43,30 @@ npm run desktop:dev
 pwsh -File scripts/build-portable.ps1
 ```
 
-默认输出到新目录 `D:\Zhiwei`，入口是 `D:\Zhiwei\zhiwei-desktop.exe`。默认只构建并
-打包运行必需的 `zhiwei-service.exe` 与桌面壳；维护工具不参与日常发布构建。
-首次创建时会从旧目录 `D:\SmartAssistant` 迁移 `.env`、数据库和本地状态；
-日志从新目录重新开始，避免复制历史敏感信息。之后只读写新目录。脚本会更新桌面的
-`Zhiwei.lnk` 指向新入口；不需要时加 `-NoShortcut`。旧目录不会被删除。
+默认输出到 `D:\Zhiwei`，入口是 `D:\Zhiwei\zhiwei-desktop.exe`，数据库位于
+`D:\Zhiwei\data\smart_assistant.db`。默认只构建并打包运行必需的
+`zhiwei-service.exe` 与桌面壳；维护工具不参与日常发布构建。首次创建时会从发布
+目录迁移 `.env`、数据库和本地状态；日志从新目录重新开始，避免复制历史敏感信息。
+之后只读写新目录。脚本会更新桌面的 `Zhiwei.lnk` 指向新入口；不需要时加
+`-NoShortcut`。已有数据不会被删除。
 启动配置与密钥仍写在 `.env`；运行时策略由桌面通过 `zhiwei-service` 本地控制接口
 写入数据库。需要维护工具时单独运行：
+
+需要把本机媒体网关一并纳入桌面运维时，加 `-WithMediaGateway`：
+
+```powershell
+pwsh -File scripts/build-portable.ps1 -WithMediaGateway
+```
+
+发布目录会带上 `media-gateway.exe` 与独立的 `media-gateway.env`，桌面壳负责
+启停、健康检查与配置编辑；`MEDIA_GATEWAY_URL` 会按网关端口自动写进发布
+`.env`。默认打单文件，要更快启动可加 `-MediaGatewayMode onedir`；需要入站
+语音转写再加 `-MediaGatewayWithAsr`（把 faster-whisper 等依赖一并打进包里，
+模型仍按 `ASR_MODEL_DIR` 首次下载）。单独打网关不发布整套目录时：
+
+```powershell
+pwsh -File scripts/build-media-gateway.ps1 [-WithAsr] [-OneDir]
+```
 
 ```powershell
 pwsh -File scripts/build-tools.ps1 -InstallDir D:\Zhiwei

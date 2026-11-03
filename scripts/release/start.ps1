@@ -3,8 +3,9 @@
     后台启动发行包里的 zhiwei-service。
 
 .DESCRIPTION
-    使用当前目录的 .env 与 smart_assistant.db；PID 写入 zhiwei-service.pid，
-    标准输出/错误写入 logs/。重复运行会复用已在运行的同一份 zhiwei-service。
+    使用当前目录的 .env 与 data/smart_assistant.db；PID 写入
+    zhiwei-service.pid，标准输出/错误写入 logs/。重复运行会复用已在运行的
+    同一份 zhiwei-service。
 #>
 [CmdletBinding()]
 param()

@@ -3,9 +3,9 @@
     Build and install a standalone Telegram release for this Windows user.
 
 .DESCRIPTION
-    Installs to D:\SmartAssistant, keeps release data separate from
-    backend/, copies the current .env and database on first install, and creates
-    a desktop shortcut that starts the PowerShell 7 tray host.
+    Installs to D:\SmartAssistant, keeps release data separate from backend/,
+    copies the current .env and database on first install, and creates a desktop
+    shortcut. The database lives under data/.
 #>
 [CmdletBinding()]
 param(
@@ -126,7 +126,9 @@ Copy-Item -LiteralPath (Join-Path $releaseTemplates 'settings.ps1') -Destination
 
 $releaseEnv = Join-Path $installDir '.env'
 $sourceEnv = Join-Path $backend '.env'
-$releaseDb = Join-Path $installDir 'smart_assistant.db'
+$releaseDataDir = Join-Path $installDir 'data'
+New-Item -ItemType Directory -Path $releaseDataDir -Force | Out-Null
+$releaseDb = Join-Path $releaseDataDir 'smart_assistant.db'
 $dbEnvValue = $releaseDb.Replace('\', '/')
 
 if (-not (Test-Path -LiteralPath $releaseEnv)) {

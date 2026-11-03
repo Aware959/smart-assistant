@@ -16,10 +16,24 @@
 
 from __future__ import annotations
 
-from gateway.server import serve
+import argparse
+import os
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="知微本机媒体网关")
+    parser.add_argument(
+        "--env",
+        metavar="PATH",
+        help="配置文件路径（默认同目录 media-gateway.env，其次 .env）",
+    )
+    args = parser.parse_args()
+    if args.env:
+        os.environ["MEDIA_GATEWAY_ENV"] = args.env
+
+    # 必须在设置 MEDIA_GATEWAY_ENV 之后再导入：config 在模块导入时就会读取配置。
+    from gateway.server import serve
+
     serve()
 
 
