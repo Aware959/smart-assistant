@@ -336,6 +336,18 @@ impl IdentityService {
         Ok(self.evolution_gate(now)? == EvolutionGate::Run)
     }
 
+    /// 最近一次后台演化到点检查时间；持久 UTC 墙钟，不随进程重启重置。
+    pub fn latest_evolution_check(&self) -> Result<Option<DateTime<Utc>>> {
+        let guard = crate::db::lock_db(&self.db);
+        crate::db::identity::latest_evolution_check(&guard)
+    }
+
+    /// 记录一次到点检查；失败与无提案同样计入，避免停机后反复补跑。
+    pub fn mark_evolution_checked(&self, now: DateTime<Utc>) -> Result<()> {
+        let guard = crate::db::lock_db(&self.db);
+        crate::db::identity::mark_evolution_checked(&guard, now)
+    }
+
     /// 返回后台演化当前被哪条规则挡住，便于调度日志。
     pub fn evolution_gate(&self, now: DateTime<Utc>) -> Result<EvolutionGate> {
         let guard = crate::db::lock_db(&self.db);

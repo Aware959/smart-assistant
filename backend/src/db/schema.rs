@@ -5,7 +5,7 @@
 //! 仅 [`migrate`] 里保留 `v17`（删掉三张从未被读写的死表）、`v18`（`messages` 放开
 //! `role='tool'` 并改写历史工具结果行）、`v19`（失败轮次重试队列）、`v20`
 //! （身份提案 / 版本审计）、`v21`（未版本化身份的提案基线）、`v22`（审批操作者审计）
-//! 与 `v23`（运行时配置及审计）
+//! 、`v23`（运行时配置及审计）与 `v24`（身份演化检查墙钟锚点）
 //! 几段，与末尾的版本戳。
 //!
 //! 取舍：旧版本库不再支持平滑升级，需重建（`rm` 后重跑）。对单人单库、且已迁移到最新
@@ -18,7 +18,7 @@ use crate::db::{meta, vec};
 use crate::error::Result;
 
 /// 当前 schema 版本号。
-pub(crate) const SCHEMA_VERSION: i64 = 23;
+pub(crate) const SCHEMA_VERSION: i64 = 24;
 const KEY_SCHEMA_VERSION: &str = "schema_version";
 
 /// 建表（幂等）+ 增量迁移 + 向量表初始化。数据库打开时调用。
@@ -138,6 +138,12 @@ pub(crate) fn init_schema(conn: &Connection) -> Result<()> {
             operator    TEXT NOT NULL,
             created_at  TEXT NOT NULL,
             PRIMARY KEY (revision, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS identity_evolution_runs (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            last_checked_at TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_messages_session_time ON messages(session_id, created_at);
@@ -403,6 +409,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         tracing::info!("迁移 v23：新增运行时配置与审计表");
     }
 
+    // v24：身份演化的调度锚点必须跨进程保留。否则每次重启都会重新等完整周期，
+    // 长时间停机也不会触发检查；这里用单行 UTC 墙钟记录最近一次到点检查。
+    if version < 24 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS identity_evolution_runs (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                last_checked_at TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );",
+        )?;
+        tracing::info!("迁移 v24：新增身份演化检查锚点表");
+    }
+
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
@@ -494,10 +513,11 @@ mod tests {
         )
         .unwrap();
         migrate(&conn).unwrap();
-        assert_eq!(stored_version(&conn).unwrap().as_deref(), Some("23"));
+        assert_eq!(stored_version(&conn).unwrap().as_deref(), Some("24"));
         assert!(table_exists(&conn, "app_settings").unwrap());
         assert!(table_exists(&conn, "app_settings_revisions").unwrap());
         assert!(table_exists(&conn, "app_settings_audit").unwrap());
+        assert!(table_exists(&conn, "identity_evolution_runs").unwrap());
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM sessions WHERE id = 'keep'", [], |r| {
                 r.get(0)

@@ -115,29 +115,41 @@ impl IdentityEvolutionAgent {
 
     /// 后台任务入口：默认关闭，按调用方给定的周期低频运行。
     ///
-    /// 首次运行前先等一个周期，避免进程刚启动就调用模型；关闭时直接返回。
+    /// 到期锚点持久化为 UTC 墙钟：首次启用立即检查一次，之后按周期推进；
+    /// 服务重启不重置计时，停机跨过到期点时启动即补检。关闭时直接返回。
     pub async fn run_scheduled(self: Arc<Self>, sessions: Arc<Sessions>, interval_hours: i64) {
         let _ = interval_hours;
         tracing::info!("身份演化后台任务已启动，每分钟检查运行时配置");
-        let mut next_due = None;
         loop {
             let settings = crate::core::settings::snapshot();
             if !settings.identity_evolution_enabled {
-                next_due = None;
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 continue;
             }
             let interval = std::time::Duration::from_secs(
                 (settings.identity_evolution_interval_hours.max(1) as u64).saturating_mul(3600),
             );
-            let due = *next_due.get_or_insert_with(|| std::time::Instant::now() + interval);
-            let now = std::time::Instant::now();
+            let now = Utc::now();
+            let last_checked = match self.identity.latest_evolution_check() {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(error = %error, "读取身份演化调度锚点失败，一分钟内重试");
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    continue;
+                }
+            };
+            let due = last_checked.map_or(now, |checked| checked + interval);
             if now < due {
-                tokio::time::sleep((due - now).min(std::time::Duration::from_secs(60))).await;
+                let wait = (due - now)
+                    .to_std()
+                    .unwrap_or(std::time::Duration::from_secs(60));
+                tokio::time::sleep(wait.min(std::time::Duration::from_secs(60))).await;
                 continue;
             }
-            next_due = Some(std::time::Instant::now() + interval);
-            let now = Utc::now();
+            if let Err(error) = self.identity.mark_evolution_checked(now) {
+                tracing::warn!(error = %error, "写入身份演化调度锚点失败，本轮跳过");
+                continue;
+            }
             let gate = match self.identity.evolution_gate(now) {
                 Ok(gate) => gate,
                 Err(e) => {

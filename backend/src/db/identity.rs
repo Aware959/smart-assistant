@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::core::identity::{
     AgentIdentity, ChangeSource, IdentityError, IdentityFieldKey, IdentityFieldValue,
@@ -166,6 +166,33 @@ pub(crate) fn has_any_proposal_between(
         |row| row.get(0),
     )?;
     Ok(exists != 0)
+}
+
+/// 最近一次身份演化到点检查时间；调度用 UTC 墙钟补算，不随进程重启重置。
+pub(crate) fn latest_evolution_check(db: &Database) -> Result<Option<DateTime<Utc>>> {
+    let raw: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT last_checked_at FROM identity_evolution_runs WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw.map(parse_utc).transpose()?)
+}
+
+/// 原子记录一次到点检查；无论生成提案、无提案还是失败，都避免停机后反复补跑。
+pub(crate) fn mark_evolution_checked(db: &Database, now: DateTime<Utc>) -> Result<()> {
+    let timestamp = now.to_rfc3339();
+    db.conn().execute(
+        "INSERT INTO identity_evolution_runs (id, last_checked_at, updated_at)
+         VALUES (1, ?1, ?1)
+         ON CONFLICT(id) DO UPDATE SET
+             last_checked_at = excluded.last_checked_at,
+             updated_at = excluded.updated_at",
+        params![timestamp],
+    )?;
+    Ok(())
 }
 
 /// 只更新审批决定（pending → approved / rejected），不动应用时间。
@@ -522,6 +549,32 @@ fn map_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<IdentityChangePropo
             .map(parse_utc)
             .transpose()?,
     })
+}
+
+#[cfg(test)]
+mod evolution_schedule_tests {
+    use super::*;
+    use crate::db::Database;
+
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-29T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            + chrono::Duration::seconds(secs)
+    }
+
+    #[test]
+    fn evolution_check_anchor_persists_and_parses_utc() {
+        let db = Database::in_memory().unwrap();
+        let first = at(0);
+        let second = at(86_400);
+
+        assert_eq!(latest_evolution_check(&db).unwrap(), None);
+        mark_evolution_checked(&db, first).unwrap();
+        assert_eq!(latest_evolution_check(&db).unwrap(), Some(first));
+        mark_evolution_checked(&db, second).unwrap();
+        assert_eq!(latest_evolution_check(&db).unwrap(), Some(second));
+    }
 }
 
 fn map_version(row: &rusqlite::Row<'_>) -> rusqlite::Result<IdentityVersion> {
