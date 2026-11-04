@@ -21,6 +21,7 @@ import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from .config import Settings, settings
 from . import asr
@@ -161,6 +162,16 @@ def serve(config: Settings | None = None):
         f"(diffusion={config.diffusion_backend_type}, Ctrl+C / Ctrl+Break 退出)",
         flush=True,
     )
+
+    # 工作流文件不存在的话，出图要到真正调用时才会 500，报错信息还夹在 JSON 里，
+    # 很难一眼看出是"路径过期"（仓库搬家后最常见）。启动期就点名。
+    if config.diffusion_backend_type == "comfyui" and config.comfyui_workflow_file:
+        if not Path(config.comfyui_workflow_file).is_file():
+            print(
+                f"[comfyui] 警告：工作流文件不存在，出图会失败："
+                f"{config.comfyui_workflow_file}",
+                flush=True,
+            )
 
     # 后台预热 ASR 模型（ASR_WARMUP=1 且引擎非空时）：冷加载实测 20 秒级，挪到启动期做，
     # 免得第一条语音白等。**必须后台线程**——预热失败或很慢都不该挡住监听启动。

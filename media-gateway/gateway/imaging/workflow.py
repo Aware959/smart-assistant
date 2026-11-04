@@ -13,6 +13,58 @@ from ..config import settings
 from ..errors import GatewayError
 from ..httpclient import get_json
 
+# 正向提示词在**工作流模板**里的占位符。
+#
+# 工作流节点的 text 是「模板字符串」，不是要被整段替换掉的槽位：模板里写的
+# 质量词/风格词（masterpiece, best quality…）是这套出图风格的一部分，每张图都要带上；
+# 真正随请求变化的只是画面描述本身。故用占位符标记"注入点"，而不是清空整段。
+#
+# 用 `str.replace` 而非 `str.format`：工作流里其它节点的 text 很可能自带花括号
+# （LoRA 权重、模型名），`format` 会把它们当字段名解析而炸掉。
+PROMPT_PLACEHOLDER = "{prompt}"
+
+
+def inject_prompt(template: str, prompt: str) -> str:
+    """把请求的正向提示词注入工作流模板，返回最终文本。
+
+    三种情形：
+
+    1. 模板里含 `"{prompt}"` → 占位符处替换成请求提示词，模板其余部分原样保留
+    2. 模板为空（内置兜底工作流就是空的）→ 请求提示词即最终文本
+    3. 模板非空但没有占位符 → 请求提示词追加在模板之后（模板里的词不丢）
+    """
+    template = template or ""
+    prompt = (prompt or "").strip()
+    if PROMPT_PLACEHOLDER in template:
+        return template.replace(PROMPT_PLACEHOLDER, prompt)
+    if not template.strip():
+        return prompt
+    if not prompt:
+        return template
+    return f"{template.rstrip().rstrip(',')}, {prompt}"
+
+
+def apply_prompt(wf: dict, nodes: dict, req: dict) -> None:
+    """把请求注入工作流（原地修改 `wf`）。
+
+    **只动正向提示词**：负向提示词节点保持工作流里的原值不变——负面词是模板作者的
+    调校结果（抑制畸形手、水印等），请求方没带 `negative_prompt` 时不该被清空。
+    尺寸/步数/CFG 同理：请求没带就不覆盖，沿用模板的值。
+    """
+    if nodes.get("positive"):
+        wf.setdefault(nodes["positive"], {"class_type": "CLIPTextEncode", "inputs": {}})
+        wf[nodes["positive"]]["inputs"]["text"] = inject_prompt(
+            wf[nodes["positive"]].get("inputs", {}).get("text", ""),
+            req.get("prompt", ""),
+        )
+    else:
+        raise GatewayError(500, "工作流里找不到正向提示词节点（KSampler.positive 缺失）")
+
+    # 负向提示词：**刻意不覆盖**（见函数说明）。
+    if req.get("width") and req.get("height") and nodes.get("size") in wf:
+        wf[nodes["size"]]["inputs"]["width"] = req["width"]
+        wf[nodes["size"]]["inputs"]["height"] = req["height"]
+
 # 内置最简 SD1.5 工作流（ComfyUI API 格式）。仅当未指定 COMFYUI_WORKFLOW_FILE 时兜底；
 # ckpt 名需你机器上存在，正式用建议导出你自己的 work flow 并设 COMFYUI_WORKFLOW_FILE。
 DEFAULT_WORKFLOW: dict = {

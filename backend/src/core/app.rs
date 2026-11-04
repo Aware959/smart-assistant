@@ -32,6 +32,8 @@ pub struct App {
     pub identity_evolution: Arc<crate::core::identity::evolution::IdentityEvolutionAgent>,
     /// 共享运行时配置（DB 持久化、revision 与审计）。
     pub settings: Arc<crate::core::settings::SettingsService>,
+    /// 共享数据库句柄。控制面用它装配独立的 IdentityService。
+    pub db: Arc<Mutex<crate::db::Database>>,
 }
 
 impl App {
@@ -99,6 +101,7 @@ impl App {
             identity,
             identity_evolution,
             settings,
+            db,
         })
     }
 }

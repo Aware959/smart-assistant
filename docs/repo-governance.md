@@ -76,7 +76,7 @@ skill 的默认流程是 `audit -> report -> user approval -> phased fix`。移�
 
 ## 本仓库边界
 
-- 当前主线是 Telegram；不主动改 `backend/src/api/**`、`backend/src/channels/ilink/**` 和 `frontend/**`。
+- 当前主线是 Telegram；不主动改 `backend/src/api/**` 与 `backend/src/channels/ilink/**`。
 - 共享代码可以维护，但只保证 Telegram 端正确。
 - `docs/archive/` 的目录名使用英文单词；归档文档不随代码更新。
 - 新增环境变量同步到 `backend/.env.example`。

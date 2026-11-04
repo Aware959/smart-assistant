@@ -14,28 +14,17 @@ import urllib.error
 from ..config import settings
 from ..errors import GatewayError
 from ..httpclient import get_bytes, get_json, post_json
-from .workflow import load_workflow, resolve_nodes
+from .workflow import apply_prompt, load_workflow, resolve_nodes
 
 
 def generate(req: dict) -> tuple[bytes, str]:
     """注入 prompt → 提交 /prompt → 轮询 /history → 拉取首张图。"""
     wf = load_workflow()
     nodes = resolve_nodes(wf)
-    # 注入正向提示词（必填）。
-    if nodes["positive"]:
-        wf.setdefault(nodes["positive"], {"class_type": "CLIPTextEncode", "inputs": {}})
-        wf[nodes["positive"]]["inputs"]["text"] = req.get("prompt", "")
-    else:
-        raise GatewayError(500, "工作流里找不到正向提示词节点（KSampler.positive 缺失）")
-    # 负向提示词（可选）。
-    if nodes["negative"] and nodes["negative"] in wf:
-        wf[nodes["negative"]]["inputs"]["text"] = req.get("negative_prompt") or ""
-    # 尺寸（可选）。
-    if req.get("width") and req.get("height") and nodes["size"] and nodes["size"] in wf:
-        wf[nodes["size"]]["inputs"]["width"] = req["width"]
-        wf[nodes["size"]]["inputs"]["height"] = req["height"]
+    # 注入正向提示词（模板字符串注入），负向提示词保持工作流原值。
+    apply_prompt(wf, nodes, req)
     # 步数 / CFG（可选），并随机种子避免连出同图。
-    if nodes["ksampler"] and nodes["ksampler"] in wf:
+    if nodes.get("ksampler") and nodes["ksampler"] in wf:
         ks = wf[nodes["ksampler"]]["inputs"]
         if req.get("steps"):
             ks["steps"] = req["steps"]

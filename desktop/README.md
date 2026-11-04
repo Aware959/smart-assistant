@@ -8,13 +8,48 @@
 
 ## 开发
 
-在同时存在 `backend/.env` 和已编译的 `backend/target/release/zhiwei-service.exe` 时：
+一键编排（编译后端调试构建，脚本先拉起 service 与源码态媒体网关，再启动
+`tauri dev`；桌面壳在开发态只当 UI，不自启这两个进程）：
 
 ```powershell
+pwsh -NoProfile -File scripts/dev.ps1     # 仓库根目录也可 make dev
+pwsh -NoProfile -File scripts/dev.ps1 -Telegram
+```
+
+`scripts/dev.ps1` 的参数：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `-Telegram` | 关 | 打开 Telegram 通道；默认 `TELEGRAM_ENABLED=0`，避免开发态误发消息 |
+| `-WebPort <端口>` | `3002` | 开发 service 监听端口；与正式版（3000）、测试版（3001）分开 |
+| `-GatewayPort <端口>` | `8788` | 开发网关端口；与正式版（通常 8787）分开，避免抢占 |
+| `-LogLevel <级别>` | `info` | 传给服务进程的 `RUST_LOG`；本机若全局是 `warn`，开发态就看不到启动日志 |
+| `-SkipBuild` | 关 | 跳过 `cargo build --bin zhiwei-service` |
+
+开发态读自己的 `backend/.env.dev` 与 `backend/smart_assistant.db`，与正式版
+（`D:\Zhiwei`，`.env.prod`）不共享库、端口或 bot。
+
+手动方式照旧。在存在 `backend/.env.dev` 和已编译的 `backend/target/debug/zhiwei-service.exe` 时：
+
+```powershell
+# 终端 1：后端
+cd backend
+cargo run --bin zhiwei-service
+
+# 终端 2：媒体网关（源码态）
+cd media-gateway
+python main.py
+
+# 终端 3：桌面 UI
 cd desktop
 npm install
 npm run desktop:dev
 ```
+
+`tauri dev` **不会**自动启动 service 与媒体网关。桌面壳通过 `logs/control.json`
+里的 pid 和网关的 `/health` 识别外部进程，界面显示“已在运行（外部启动）”，
+不会重复拉起；这类进程也不归桌面壳停止 / 重启，请在启动它的终端里操作。
+发布版（release 构建）仍由桌面壳托管自启。
 
 开发时可用环境变量指定服务程序和工作目录：
 
@@ -27,6 +62,8 @@ npm run tauri dev
 
 不设置时，桌面壳优先寻找可执行文件同目录的 `zhiwei-service.exe`；开发构建会向上查找
 仓库里的 `backend/target/release/zhiwei-service.exe` 或 `backend/target/debug/zhiwei-service.exe`。
+媒体网关同理：找不到 `media-gateway.exe` 时，会回退到仓库里的 `media-gateway/main.py`
+以源码态运行（优先 `media-gateway/.venv` 的解释器，其次 PATH 中的 `python`）。
 排查设置窗口时可加 `$env:ZHIWEI_SHOW_ON_START = "1"`，让窗口在启动时显示。
 
 只看界面、不启动任何后端进程时，可生成并打开 mock 预览页：
@@ -57,14 +94,17 @@ npm run dev              # 打开 http://localhost:1420/preview.html
 日志 / 配置入口。开发时可分别用环境变量覆盖：
 
 - `ZHIWEI_MEDIA_GATEWAY`：网关可执行文件路径；
+- `ZHIWEI_MEDIA_GATEWAY_PYTHON`：源码态运行时使用的 Python 解释器（默认优先
+  `media-gateway/.venv`，再退回 PATH 中的 `python`）；
 - `ZHIWEI_MEDIA_GATEWAY_HOME`：网关工作目录（默认取可执行文件所在目录）；
 - `ZHIWEI_MEDIA_GATEWAY_ENV`：网关配置文件路径。
 
-网关配置文件按以下顺序解析：`media-gateway.env`（发布目录推荐）→ 同目录
-`.env` → 桌面目录 `.env`（开发模式回退）。状态窗口里的"媒体网关配置"直接读写
-这个文件，保存时校验取值并自动重启网关使其生效。界面还会对比网关端口与
-`backend/.env` 的 `MEDIA_GATEWAY_URL`，不一致时给出提示（便携发布脚本会自动
-把两者对齐）。
+网关配置文件按以下顺序解析：`ZHIWEI_MEDIA_GATEWAY_ENV` → `.env.<ZHIWEI_ENV>`
+（开发 `media-gateway/.env.dev` / 生产 `.env.prod`）→ `media-gateway.env`
+（发布目录推荐）→ 同目录 `.env` → 桌面目录 `.env`（开发模式回退）。状态窗口里的
+"媒体网关配置"直接读写这个文件，保存时校验取值并自动重启网关使其生效。界面还会
+对比网关端口与 `backend/.env.dev` / `.env.prod` 的 `MEDIA_GATEWAY_URL`，不一致时
+给出提示（便携发布脚本会自动把两者对齐）。
 
 控制接口启动后写入 `logs/control.json` 与 `logs/control.token`。该接口只绑定
 loopback，token 仅由本机进程读取；不要把这两个文件同步到其他机器。

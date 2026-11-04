@@ -54,6 +54,28 @@ fn open_append(path: &str) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// 检查文件父目录可写，失败时返回带目录路径的明确错误。
+///
+/// 与 `Database::ensure_parent_writable` 同思路：`Access is denied` 对用户没有
+/// 可操作性，这里给出目录位置和"请检查权限"的提示。检查方式是写一个探针文件
+/// 再删掉，不改变目录内容。
+fn ensure_parent_writable_for_log(path: &str) -> std::io::Result<()> {
+    let file = std::path::Path::new(path);
+    let Some(parent) = file.parent() else {
+        return Ok(());
+    };
+    if parent.as_os_str().is_empty() {
+        return Ok(());
+    }
+    if !parent.exists() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let probe = parent.join(".zhiwei-log-probe");
+    std::fs::write(&probe, b"ok")?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
 /// 脱敏 API key：只保留首尾四位，空值显示为 <not set>。
 pub fn mask_key(key: &str) -> String {
     if key.is_empty() {
@@ -76,10 +98,8 @@ pub struct Runtime {
 /// 链路追踪 JSON（`SMART_ASSISTANT_TRACE_FILE`）、按需启动心跳探针。
 /// 必须在 tokio 运行时内调用（内部有 `tokio::spawn`）。
 pub fn bootstrap() -> Runtime {
-    // 加载运行目录下的 .env 文件（不存在则静默跳过，环境变量优先）。
-    dotenvy::dotenv().ok();
-
-    tracing::info!(version = %crate::utils::version::VERSION, "application started");
+    // 按运行环境加载配置文件（不存在则静默跳过，环境变量优先）。
+    let env_profile = load_env();
 
     // 全局 panic hook：把 panic 位置（含线程名）通过 tracing 记录，便于与各阶段
     // 日志对照时间轴定位崩溃环节。默认 hook 同时保留，panic 信息也会打到 stderr。
@@ -105,6 +125,12 @@ pub fn bootstrap() -> Runtime {
         .filter(|f| !f.is_empty());
     let mut tee = TeeWriter { file: None };
     if let Some(path) = file_mirror {
+        if let Err(e) = ensure_parent_writable_for_log(&path) {
+            eprintln!(
+                "[log] 日志目录不可写，仅输出 stdout: {} 的父目录（{e}）",
+                path
+            );
+        }
         match open_append(&path) {
             Ok(f) => tee.file = Some(std::sync::Mutex::new(f)),
             Err(e) => eprintln!("[log] 打开日志文件失败，仅输出 stdout: {path} ({e})"),
@@ -157,6 +183,12 @@ pub fn bootstrap() -> Runtime {
             None
         }
     };
+
+    tracing::info!(
+        version = %crate::utils::version::VERSION,
+        env = %env_profile,
+        "application started"
+    );
 
     // 诊断心跳：SMART_ASSISTANT_WATCHDOG_FILE 指定时，用一个独立 OS 线程每 5 秒
     // 直接落一行（绕开 tracing）。同时一个 tokio 任务每秒更新计数器；探针据此
@@ -216,4 +248,33 @@ pub fn bootstrap() -> Runtime {
         _log_guard: Some(log_guard),
         _trace_guard: trace_guard,
     }
+}
+
+/// 按运行环境加载配置文件，返回实际使用的环境名。
+///
+/// 选择顺序：
+/// 1. `ZHIWEI_ENV=dev|prod` → `.env.dev` / `.env.prod`（在运行目录及上级目录查找）
+/// 2. 未设置时按构建档位推断：debug 取 `dev`，release 取 `prod`
+/// 3. 对应文件不存在时回退 `.env`（兼容已发布的旧目录），返回 `legacy`
+///
+/// 与 `dotenvy::dotenv()` 同语义：进程里已有的环境变量优先，不被文件覆盖。
+pub fn load_env() -> String {
+    let profile = std::env::var("ZHIWEI_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(debug_assertions) {
+                "dev".to_string()
+            } else {
+                "prod".to_string()
+            }
+        });
+
+    if dotenvy::from_filename(format!(".env.{profile}")).is_ok() {
+        return profile;
+    }
+
+    dotenvy::dotenv().ok();
+    "legacy".to_string()
 }

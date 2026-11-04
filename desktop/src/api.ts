@@ -4,6 +4,8 @@ import type {
   GatewaySettingsResult,
   GatewaySettingsView,
   GatewayStatus,
+  IdentityOverview,
+  ProposalView,
   ServiceStatus,
   SettingsSchemaItem,
   SettingsView,
@@ -28,5 +30,18 @@ export const api = {
   gatewaySettings: () => invoke<GatewaySettingsView>("gateway_settings"),
   updateGatewaySettings: (changes: Record<string, string>) =>
     invoke<GatewaySettingsResult>("update_gateway_settings", { changes }),
+  identityOverview: () => invoke<ControlResult<IdentityOverview>>("identity_overview"),
+  identityProposals: (limit?: number) =>
+    invoke<ControlResult<ProposalView[]>>("identity_proposals", { limit }),
+  approveProposal: (proposalId: string, explicitConsent: boolean) =>
+    invoke<ControlResult<Record<string, unknown>>>("approve_identity_proposal", {
+      proposalId,
+      explicitConsent,
+    }),
+  rejectProposal: (proposalId: string) =>
+    invoke<ControlResult<ProposalView>>("reject_identity_proposal", { proposalId }),
+  rollbackIdentity: (version?: number) =>
+    invoke<ControlResult<Record<string, unknown>>>("rollback_identity", { version }),
+  triggerEvolution: () => invoke<ControlResult<Record<string, unknown>>>("trigger_evolution"),
   openFile: (command: string) => invoke(command),
 };

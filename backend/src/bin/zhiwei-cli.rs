@@ -46,7 +46,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    dotenvy::dotenv().ok();
+    smart_assistant::utils::runtime::load_env();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.as_slice() {
         [group, sub, rest @ ..] if group == "db" => cmd_db(sub, rest),

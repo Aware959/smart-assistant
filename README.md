@@ -10,11 +10,48 @@
 
 ## 快速启动（根目录）
 
-桌面运行与发布见下方“桌面程序（Windows）”；后端测试可用：
+日常开发是三个独立进程，各开一个终端（开发态读 `.env.dev`，端口与数据互不抢占）：
+
+```powershell
+# 终端 1：后端通道守护 —— 3002，库 backend/smart_assistant.db
+cd backend
+cargo run --bin zhiwei-service
+
+# 终端 2：本机媒体网关 —— 8788
+cd media-gateway
+python main.py
+
+# 终端 3：桌面 UI —— 不自启上面两个，只识别已运行的进程
+cd desktop
+npm install        # 仅首次
+npm run desktop:dev
+```
+
+一键编排（脚本先拉起 service 与源码态网关，再开桌面，退出时统一停止）：
+
+```powershell
+make dev
+pwsh -NoProfile -File scripts/dev.ps1 -Telegram   # 需要 Telegram 时
+```
+
+冒烟与校验（改动完成后跑一遍）：
 
 ```bash
-make test
+make test                           # cargo test（全过 + 零警告是基线）
+make smoke                          # 跨进程冒烟：临时库 + 源码态网关，不碰真实数据
+
+cd backend
+cargo check --all-targets
+cargo fmt --all -- --check
 ```
+
+后端与媒体网关的配置按环境分文件：开发态读 `backend/.env.dev` + `media-gateway/.env.dev`，
+生产态读 `.env.prod`；进程变量 `ZHIWEI_ENV=dev|prod` 决定用哪一份（未设置时 debug 构建取
+dev、release 构建取 prod），两边端口与数据库互不复用。
+
+`npm run desktop:dev`（`tauri dev`）在开发态只启动界面，不会自启 `zhiwei-service`
+与媒体网关——先手动起这两个进程（或用 `make dev` 一键编排），桌面壳会把它们显示为
+“外部启动”。发布版仍由桌面壳托管自启。
 
 ## 桌面程序（Windows）
 

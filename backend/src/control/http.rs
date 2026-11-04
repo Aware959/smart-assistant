@@ -18,14 +18,24 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::identity::evolution::IdentityEvolutionAgent;
+use crate::core::identity::profile::Profile;
+use crate::core::identity::service::{IdentityService, ProposalView};
+use crate::core::session::Sessions;
 use crate::core::settings::{SettingsAuditEntry, SettingsService, SettingsView};
 use crate::error::SqlError;
 use crate::utils::version;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::Mutex as TokioMutex;
 
 use super::auth::require_token;
 
 pub(crate) struct AppState {
     pub(crate) settings: Arc<SettingsService>,
+    pub(crate) identity: Arc<IdentityService>,
+    pub(crate) evolution: Arc<IdentityEvolutionAgent>,
+    pub(crate) sessions: Arc<Sessions>,
+    pub(crate) evolve_lock: Arc<TokioMutex<()>>,
     pub(crate) token: String,
     pub(crate) started: Instant,
 }
@@ -117,14 +127,62 @@ struct UpdateRequest {
     changes: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IdentityOverview {
+    version: Option<u64>,
+    text: String,
+    latest_check_at: Option<String>,
+    gate: String,
+    pending_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProposalDecisionRequest {
+    #[serde(default = "default_operator")]
+    operator: Option<String>,
+    #[serde(default)]
+    explicit_consent: bool,
+}
+
+fn default_operator() -> Option<String> {
+    Some("desktop".to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RollbackRequest {
+    #[serde(default = "default_operator")]
+    operator: Option<String>,
+    #[serde(default)]
+    version: Option<i64>,
+}
+
+/// 控制服务启动参数，避免 `serve` 参数过多触发 clippy 警告。
+pub struct ServeParams {
+    pub settings: Arc<SettingsService>,
+    pub db: Arc<StdMutex<crate::db::Database>>,
+    pub sessions: Arc<Sessions>,
+    pub evolution: Arc<IdentityEvolutionAgent>,
+    pub enabled: bool,
+    pub addr: String,
+    pub state_file: String,
+    pub token_file: String,
+}
+
 /// 启动控制服务，写状态与 token 文件，然后阻塞到进程退出。
-pub async fn serve(
-    settings: Arc<SettingsService>,
-    enabled: bool,
-    addr: &str,
-    state_file: &str,
-    token_file: &str,
-) -> std::io::Result<()> {
+pub async fn serve(params: ServeParams) -> std::io::Result<()> {
+    let ServeParams {
+        settings,
+        db,
+        sessions,
+        evolution,
+        enabled,
+        addr,
+        state_file,
+        token_file,
+    } = params;
     if !enabled {
         tracing::info!("本地控制接口已关闭（CONTROL_ENABLED=0）");
         return Ok(());
@@ -147,12 +205,28 @@ pub async fn serve(
     );
     let token_path = PathBuf::from(token_file);
     write_private_file(&token_path, token.as_bytes())?;
+    let profile = Arc::new(Profile::new(db.clone()));
+    let identity = Arc::new(IdentityService::new(db, profile));
     let state = Arc::new(AppState {
         settings,
+        identity,
+        evolution,
+        sessions,
+        evolve_lock: Arc::new(TokioMutex::new(())),
         token,
         started: Instant::now(),
     });
-    let app = Router::new()
+    let app = control_router(state.clone());
+    let state_file = PathBuf::from(state_file);
+    write_state_file(&state_file, bound, &token_path)?;
+    tracing::info!(addr = %bound, "本地控制接口已启动");
+    axum::serve(listener, app).await
+}
+
+/// 控制接口路由表。单独抽出，便于测试覆盖全部路径（axum 0.8 要求 `{param}`，
+/// 旧的 `:param` 写法会在构造路由时 panic）。
+fn control_router(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/control/v1/health", get(health))
         .route(
             "/control/v1/settings",
@@ -161,12 +235,20 @@ pub async fn serve(
         .route("/control/v1/settings/schema", get(settings_schema))
         .route("/control/v1/settings/audit", get(settings_audit))
         .route("/control/v1/settings/validate", post(validate_settings))
+        .route("/control/v1/identity", get(identity_overview))
+        .route("/control/v1/identity/proposals", get(list_proposals))
+        .route(
+            "/control/v1/identity/proposals/{id}/approve",
+            post(approve_proposal),
+        )
+        .route(
+            "/control/v1/identity/proposals/{id}/reject",
+            post(reject_proposal),
+        )
+        .route("/control/v1/identity/rollback", post(rollback_identity))
+        .route("/control/v1/identity/evolve", post(trigger_evolution))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
-        .with_state(state);
-    let state_file = PathBuf::from(state_file);
-    write_state_file(&state_file, bound, &token_path)?;
-    tracing::info!(addr = %bound, "本地控制接口已启动");
-    axum::serve(listener, app).await
+        .with_state(state)
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<Health> {
@@ -219,6 +301,120 @@ async fn update_settings(
     )?))
 }
 
+async fn identity_overview(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<IdentityOverview>, ApiError> {
+    let identity_view = state.identity.current();
+    let now = Utc::now();
+    let gate = match state.identity.evolution_gate(now)? {
+        crate::core::identity::service::EvolutionGate::Run => "run",
+        crate::core::identity::service::EvolutionGate::PendingLimit => "pending_limit",
+        crate::core::identity::service::EvolutionGate::GlobalCooldown => "global_cooldown",
+        crate::core::identity::service::EvolutionGate::Disabled => "disabled",
+    };
+    let latest_check_at = state
+        .identity
+        .latest_evolution_check()?
+        .map(|t| t.to_rfc3339());
+    let pending = state.identity.pending(3)?;
+    Ok(Json(IdentityOverview {
+        version: identity_view.version,
+        text: identity_view.text,
+        latest_check_at,
+        gate: gate.to_string(),
+        pending_count: pending.len(),
+    }))
+}
+
+async fn list_proposals(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AuditQuery>,
+) -> Result<Json<Vec<ProposalView>>, ApiError> {
+    let limit = query.limit.clamp(1, 200);
+    Ok(Json(state.identity.pending(limit)?))
+}
+
+async fn approve_proposal(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(request): Json<ProposalDecisionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let operator = request.operator.unwrap_or_else(|| "desktop".to_string());
+    let result =
+        state
+            .identity
+            .approve_and_apply(&id, request.explicit_consent, &operator, Utc::now())?;
+    Ok(Json(serde_json::json!({
+        "version": result.version,
+        "proposalId": result.proposal_id,
+        "source": result.source,
+    })))
+}
+
+async fn reject_proposal(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(request): Json<ProposalDecisionRequest>,
+) -> Result<Json<ProposalView>, ApiError> {
+    let operator = request.operator.unwrap_or_else(|| "desktop".to_string());
+    let result = state.identity.reject(&id, &operator, Utc::now())?;
+    Ok(Json(result))
+}
+
+async fn rollback_identity(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RollbackRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let operator = request.operator.unwrap_or_else(|| "desktop".to_string());
+    let result = state
+        .identity
+        .rollback_version(request.version, &operator, Utc::now())?;
+    Ok(Json(serde_json::json!({
+        "version": result.version,
+        "proposalId": result.proposal_id,
+        "source": result.source,
+        "reason": result.reason,
+        "rolledBackFrom": result.rolled_back_from,
+    })))
+}
+
+async fn trigger_evolution(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _guard = state
+        .evolve_lock
+        .try_lock()
+        .map_err(|_| ApiError::new(StatusCode::CONFLICT, "上一次手动演化仍在运行，请稍后再试"))?;
+    let now = Utc::now();
+    let gate = state.identity.evolution_gate(now)?;
+    if gate != crate::core::identity::service::EvolutionGate::Run {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("演化被限流挡住（{gate:?}），请稍后再试"),
+        ));
+    }
+    state.identity.mark_evolution_checked(now)?;
+    let agent = state.evolution.clone();
+    let sessions = state.sessions.clone();
+    let result = tokio::task::spawn_blocking(move || agent.run_once(&sessions, now))
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("演化任务崩溃：{error}"),
+            )
+        })?
+        .map_err(ApiError::from)?;
+    match result {
+        Some(created) => Ok(Json(serde_json::json!({
+            "proposalId": created.proposal.id,
+            "fieldKey": created.proposal.field_key,
+            "riskLevel": created.proposal.risk_level,
+        }))),
+        None => Ok(Json(serde_json::json!({ "proposalId": null }))),
+    }
+}
+
 fn write_state_file(path: &Path, addr: SocketAddr, token_file: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -262,23 +458,69 @@ mod tests {
 
     fn state() -> Arc<AppState> {
         let db = Arc::new(Mutex::new(Database::in_memory().unwrap()));
-        let settings = Arc::new(SettingsService::new(db).unwrap());
+        let settings = Arc::new(SettingsService::new(db.clone()).unwrap());
+        let profile = Arc::new(crate::core::identity::profile::Profile::new(db.clone()));
+        let identity = Arc::new(IdentityService::new(db.clone(), profile));
+        let sessions = Arc::new(Sessions::new(db).unwrap());
+        let llm = Arc::new(crate::llm::chat::Llm);
+        let evolution_config = crate::core::identity::evolution::EvolutionConfig::enabled(
+            crate::config::Config::get().llm_model.clone(),
+        );
+        let evolution = Arc::new(IdentityEvolutionAgent::new(
+            evolution_config,
+            llm,
+            identity.clone(),
+        ));
         Arc::new(AppState {
             settings,
+            identity,
+            evolution,
+            sessions,
+            evolve_lock: Arc::new(TokioMutex::new(())),
             token: "test-token".to_string(),
             started: Instant::now(),
         })
     }
 
     fn router(state: Arc<AppState>) -> Router {
-        Router::new()
-            .route(
-                "/control/v1/settings",
-                get(settings_view).patch(update_settings),
+        control_router(state)
+    }
+
+    #[tokio::test]
+    async fn identity_proposal_routes_accept_path_parameters() {
+        // axum 0.8 的路径参数是 `{id}`；写回 `:id` 会在构造路由时 panic。
+        let app = router(state());
+        let post = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/control/v1/identity/proposals/missing-id/approve")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"operator": "test", "explicitConsent": true})
+                            .to_string(),
+                    ))
+                    .unwrap(),
             )
-            .route("/control/v1/health", get(health))
-            .layer(middleware::from_fn_with_state(state.clone(), require_token))
-            .with_state(state)
+            .await
+            .unwrap();
+        // 路由命中：方法不匹配才是 405，未命中才是 404。
+        assert_ne!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let get = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/control/v1/identity/proposals/some-id/reject")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]

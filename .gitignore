@@ -6,6 +6,8 @@
 *.db-wal
 *.db-shm
 .env
+.env.*
+!.env.example
 
 # UniFFI 生成产物（由 uniffi generate 生成）
 /backend/bindings
@@ -15,6 +17,7 @@
 
 # 一键启动脚本产生的后端日志
 .dev-server.log
+/logs
 
 # 微信 iLink 扫码凭证（ Bearer token，密钥）
 /backend/ilink_session.json
@@ -23,13 +26,13 @@
 # 贴纸目录（file_id 为当前 bot 专属，换 bot 即失效，属本地缓存）
 /backend/sticker_catalog.json
 
+# 本地临时归档（删目录 / 迁移前的安全快照，不入库）
+/.backups/
+
 # 编辑器
 .vscode/
 .idea/
 
-# Web 前端 (frontend/)
-frontend/node_modules/
-frontend/dist/
 *.tsbuildinfo
 
 # Tauri desktop (desktop/)

@@ -18,6 +18,7 @@ use vec::{inspect_vec, rebuild_vector_table};
 use rusqlite::Connection;
 
 use crate::error::Result;
+use crate::error::SqlError;
 
 pub struct Database {
     conn: Connection,
@@ -43,6 +44,8 @@ impl Database {
     pub fn open(path: &str) -> Result<Self> {
         register_vec_extension();
 
+        Self::ensure_parent_writable(path)?;
+
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -57,6 +60,41 @@ impl Database {
         );
 
         Ok(Self { conn })
+    }
+
+    /// 检查数据库文件父目录存在且可写。
+    ///
+    /// SQLite 的 "unable to open database file" 对用户没有可操作性：看不出是
+    /// 目录不存在、权限不足还是路径写错。这里在打开连接前做一次明确检查，
+    /// 给出可执行的提示（如"请手动创建目录"），避免启动阶段 panic。
+    fn ensure_parent_writable(path: &str) -> Result<()> {
+        let file = std::path::Path::new(path);
+        let Some(parent) = file.parent() else {
+            return Ok(());
+        };
+        if parent.as_os_str().is_empty() {
+            return Ok(());
+        }
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                SqlError::Config(format!(
+                    "数据库目录 {} 不存在且无法自动创建（{error}），\
+                     请检查 SMART_ASSISTANT_DB 路径或手动创建该目录",
+                    parent.display()
+                ))
+            })?;
+            tracing::info!(dir = %parent.display(), "数据库目录已自动创建");
+        }
+        let probe = parent.join(".zhiwei-write-probe");
+        std::fs::write(&probe, b"ok").map_err(|error| {
+            SqlError::Config(format!(
+                "数据库目录 {} 不可写（{error}），\
+                 请确认当前用户对该目录有写入权限",
+                parent.display()
+            ))
+        })?;
+        let _ = std::fs::remove_file(&probe);
+        Ok(())
     }
 
     pub fn in_memory() -> Result<Self> {

@@ -23,7 +23,7 @@
   },
   "3": {
     "inputs": {
-      "text": "a serene landscape with cherry blossoms, soft sunlight, gentle breeze, highly detailed, masterpiece, best quality, ultra detailed, 8k",
+      "text": "{prompt}, soft sunlight, gentle breeze, highly detailed, masterpiece, best quality, ultra detailed, 8k",
       "clip": [
         "2",
         0

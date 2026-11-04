@@ -96,14 +96,26 @@ async fn main() {
     // 本地控制接口：桌面 / Linux / Android 客户端的唯一配置入口。
     {
         let settings = app.settings.clone();
+        let db = app.db.clone();
+        let sessions = app.session.clone();
+        let evolution = app.identity_evolution.clone();
         let addr = cfg.control_addr.clone();
         let state_file = cfg.control_state_file.clone();
         let token_file = cfg.control_token_file.clone();
         let enabled = cfg.control_enabled;
         handles.push(tokio::spawn(async move {
             if let Err(error) =
-                smart_assistant::control::serve(settings, enabled, &addr, &state_file, &token_file)
-                    .await
+                smart_assistant::control::serve(smart_assistant::control::ServeParams {
+                    settings,
+                    db,
+                    sessions,
+                    evolution,
+                    enabled,
+                    addr,
+                    state_file,
+                    token_file,
+                })
+                .await
             {
                 tracing::error!(error = %error, "本地控制接口退出");
             }

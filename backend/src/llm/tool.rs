@@ -117,10 +117,27 @@ pub fn definitions(stickers: &StickerCatalog) -> Vec<Tool> {
     // 媒体生成工具：仅在网关开启时下发。与贴纸同理——没起网关时模型调了必失败，
     // 不如整个工具不出现，让它不知道有这能力。
     if crate::core::settings::snapshot().media_gateway_enabled {
-        defs.push(generate_image_tool());
-        defs.push(generate_voice_tool());
+        defs.extend(media_tools(
+            true,
+            crate::config::Config::get().voice_generate_enabled,
+        ));
     }
     defs.extend([get_now_tool(), recall_memory_tool(), remember_tool()]);
+    defs
+}
+
+/// 媒体工具下发判定：出图与语音合成**各看各的开关**。
+///
+/// 网关开关管"网关在不在"，语音开关管"语音合成的音质/依赖是否达标"——两件事的
+/// 前提不同，混成一个开关会导致"为了关掉难听的语音，把出图也关了"。
+fn media_tools(media_enabled: bool, voice_enabled: bool) -> Vec<Tool> {
+    let mut defs = Vec::new();
+    if media_enabled {
+        defs.push(generate_image_tool());
+    }
+    if media_enabled && voice_enabled {
+        defs.push(generate_voice_tool());
+    }
     defs
 }
 

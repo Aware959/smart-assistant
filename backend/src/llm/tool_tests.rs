@@ -584,3 +584,33 @@ fn 媒体工具仅在网关开启时下发() {
         );
     }
 }
+
+/// 出图与语音合成各看各的开关：网关开着但语音生成关着时，只下发 `generate_image`。
+#[test]
+fn 语音生成关闭时只下发出图工具() {
+    let tools = media_tools(true, false);
+    let names: Vec<&str> = tools.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&GENERATE_IMAGE), "网关开启时应下发出图工具");
+    assert!(
+        !names.contains(&GENERATE_VOICE),
+        "语音生成关闭时不应下发语音合成工具"
+    );
+}
+
+/// 两个开关都开时，两个媒体工具都下发。
+#[test]
+fn 语音生成开启时下发两个媒体工具() {
+    let tools = media_tools(true, true);
+    let names: Vec<&str> = tools.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&GENERATE_IMAGE));
+    assert!(names.contains(&GENERATE_VOICE));
+}
+
+/// 网关关闭时两个工具都不下发——哪怕语音开关单独开着（没有网关，调了必失败）。
+#[test]
+fn 网关关闭时不下发任何媒体工具() {
+    let tools = media_tools(false, true);
+    let names: Vec<&str> = tools.iter().map(|d| d.name.as_str()).collect();
+    assert!(!names.contains(&GENERATE_IMAGE));
+    assert!(!names.contains(&GENERATE_VOICE));
+}

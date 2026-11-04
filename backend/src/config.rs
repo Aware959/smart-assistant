@@ -54,7 +54,7 @@ pub struct Config {
     pub tls_cert: Option<String>,
     /// HTTPS 私钥文件（PEM）。留空时回退到运行目录 `certs/server.key`。
     pub tls_key: Option<String>,
-    /// 前端静态产物目录（SPA）。缺省为 `../frontend/dist`；目录不存在则不挂载。
+    /// Web 前端静态产物目录（SPA）。缺省不挂载；需要 Web UI 时用环境变量指向产物目录。
     pub web_dist: Option<String>,
     /// Telegram Bot Token（@BotFather 获取）。留空则不启动 TG 长轮询。
     pub telegram_bot_token: String,
@@ -104,6 +104,12 @@ pub struct Config {
     /// 媒体生成工具开关：`1`/`true` 才向模型下发 `generate_image` / `generate_voice`；
     /// 缺省关闭——未起网关时模型看不到这两个工具，零侵入。
     pub media_gateway_enabled: bool,
+    /// 语音合成工具（`generate_voice`）单独开关：`1`/`true` 才向模型下发。
+    ///
+    /// 与 [`Config::media_gateway_enabled`] 分开：出图与语音合成的**可用性前提不同**——
+    /// 出图只要本地扩散后端在跑；语音合成还取决于 TTS 引擎的音质与依赖（当前本机只有
+    /// Windows SAPI，音质是明显的机器音）。故缺省只开出图，语音另开。
+    pub voice_generate_enabled: bool,
     /// 媒体生成超时（秒）：图片生成可能很慢，默认 120，超时即本轮回执失败走兜底话术。
     pub media_gateway_timeout: u64,
     /// 入站语音转写总开关：`1`/`true` 才转写用户发来的语音。缺省关闭。
@@ -173,9 +179,7 @@ impl Config {
                 .unwrap_or(0.92),
             tls_cert: std::env::var("SMART_ASSISTANT_TLS_CERT").ok(),
             tls_key: std::env::var("SMART_ASSISTANT_TLS_KEY").ok(),
-            web_dist: std::env::var("SMART_ASSISTANT_WEB_DIST")
-                .ok()
-                .or_else(|| Some("../frontend/dist".to_string())),
+            web_dist: std::env::var("SMART_ASSISTANT_WEB_DIST").ok(),
             telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
             telegram_enabled: std::env::var("TELEGRAM_ENABLED")
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
@@ -240,6 +244,9 @@ impl Config {
             media_gateway_url: std::env::var("MEDIA_GATEWAY_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8787".to_string()),
             media_gateway_enabled: std::env::var("MEDIA_GATEWAY_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            voice_generate_enabled: std::env::var("VOICE_GENERATE_ENABLED")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             media_gateway_timeout: std::env::var("MEDIA_GATEWAY_TIMEOUT")

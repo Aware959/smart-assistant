@@ -1,3 +1,9 @@
+mod supervisor;
+
+use crate::supervisor::{
+    normalize_path, pid_matches, spawn_process, CommandPlan, ImageMatcher, ProcessPlan,
+    ProcessSupervisor,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -5,11 +11,8 @@ use std::{
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    process::Command,
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -21,7 +24,6 @@ use tauri::{
 
 const SERVICE_STATUS_EVENT: &str = "service-status";
 const GATEWAY_STATUS_EVENT: &str = "gateway-status";
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const INSTANCE_FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct SingleInstance {
@@ -57,30 +59,14 @@ struct ServiceStatus {
     control_state_file: String,
 }
 
-struct StatusState {
-    phase: String,
-    pid: Option<u32>,
-    message: String,
-    restart_attempts: u32,
-}
-
-struct ServiceInner {
-    child: Mutex<Option<Child>>,
-    status: Mutex<StatusState>,
-    auto_restart: AtomicBool,
-    next_restart: Mutex<Option<Instant>>,
+#[derive(Clone)]
+struct ServiceManager {
+    supervisor: Arc<ProcessSupervisor>,
     service_path: PathBuf,
     working_dir: PathBuf,
     env_file: PathBuf,
-    log_file: PathBuf,
-    pid_file: PathBuf,
     control_state_file: PathBuf,
     control_token_file: PathBuf,
-}
-
-#[derive(Clone)]
-struct ServiceManager {
-    inner: Arc<ServiceInner>,
 }
 
 impl ServiceManager {
@@ -103,377 +89,130 @@ impl ServiceManager {
         fs::create_dir_all(&logs_dir)
             .map_err(|error| format!("无法创建日志目录 {}：{error}", logs_dir.display()))?;
 
-        let manager = Self {
-            inner: Arc::new(ServiceInner {
-                child: Mutex::new(None),
-                status: Mutex::new(StatusState {
-                    phase: "stopped".to_string(),
-                    pid: None,
-                    message: "服务尚未启动".to_string(),
-                    restart_attempts: 0,
-                }),
-                auto_restart: AtomicBool::new(true),
-                next_restart: Mutex::new(None),
-                service_path,
-                env_file: working_dir.join(".env"),
-                log_file: logs_dir.join("zhiwei-service.log"),
-                pid_file: logs_dir.join("zhiwei-service.pid"),
-                control_state_file: logs_dir.join("control.json"),
-                control_token_file: logs_dir.join("control.token"),
-                working_dir,
-            }),
+        let log_file = logs_dir.join("zhiwei-service.log");
+        let pid_file = logs_dir.join("zhiwei-service.pid");
+        let plan = ProcessPlan {
+            name: "通道守护",
+            program_label: "zhiwei-service.exe",
+            log_header: "--- zhiwei-desktop starting zhiwei-service ---",
+            log_file: log_file.clone(),
+            pid_file,
+            working_dir: working_dir.clone(),
+            command: CommandPlan::Exe(service_path.clone()),
+            image_matcher: ImageMatcher::Path(service_path.clone()),
+            // 显式转发日志级别：中间层（npm / tauri / cargo）可能重整环境，
+            // 子进程拿不到 RUST_LOG 就只剩 WARN，服务启动过程将完全不可见。
+            env: vec![(
+                "RUST_LOG".to_string(),
+                env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            )],
+            terminate_tree: false,
+            spawn_error_hint:
+                "。如果系统提示 Application Control，请在 Windows 安全策略中信任该程序。",
         };
-        manager.refresh_existing_process();
-        Ok(manager)
+        let supervisor = Arc::new(ProcessSupervisor::new(
+            plan,
+            Box::new(spawn_process),
+            true,
+            "stopped",
+            "服务尚未启动".to_string(),
+        ));
+        if !supervisor.refresh_external() {
+            if !supervisor.program_exists() {
+                supervisor.mark_error(&format!(
+                    "未找到 zhiwei-service.exe：{}",
+                    service_path.display()
+                ));
+            } else {
+                supervisor.reset_stopped("服务尚未启动");
+            }
+        }
+        Ok(Self {
+            supervisor,
+            service_path,
+            working_dir: working_dir.clone(),
+            env_file: resolve_env_file(&working_dir),
+            control_state_file: logs_dir.join("control.json"),
+            control_token_file: logs_dir.join("control.token"),
+        })
     }
 
     fn snapshot(&self) -> ServiceStatus {
-        let status = self
-            .inner
-            .status
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut status = self.supervisor.snapshot();
+        if status.phase != "running" {
+            if let Some(pid) = self.external_pid() {
+                status.phase = "running".to_string();
+                status.pid = Some(pid);
+                status.message = "服务已在运行（外部启动）".to_string();
+                status.auto_restart = false;
+            }
+        }
         ServiceStatus {
-            phase: status.phase.clone(),
+            phase: status.phase,
             pid: status.pid,
-            message: status.message.clone(),
-            auto_restart: self.inner.auto_restart.load(Ordering::Relaxed),
+            message: status.message,
+            auto_restart: status.auto_restart,
             restart_attempts: status.restart_attempts,
-            service_path: self.inner.service_path.display().to_string(),
-            working_dir: self.inner.working_dir.display().to_string(),
-            env_file: self.inner.env_file.display().to_string(),
-            log_file: self.inner.log_file.display().to_string(),
-            pid_file: self.inner.pid_file.display().to_string(),
-            control_state_file: self.inner.control_state_file.display().to_string(),
+            service_path: self.service_path.display().to_string(),
+            working_dir: self.working_dir.display().to_string(),
+            env_file: self.env_file.display().to_string(),
+            log_file: self.supervisor.plan().log_file.display().to_string(),
+            pid_file: self.supervisor.plan().pid_file.display().to_string(),
+            control_state_file: self.control_state_file.display().to_string(),
         }
     }
 
     fn start(&self) -> Result<ServiceStatus, String> {
-        self.inner.auto_restart.store(true, Ordering::Relaxed);
-        *self
-            .inner
-            .next_restart
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
-        {
-            let mut status = self
-                .inner
-                .status
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            status.restart_attempts = 0;
+        if self.external_pid().is_some() {
+            return Ok(self.snapshot());
         }
-        self.start_process()?;
+        self.supervisor.start()?;
         Ok(self.snapshot())
     }
 
     fn stop(&self) -> Result<ServiceStatus, String> {
-        self.inner.auto_restart.store(false, Ordering::Relaxed);
-        *self
-            .inner
-            .next_restart
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
-        self.set_status("starting", None, "正在停止通道守护……", None);
-
-        let child = self
-            .inner
-            .child
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        if let Some(mut child) = child {
-            let _ = child.kill();
-            let _ = child.wait();
-        } else if let Some(pid) = read_pid(&self.inner.pid_file) {
-            if process_matches(pid, &self.inner.service_path) {
-                terminate_process(pid);
-            }
+        if self.external_pid().is_some() {
+            return Err("服务由外部启动，桌面壳不管理它；请在启动它的终端里停止".to_string());
         }
-
-        remove_pid_file(&self.inner.pid_file);
-        self.set_status("stopped", None, "通道守护已停止", Some(0));
+        self.supervisor.stop()?;
         Ok(self.snapshot())
     }
 
     fn restart(&self) -> Result<ServiceStatus, String> {
-        self.stop()?;
-        thread::sleep(Duration::from_millis(350));
-        self.start()
+        if self.external_pid().is_some() {
+            return Err("服务由外部启动，桌面壳不管理它；请在启动它的终端里重启".to_string());
+        }
+        self.supervisor.restart()?;
+        Ok(self.snapshot())
     }
 
     fn tick(&self) -> ServiceStatus {
-        let exited = {
-            let mut child = self
-                .inner
-                .child
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            match child.as_mut() {
-                Some(process) => match process.try_wait() {
-                    Ok(Some(exit_status)) => {
-                        *child = None;
-                        Some(exit_status.code())
-                    }
-                    Ok(None) => None,
-                    Err(error) => {
-                        *child = None;
-                        self.set_status(
-                            "error",
-                            None,
-                            &format!("无法读取通道守护状态：{error}"),
-                            None,
-                        );
-                        None
-                    }
-                },
-                None => None,
-            }
-        };
-
-        if let Some(code) = exited {
-            remove_pid_file(&self.inner.pid_file);
-            if self.inner.auto_restart.load(Ordering::Relaxed) {
-                self.schedule_restart(code);
-            } else {
-                let message = exit_message(code);
-                self.set_status("stopped", None, &message, Some(0));
-            }
-        } else if self
-            .inner
-            .child
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_none()
-        {
-            if let Some(pid) =
-                active_external_process(&self.inner.pid_file, &self.inner.service_path)
-            {
-                let status = self
-                    .inner
-                    .status
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if status.pid != Some(pid) || status.phase != "running" {
-                    drop(status);
-                    self.set_status("running", Some(pid), "通道守护正在运行（外部进程）", None);
-                }
-            } else if self.inner.auto_restart.load(Ordering::Relaxed) {
-                let was_running = {
-                    let status = self
-                        .inner
-                        .status
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    status.phase == "running"
-                };
-                if was_running {
-                    self.schedule_restart(None);
-                }
-            }
-        }
-
-        let restart_due = {
-            let next = self
-                .inner
-                .next_restart
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            next.is_some_and(|deadline| Instant::now() >= deadline)
-        };
-        if restart_due && self.inner.auto_restart.load(Ordering::Relaxed) {
-            *self
-                .inner
-                .next_restart
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = None;
-            if let Err(error) = self.start_process() {
-                self.schedule_restart_after_error(&error);
-            }
-        }
-
+        self.supervisor.tick();
         self.snapshot()
     }
 
-    fn start_process(&self) -> Result<(), String> {
-        if read_pid(&self.inner.pid_file)
-            .is_some_and(|pid| process_matches(pid, &self.inner.service_path))
+    /// 识别外部启动的 service：运行中的服务会把 pid 写进 control.json，
+    /// 校验进程镜像后即认为同一份服务，避免桌面壳再拉起第二份。
+    fn external_pid(&self) -> Option<u32> {
+        // supervisor 已经托管（自行启动或按 pid 文件接管）时不做外部识别，
+        // 否则 stop / restart 会被误判成“外部进程”而拒绝执行。
+        if self.supervisor.snapshot().phase == "running" {
+            return None;
+        }
+        let text = fs::read_to_string(&self.control_state_file).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let pid = u32::try_from(value.get("pid")?.as_u64()?).ok()?;
+        if service_image_paths(&self.service_path)
+            .iter()
+            .any(|path| pid_matches(&ImageMatcher::Path(path.clone()), pid))
         {
-            let pid = read_pid(&self.inner.pid_file);
-            self.set_status("running", pid, "通道守护已在运行", None);
-            return Ok(());
+            return Some(pid);
         }
-
-        {
-            let mut child = self
-                .inner
-                .child
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if let Some(process) = child.as_mut() {
-                match process.try_wait() {
-                    Ok(None) => return Ok(()),
-                    Ok(Some(_)) => *child = None,
-                    Err(error) => {
-                        return Err(format!("无法读取现有通道守护状态：{error}"));
-                    }
-                }
-            }
-        }
-
-        if !self.inner.service_path.is_file() {
-            let message = format!(
-                "未找到 zhiwei-service.exe：{}",
-                self.inner.service_path.display()
-            );
-            self.set_status("error", None, &message, None);
-            return Err(message);
-        }
-
-        self.set_status("starting", None, "正在启动通道守护……", None);
-        let log = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.inner.log_file)
-            .map_err(|error| {
-                format!(
-                    "无法打开日志文件 {}：{error}",
-                    self.inner.log_file.display()
-                )
-            })?;
-        let mut header = log
-            .try_clone()
-            .map_err(|error| format!("无法复制日志文件句柄：{error}"))?;
-        let _ = writeln!(header, "\n--- zhiwei-desktop starting zhiwei-service ---");
-
-        let mut command = Command::new(&self.inner.service_path);
-        command
-            .current_dir(&self.inner.working_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone().map_err(|error| {
-                format!("无法连接服务标准输出到日志：{error}")
-            })?))
-            .stderr(Stdio::from(log));
-        hide_console(&mut command);
-
-        let child = command.spawn().map_err(|error| {
-            let message = format!(
-                "无法启动 zhiwei-service.exe：{error}。如果系统提示 Application Control，请在 Windows 安全策略中信任该程序。"
-            );
-            self.set_status("error", None, &message, None);
-            message
-        })?;
-        let pid = child.id();
-        if let Err(error) = fs::write(&self.inner.pid_file, pid.to_string()) {
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
-            let message = format!(
-                "无法写入 PID 文件 {}：{error}",
-                self.inner.pid_file.display()
-            );
-            self.set_status("error", None, &message, None);
-            return Err(message);
-        }
-        *self
-            .inner
-            .child
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(child);
-        self.set_status("running", Some(pid), "通道守护正在运行", Some(0));
-        Ok(())
-    }
-
-    fn refresh_existing_process(&self) {
-        if let Some(pid) = active_external_process(&self.inner.pid_file, &self.inner.service_path) {
-            self.set_status("running", Some(pid), "通道守护已在运行", None);
-        } else if !self.inner.service_path.is_file() {
-            self.set_status(
-                "error",
-                None,
-                &format!(
-                    "未找到 zhiwei-service.exe：{}",
-                    self.inner.service_path.display()
-                ),
-                None,
-            );
-        } else {
-            self.set_status("stopped", None, "服务尚未启动", Some(0));
-        }
-    }
-
-    fn schedule_restart(&self, exit_code: Option<i32>) {
-        let attempts = {
-            let mut status = self
-                .inner
-                .status
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            status.restart_attempts = status.restart_attempts.saturating_add(1);
-            status.restart_attempts
-        };
-        self.schedule_restart_at(attempts, exit_code);
-    }
-
-    fn schedule_restart_after_error(&self, error: &str) {
-        let attempts = {
-            let mut status = self
-                .inner
-                .status
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            status.restart_attempts = status.restart_attempts.saturating_add(1);
-            status.restart_attempts
-        };
-        let delay = restart_delay(attempts);
-        *self
-            .inner
-            .next_restart
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            Some(Instant::now() + Duration::from_secs(delay));
-        self.set_status(
-            "error",
-            None,
-            &format!("{error}；{delay} 秒后重试"),
-            Some(attempts),
-        );
-    }
-
-    fn schedule_restart_at(&self, attempts: u32, exit_code: Option<i32>) {
-        let delay = restart_delay(attempts);
-        *self
-            .inner
-            .next_restart
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            Some(Instant::now() + Duration::from_secs(delay));
-        self.set_status(
-            "error",
-            None,
-            &format!("{}；{} 秒后自动恢复", exit_message(exit_code), delay),
-            Some(attempts),
-        );
-    }
-
-    fn set_status(
-        &self,
-        phase: &str,
-        pid: Option<u32>,
-        message: &str,
-        restart_attempts: Option<u32>,
-    ) {
-        let mut status = self
-            .inner
-            .status
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        status.phase = phase.to_string();
-        status.pid = pid;
-        status.message = message.to_string();
-        if let Some(attempts) = restart_attempts {
-            status.restart_attempts = attempts;
-        }
+        // 进程镜像查询可能被 Windows 权限挡住（尤其是开发态跨终端启动），
+        // 再用服务自己的控制接口确认一次 pid，避免把活着的服务显示成已停止。
+        control_health_pid(&self.control_state_file, &self.control_token_file)
+            .filter(|health_pid| *health_pid == pid)
+            .map(|_| pid)
     }
 }
 
@@ -507,31 +246,14 @@ struct GatewayStatus {
     health: Option<GatewayHealth>,
 }
 
-struct GatewayStatusState {
-    phase: String,
-    pid: Option<u32>,
-    message: String,
-    restart_attempts: u32,
-    health: Option<GatewayHealth>,
-}
-
-struct GatewayInner {
-    child: Mutex<Option<Child>>,
-    status: Mutex<GatewayStatusState>,
-    auto_restart: AtomicBool,
-    next_restart: Mutex<Option<Instant>>,
+#[derive(Clone)]
+struct GatewayManager {
+    supervisor: Arc<ProcessSupervisor>,
+    desktop_dir: PathBuf,
     executable_path: PathBuf,
     working_dir: PathBuf,
     env_file: PathBuf,
-    log_file: PathBuf,
-    pid_file: PathBuf,
-    desktop_dir: PathBuf,
     installed: bool,
-}
-
-#[derive(Clone)]
-struct GatewayManager {
-    inner: Arc<GatewayInner>,
 }
 
 impl GatewayManager {
@@ -549,6 +271,8 @@ impl GatewayManager {
             .or_else(|| executable_path.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| executable_dir.clone());
         let env_file = resolve_gateway_env(&working_dir, &executable_dir);
+        let python_program =
+            resolve_python_interpreter(&executable_path, &working_dir, &executable_dir);
         let host_dir = if working_dir
             .file_name()
             .is_some_and(|name| name.eq_ignore_ascii_case("media-gateway"))
@@ -564,419 +288,140 @@ impl GatewayManager {
         let _ = fs::create_dir_all(&logs_dir);
 
         let installed = executable_path.is_file();
-        let message = if installed {
+        let command = match &python_program {
+            Some(program) => CommandPlan::Interpreter {
+                program: program.clone(),
+                entry: executable_path.clone(),
+            },
+            None => CommandPlan::Exe(executable_path.clone()),
+        };
+        let image_matcher = match &python_program {
+            Some(program) => ImageMatcher::Interpreter(program.clone()),
+            None => ImageMatcher::Path(executable_path.clone()),
+        };
+        let plan = ProcessPlan {
+            name: "媒体网关",
+            program_label: "媒体网关",
+            log_header: "--- zhiwei-desktop starting media-gateway ---",
+            log_file: logs_dir.join("media-gateway.log"),
+            pid_file: logs_dir.join("media-gateway.pid"),
+            working_dir: working_dir.clone(),
+            command,
+            image_matcher,
+            env: vec![
+                (
+                    "MEDIA_GATEWAY_ENV".to_string(),
+                    env_file.display().to_string(),
+                ),
+                ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
+            ],
+            terminate_tree: true,
+            spawn_error_hint: "",
+        };
+        let initial_message = if installed {
             "媒体网关尚未启动".to_string()
         } else {
-            format!(
-                "未找到 media-gateway.exe（可选组件）：{}",
-                executable_path.display()
-            )
+            format!("未找到媒体网关（可选组件）：{}", executable_path.display())
         };
         let manager = Self {
-            inner: Arc::new(GatewayInner {
-                child: Mutex::new(None),
-                status: Mutex::new(GatewayStatusState {
-                    phase: if installed { "stopped" } else { "unavailable" }.to_string(),
-                    pid: None,
-                    message,
-                    restart_attempts: 0,
-                    health: None,
-                }),
-                auto_restart: AtomicBool::new(installed),
-                next_restart: Mutex::new(None),
-                executable_path,
-                working_dir,
-                env_file,
-                log_file: logs_dir.join("media-gateway.log"),
-                pid_file: logs_dir.join("media-gateway.pid"),
-                desktop_dir: executable_dir,
+            supervisor: Arc::new(ProcessSupervisor::new(
+                plan,
+                Box::new(spawn_process),
                 installed,
-            }),
+                if installed { "stopped" } else { "unavailable" },
+                initial_message,
+            )),
+            desktop_dir: executable_dir,
+            executable_path,
+            working_dir,
+            env_file,
+            installed,
         };
-        manager.refresh_existing_process();
+        if installed {
+            manager.supervisor.refresh_external();
+        }
         manager
     }
 
     fn snapshot(&self) -> GatewayStatus {
-        let url = resolve_gateway_url(&self.inner.env_file, &self.inner.desktop_dir);
-        let service_url = resolve_service_gateway_url(&self.inner.desktop_dir);
-        let status = self
-            .inner
-            .status
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let url = resolve_gateway_url(&self.env_file, &self.desktop_dir);
+        let service_url = resolve_service_gateway_url(&self.desktop_dir);
+        let mut status = self.supervisor.snapshot();
+        let probe = self.probe_health();
+        let external = status.phase != "running" && probe.as_ref().is_some_and(|health| health.ok);
+        if external {
+            status.phase = "running".to_string();
+            status.pid = None;
+            status.message = "媒体网关已在运行（外部启动）".to_string();
+            status.auto_restart = false;
+        }
+        let health = if status.phase == "running" {
+            probe
+        } else {
+            None
+        };
         GatewayStatus {
-            phase: status.phase.clone(),
+            phase: status.phase,
             pid: status.pid,
-            message: status.message.clone(),
-            auto_restart: self.inner.auto_restart.load(Ordering::Relaxed),
+            message: status.message,
+            auto_restart: status.auto_restart,
             restart_attempts: status.restart_attempts,
-            installed: self.inner.installed,
-            executable_path: self.inner.executable_path.display().to_string(),
-            working_dir: self.inner.working_dir.display().to_string(),
-            env_file: self.inner.env_file.display().to_string(),
-            log_file: self.inner.log_file.display().to_string(),
+            installed: self.installed,
+            executable_path: self.executable_path.display().to_string(),
+            working_dir: self.working_dir.display().to_string(),
+            env_file: self.env_file.display().to_string(),
+            log_file: self.supervisor.plan().log_file.display().to_string(),
             url: url.clone(),
             service_url: service_url.clone(),
             url_matches_service: urls_match(&url, &service_url),
-            health: status.health.clone(),
+            health,
         }
     }
 
     fn start(&self) -> Result<GatewayStatus, String> {
-        if !self.inner.installed {
-            let message = format!(
-                "未找到 media-gateway.exe：{}",
-                self.inner.executable_path.display()
-            );
-            self.set_status("unavailable", None, &message, None);
+        if !self.installed {
+            let message = format!("未找到媒体网关：{}", self.executable_path.display());
+            self.supervisor.mark_unavailable(&message);
             return Err(message);
         }
-        self.inner.auto_restart.store(true, Ordering::Relaxed);
-        *self
-            .inner
-            .next_restart
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
-        {
-            let mut status = self
-                .inner
-                .status
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            status.restart_attempts = 0;
+        if self.external_running() {
+            return Ok(self.snapshot());
         }
-        self.start_process()?;
+        self.supervisor.start()?;
         Ok(self.snapshot())
     }
 
     fn stop(&self) -> Result<GatewayStatus, String> {
-        self.inner.auto_restart.store(false, Ordering::Relaxed);
-        *self
-            .inner
-            .next_restart
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
-        self.set_status("starting", None, "正在停止媒体网关……", None);
-
-        let child = self
-            .inner
-            .child
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        if let Some(mut child) = child {
-            let pid = child.id();
-            terminate_process_tree(pid);
-            let _ = child.kill();
-            let _ = child.wait();
-        } else if let Some(pid) = read_pid(&self.inner.pid_file) {
-            if process_matches(pid, &self.inner.executable_path) {
-                terminate_process_tree(pid);
-            }
+        if self.external_running() {
+            return Err("媒体网关由外部启动，桌面壳不管理它；请在启动它的终端里停止".to_string());
         }
-
-        remove_pid_file(&self.inner.pid_file);
-        self.set_status("stopped", None, "媒体网关已停止", Some(0));
+        self.supervisor.stop()?;
         Ok(self.snapshot())
     }
 
     fn restart(&self) -> Result<GatewayStatus, String> {
-        self.stop()?;
-        thread::sleep(Duration::from_millis(350));
-        self.start()
+        if self.external_running() {
+            return Err("媒体网关由外部启动，桌面壳不管理它；请在启动它的终端里重启".to_string());
+        }
+        self.supervisor.restart()?;
+        Ok(self.snapshot())
     }
 
     fn tick(&self) -> GatewayStatus {
-        let exited = {
-            let mut child = self
-                .inner
-                .child
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            match child.as_mut() {
-                Some(process) => match process.try_wait() {
-                    Ok(Some(exit_status)) => {
-                        *child = None;
-                        Some(exit_status.code())
-                    }
-                    Ok(None) => None,
-                    Err(error) => {
-                        *child = None;
-                        self.set_status(
-                            "error",
-                            None,
-                            &format!("无法读取媒体网关状态：{error}"),
-                            None,
-                        );
-                        None
-                    }
-                },
-                None => None,
-            }
-        };
-
-        if let Some(code) = exited {
-            remove_pid_file(&self.inner.pid_file);
-            if self.inner.auto_restart.load(Ordering::Relaxed) {
-                self.schedule_restart(code);
-            } else {
-                let message = gateway_exit_message(code);
-                self.set_status("stopped", None, &message, Some(0));
-            }
-        } else if self
-            .inner
-            .child
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_none()
-        {
-            if let Some(pid) =
-                active_external_process(&self.inner.pid_file, &self.inner.executable_path)
-            {
-                let status = self
-                    .inner
-                    .status
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if status.pid != Some(pid) || status.phase != "running" {
-                    drop(status);
-                    self.set_status("running", Some(pid), "媒体网关正在运行（外部进程）", None);
-                }
-            } else if self.inner.auto_restart.load(Ordering::Relaxed) {
-                let was_running = {
-                    let status = self
-                        .inner
-                        .status
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    status.phase == "running"
-                };
-                if was_running {
-                    self.schedule_restart(None);
-                }
-            }
-        }
-
-        let restart_due = {
-            let next = self
-                .inner
-                .next_restart
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            next.is_some_and(|deadline| Instant::now() >= deadline)
-        };
-        if restart_due && self.inner.auto_restart.load(Ordering::Relaxed) {
-            *self
-                .inner
-                .next_restart
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()) = None;
-            if let Err(error) = self.start_process() {
-                self.schedule_restart_after_error(&error);
-            }
-        }
-
-        self.refresh_health();
+        self.supervisor.tick();
         self.snapshot()
     }
 
-    fn start_process(&self) -> Result<(), String> {
-        if read_pid(&self.inner.pid_file)
-            .is_some_and(|pid| process_matches(pid, &self.inner.executable_path))
-        {
-            let pid = read_pid(&self.inner.pid_file);
-            self.set_status("running", pid, "媒体网关已在运行", None);
-            return Ok(());
-        }
-
-        {
-            let mut child = self
-                .inner
-                .child
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if let Some(process) = child.as_mut() {
-                match process.try_wait() {
-                    Ok(None) => return Ok(()),
-                    Ok(Some(_)) => *child = None,
-                    Err(error) => {
-                        return Err(format!("无法读取现有媒体网关状态：{error}"));
-                    }
-                }
-            }
-        }
-
-        if !self.inner.executable_path.is_file() {
-            let message = format!(
-                "未找到 media-gateway.exe：{}",
-                self.inner.executable_path.display()
-            );
-            self.set_status("unavailable", None, &message, None);
-            return Err(message);
-        }
-
-        self.set_status("starting", None, "正在启动媒体网关……", None);
-        let log = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.inner.log_file)
-            .map_err(|error| {
-                format!(
-                    "无法打开媒体网关日志 {}：{error}",
-                    self.inner.log_file.display()
-                )
-            })?;
-        let mut header = log
-            .try_clone()
-            .map_err(|error| format!("无法复制媒体网关日志句柄：{error}"))?;
-        let _ = writeln!(header, "\n--- zhiwei-desktop starting media-gateway ---");
-
-        let mut command = Command::new(&self.inner.executable_path);
-        command
-            .current_dir(&self.inner.working_dir)
-            .env("MEDIA_GATEWAY_ENV", &self.inner.env_file)
-            .env("PYTHONUNBUFFERED", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone().map_err(|error| {
-                format!("无法连接媒体网关标准输出到日志：{error}")
-            })?))
-            .stderr(Stdio::from(log));
-        hide_console(&mut command);
-
-        let child = command.spawn().map_err(|error| {
-            let message = format!("无法启动 media-gateway.exe：{error}");
-            self.set_status("error", None, &message, None);
-            message
-        })?;
-        let pid = child.id();
-        if let Err(error) = fs::write(&self.inner.pid_file, pid.to_string()) {
-            let mut child = child;
-            terminate_process_tree(pid);
-            let _ = child.kill();
-            let _ = child.wait();
-            let message = format!(
-                "无法写入媒体网关 PID 文件 {}：{error}",
-                self.inner.pid_file.display()
-            );
-            self.set_status("error", None, &message, None);
-            return Err(message);
-        }
-        *self
-            .inner
-            .child
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(child);
-        self.set_status("running", Some(pid), "媒体网关正在运行", Some(0));
-        Ok(())
+    /// 只要端口上有健康响应就算在运行：外部手动 `python main.py` 时
+    /// supervisor 没有子进程，靠这个判断避免重复拉起。
+    fn external_running(&self) -> bool {
+        self.supervisor.snapshot().phase != "running"
+            && self.probe_health().is_some_and(|health| health.ok)
     }
 
-    fn refresh_existing_process(&self) {
-        if !self.inner.installed {
-            return;
-        }
-        if let Some(pid) =
-            active_external_process(&self.inner.pid_file, &self.inner.executable_path)
-        {
-            self.set_status("running", Some(pid), "媒体网关已在运行", None);
-        }
-    }
-
-    fn refresh_health(&self) {
-        let phase = {
-            let status = self
-                .inner
-                .status
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            status.phase.clone()
-        };
-        let health = if phase == "running" {
-            let url = resolve_gateway_url(&self.inner.env_file, &self.inner.desktop_dir);
-            fetch_gateway_health(&url)
-        } else {
-            None
-        };
-        let mut status = self
-            .inner
-            .status
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        status.health = health;
-    }
-
-    fn schedule_restart(&self, exit_code: Option<i32>) {
-        let attempts = {
-            let mut status = self
-                .inner
-                .status
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            status.restart_attempts = status.restart_attempts.saturating_add(1);
-            status.restart_attempts
-        };
-        let delay = restart_delay(attempts);
-        *self
-            .inner
-            .next_restart
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            Some(Instant::now() + Duration::from_secs(delay));
-        self.set_status(
-            "error",
-            None,
-            &format!(
-                "{}；{} 秒后自动恢复",
-                gateway_exit_message(exit_code),
-                delay
-            ),
-            Some(attempts),
-        );
-    }
-
-    fn schedule_restart_after_error(&self, error: &str) {
-        let attempts = {
-            let mut status = self
-                .inner
-                .status
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            status.restart_attempts = status.restart_attempts.saturating_add(1);
-            status.restart_attempts
-        };
-        let delay = restart_delay(attempts);
-        *self
-            .inner
-            .next_restart
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) =
-            Some(Instant::now() + Duration::from_secs(delay));
-        self.set_status(
-            "error",
-            None,
-            &format!("{error}；{delay} 秒后重试"),
-            Some(attempts),
-        );
-    }
-
-    fn set_status(
-        &self,
-        phase: &str,
-        pid: Option<u32>,
-        message: &str,
-        restart_attempts: Option<u32>,
-    ) {
-        let mut status = self
-            .inner
-            .status
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        status.phase = phase.to_string();
-        status.pid = pid;
-        status.message = message.to_string();
-        if let Some(attempts) = restart_attempts {
-            status.restart_attempts = attempts;
-        }
+    fn probe_health(&self) -> Option<GatewayHealth> {
+        let url = resolve_gateway_url(&self.env_file, &self.desktop_dir);
+        fetch_gateway_health(&url)
     }
 }
 
@@ -992,20 +437,66 @@ fn resolve_service(executable_dir: &Path) -> PathBuf {
         return adjacent;
     }
 
+    if let Some(candidate) = find_service_in_profiles(executable_dir, &preferred_service_profiles())
+    {
+        return candidate;
+    }
+
+    adjacent
+}
+
+/// 桌面壳自己是什么构建，就优先用同构建的 service。
+///
+/// 仓库里同时存在 `backend/target/debug` 与 `backend/target/release` 时，
+/// 固定先找 release 会让开发态把手动启动的 debug 服务判定成“已停止”。
+fn preferred_service_profiles() -> [&'static str; 2] {
+    if cfg!(debug_assertions) {
+        ["debug", "release"]
+    } else {
+        ["release", "debug"]
+    }
+}
+
+fn find_service_in_profiles(executable_dir: &Path, profiles: &[&str]) -> Option<PathBuf> {
     for ancestor in executable_dir.ancestors() {
-        for profile in ["release", "debug"] {
+        for profile in profiles {
             let candidate = ancestor
                 .join("backend")
                 .join("target")
                 .join(profile)
                 .join("zhiwei-service.exe");
             if candidate.is_file() {
-                return candidate;
+                return Some(candidate);
             }
         }
     }
+    None
+}
 
-    adjacent
+/// 外部启动的服务可能来自同仓库的另一构建档（debug / release），
+/// 识别存活时两个都认，避免状态显示和实际进程不一致。
+fn service_image_paths(service_path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![service_path.to_path_buf()];
+    let Some(profile_dir) = service_path.parent() else {
+        return paths;
+    };
+    let Some(file_name) = service_path.file_name() else {
+        return paths;
+    };
+    let is_profile_dir = matches!(
+        profile_dir.file_name().and_then(|name| name.to_str()),
+        Some("debug" | "release")
+    );
+    let Some(target_dir) = profile_dir.parent().filter(|_| is_profile_dir) else {
+        return paths;
+    };
+    for profile in ["debug", "release"] {
+        let candidate = target_dir.join(profile).join(file_name);
+        if candidate.is_file() {
+            paths.push(candidate);
+        }
+    }
+    paths
 }
 
 fn resolve_gateway(executable_dir: &Path) -> PathBuf {
@@ -1015,6 +506,10 @@ fn resolve_gateway(executable_dir: &Path) -> PathBuf {
         }
     }
 
+    resolve_gateway_from(executable_dir)
+}
+
+fn resolve_gateway_from(executable_dir: &Path) -> PathBuf {
     let adjacent = executable_dir.join("media-gateway.exe");
     if adjacent.is_file() {
         return adjacent;
@@ -1024,6 +519,13 @@ fn resolve_gateway(executable_dir: &Path) -> PathBuf {
         .join("media-gateway.exe");
     if nested.is_file() {
         return nested;
+    }
+
+    for ancestor in executable_dir.ancestors() {
+        let source_entry = ancestor.join("media-gateway").join("main.py");
+        if source_entry.is_file() {
+            return source_entry;
+        }
     }
 
     for ancestor in executable_dir.ancestors() {
@@ -1047,6 +549,44 @@ fn resolve_gateway(executable_dir: &Path) -> PathBuf {
     adjacent
 }
 
+fn resolve_python_interpreter(
+    entry: &Path,
+    working_dir: &Path,
+    base_dir: &Path,
+) -> Option<PathBuf> {
+    if !entry
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+    {
+        return None;
+    }
+    if let Some(configured) = env::var_os("ZHIWEI_MEDIA_GATEWAY_PYTHON") {
+        if !configured.is_empty() {
+            return Some(absolutize_from(base_dir, Path::new(&configured)));
+        }
+    }
+    let venv_dir = working_dir.join(".venv");
+    let venv_python = venv_dir.join("Scripts").join("python.exe");
+    if venv_python.is_file() && venv_interpreter_is_usable(&venv_dir) {
+        return Some(venv_python);
+    }
+    Some(PathBuf::from("python"))
+}
+
+fn venv_interpreter_is_usable(venv_dir: &Path) -> bool {
+    let config = fs::read_to_string(venv_dir.join("pyvenv.cfg")).unwrap_or_default();
+    for line in config.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("home") {
+            let home = value.trim().trim_matches('"').trim_matches('\'');
+            return !home.is_empty() && Path::new(home).is_dir();
+        }
+    }
+    false
+}
+
 fn resolve_gateway_env(working_dir: &Path, desktop_dir: &Path) -> PathBuf {
     if let Some(configured) = env::var_os("ZHIWEI_MEDIA_GATEWAY_ENV") {
         if !configured.is_empty() {
@@ -1059,7 +599,7 @@ fn resolve_gateway_env(working_dir: &Path, desktop_dir: &Path) -> PathBuf {
         return packaged;
     }
     if working_dir != desktop_dir {
-        let adjacent = working_dir.join(".env");
+        let adjacent = resolve_env_file(working_dir);
         if adjacent.is_file() {
             return adjacent;
         }
@@ -1069,13 +609,41 @@ fn resolve_gateway_env(working_dir: &Path, desktop_dir: &Path) -> PathBuf {
         .is_some_and(|name| name.eq_ignore_ascii_case("dist"))
     {
         if let Some(parent) = working_dir.parent() {
-            let development_env = parent.join(".env");
+            let development_env = resolve_env_file(parent);
             if development_env.is_file() {
                 return development_env;
             }
         }
     }
     packaged
+}
+
+/// 当前进程的环境档位：`ZHIWEI_ENV` 优先，否则按构建档位推断（debug=dev / release=prod）。
+fn env_profile() -> String {
+    env::var("ZHIWEI_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(debug_assertions) {
+                "dev".to_string()
+            } else {
+                "prod".to_string()
+            }
+        })
+}
+
+/// 在工作目录里找 `.env.<档位>`，找不到再回退旧约定 `.env`。
+fn resolve_env_file(working_dir: &Path) -> PathBuf {
+    let profile_file = working_dir.join(format!(".env.{}", env_profile()));
+    if profile_file.is_file() {
+        return profile_file;
+    }
+    let legacy = working_dir.join(".env");
+    if legacy.is_file() {
+        return legacy;
+    }
+    profile_file
 }
 
 fn resolve_gateway_url(env_file: &Path, desktop_dir: &Path) -> String {
@@ -1093,7 +661,7 @@ fn resolve_gateway_url(env_file: &Path, desktop_dir: &Path) -> String {
 }
 
 fn resolve_service_gateway_url(desktop_dir: &Path) -> String {
-    read_env_map(&desktop_dir.join(".env"))
+    read_env_map(&resolve_env_file(desktop_dir))
         .get("MEDIA_GATEWAY_URL")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -1208,140 +776,6 @@ fn absolutize_from(base: &Path, path: &Path) -> PathBuf {
     } else {
         base.join(path)
     }
-}
-
-fn read_pid(path: &Path) -> Option<u32> {
-    fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-fn remove_pid_file(path: &Path) {
-    let _ = fs::remove_file(path);
-}
-
-fn active_external_process(pid_file: &Path, expected_program: &Path) -> Option<u32> {
-    let pid = read_pid(pid_file)?;
-    if process_matches(pid, expected_program) {
-        Some(pid)
-    } else {
-        remove_pid_file(pid_file);
-        None
-    }
-}
-
-fn process_matches(pid: u32, expected_program: &Path) -> bool {
-    process_image_path(pid).is_some_and(|path| paths_equal(&path, expected_program))
-}
-
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    normalize_path(left) == normalize_path(right)
-}
-
-fn normalize_path(path: &Path) -> String {
-    let path = fs::canonicalize(path).unwrap_or_else(|_| absolutize(path));
-    path.to_string_lossy()
-        .replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_lowercase()
-}
-
-fn restart_delay(attempts: u32) -> u64 {
-    match attempts {
-        0 | 1 => 5,
-        2 => 15,
-        3 => 30,
-        _ => 60,
-    }
-}
-
-fn exit_message(code: Option<i32>) -> String {
-    match code {
-        Some(code) => format!("通道守护意外退出（代码 {code}）"),
-        None => "通道守护意外退出".to_string(),
-    }
-}
-
-fn gateway_exit_message(code: Option<i32>) -> String {
-    match code {
-        Some(code) => format!("媒体网关意外退出（代码 {code}）"),
-        None => "媒体网关意外退出".to_string(),
-    }
-}
-
-#[cfg(windows)]
-fn hide_console(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_console(_command: &mut Command) {}
-
-#[cfg(windows)]
-fn process_image_path(pid: u32) -> Option<PathBuf> {
-    use std::ffi::OsString;
-    use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return None;
-    }
-
-    let mut buffer = vec![0u16; 32_768];
-    let mut length = buffer.len() as u32;
-    let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) };
-    unsafe {
-        CloseHandle(handle);
-    }
-    if ok == 0 {
-        return None;
-    }
-
-    buffer.truncate(length as usize);
-    Some(PathBuf::from(OsString::from_wide(&buffer)))
-}
-
-#[cfg(not(windows))]
-fn process_image_path(_pid: u32) -> Option<PathBuf> {
-    None
-}
-
-#[cfg(windows)]
-fn terminate_process(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-
-    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
-    if handle.is_null() {
-        return false;
-    }
-    let result = unsafe { TerminateProcess(handle, 1) };
-    unsafe {
-        CloseHandle(handle);
-    }
-    result != 0
-}
-
-#[cfg(not(windows))]
-fn terminate_process(_pid: u32) -> bool {
-    false
-}
-
-fn terminate_process_tree(pid: u32) -> bool {
-    let mut command = Command::new("taskkill.exe");
-    command
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    hide_console(&mut command);
-    command
-        .status()
-        .map(|status| status.success())
-        .unwrap_or_else(|_| terminate_process(pid))
 }
 
 fn acquire_single_instance() -> Result<SingleInstance, String> {
@@ -1553,17 +987,17 @@ fn restart_service(manager: State<'_, ServiceManager>) -> Result<ServiceStatus, 
 
 #[tauri::command]
 fn open_data_folder(manager: State<'_, ServiceManager>) -> Result<(), String> {
-    open_directory(&manager.inner.working_dir)
+    open_directory(&manager.working_dir)
 }
 
 #[tauri::command]
 fn open_env_file_command(manager: State<'_, ServiceManager>) -> Result<(), String> {
-    open_env_file(&manager.inner.env_file)
+    open_env_file(&manager.env_file)
 }
 
 #[tauri::command]
 fn open_log_file(manager: State<'_, ServiceManager>) -> Result<(), String> {
-    reveal_file(&manager.inner.log_file)
+    reveal_file(&manager.supervisor.plan().log_file)
 }
 
 #[derive(Clone, Serialize)]
@@ -1794,8 +1228,8 @@ fn write_gateway_env(path: &Path, changes: &BTreeMap<String, String>) -> Result<
 
 fn gateway_settings_view(manager: &GatewayManager) -> GatewaySettingsView {
     GatewaySettingsView {
-        env_file: manager.inner.env_file.display().to_string(),
-        values: read_env_map(&manager.inner.env_file),
+        env_file: manager.env_file.display().to_string(),
+        values: read_env_map(&manager.env_file),
         schema: gateway_setting_schema(),
     }
 }
@@ -1822,24 +1256,24 @@ fn restart_gateway(manager: State<'_, GatewayManager>) -> Result<GatewayStatus, 
 
 #[tauri::command]
 fn open_gateway_folder(manager: State<'_, GatewayManager>) -> Result<(), String> {
-    open_directory(&manager.inner.working_dir)
+    open_directory(&manager.working_dir)
 }
 
 #[tauri::command]
 fn open_gateway_env_file(manager: State<'_, GatewayManager>) -> Result<(), String> {
-    if !manager.inner.env_file.is_file() {
+    if !manager.env_file.is_file() {
         let defaults = gateway_setting_schema()
             .into_iter()
             .map(|item| (item.key, item.default))
             .collect::<BTreeMap<_, _>>();
-        write_gateway_env(&manager.inner.env_file, &defaults)?;
+        write_gateway_env(&manager.env_file, &defaults)?;
     }
-    open_env_file(&manager.inner.env_file)
+    open_env_file(&manager.env_file)
 }
 
 #[tauri::command]
 fn open_gateway_log_file(manager: State<'_, GatewayManager>) -> Result<(), String> {
-    reveal_file(&manager.inner.log_file)
+    reveal_file(&manager.supervisor.plan().log_file)
 }
 
 #[tauri::command]
@@ -1856,7 +1290,7 @@ fn update_gateway_settings(
         .into_iter()
         .map(|(key, value)| (key.trim().to_ascii_uppercase(), value.trim().to_string()))
         .collect::<BTreeMap<_, _>>();
-    write_gateway_env(&manager.inner.env_file, &normalized)?;
+    write_gateway_env(&manager.env_file, &normalized)?;
 
     let was_running = manager.snapshot().phase == "running";
     let mut warning = None;
@@ -1876,6 +1310,11 @@ fn update_gateway_settings(
 #[serde(rename_all = "camelCase")]
 struct ControlState {
     address: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlHealth {
+    pid: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1901,11 +1340,11 @@ fn control_call<T: for<'de> Deserialize<'de>>(
     body: Option<serde_json::Value>,
 ) -> Result<T, String> {
     let state: ControlState = serde_json::from_str(
-        &fs::read_to_string(&manager.inner.control_state_file)
+        &fs::read_to_string(&manager.control_state_file)
             .map_err(|error| format!("控制接口尚未就绪：{error}"))?,
     )
     .map_err(|error| format!("控制状态文件无效：{error}"))?;
-    let token = fs::read_to_string(&manager.inner.control_token_file)
+    let token = fs::read_to_string(&manager.control_token_file)
         .map_err(|error| format!("无法读取控制 token：{error}"))?;
     let response = control_http(&state.address, method, path, token.trim(), body.as_ref())?;
     let (status, body) = parse_http_response(&response)?;
@@ -1922,13 +1361,45 @@ fn control_http(
     token: &str,
     body: Option<&serde_json::Value>,
 ) -> Result<String, String> {
+    control_http_with_timeout(base, method, path, token, body, Duration::from_secs(5))
+}
+
+fn control_health_pid(state_file: &Path, token_file: &Path) -> Option<u32> {
+    let state: ControlState = serde_json::from_str(&fs::read_to_string(state_file).ok()?).ok()?;
+    let token = fs::read_to_string(token_file).ok()?;
+    let response = control_http_with_timeout(
+        &state.address,
+        "GET",
+        "/control/v1/health",
+        token.trim(),
+        None,
+        Duration::from_millis(800),
+    )
+    .ok()?;
+    let (status, body) = parse_http_response(&response).ok()?;
+    if status != 200 {
+        return None;
+    }
+    serde_json::from_str::<ControlHealth>(&body)
+        .ok()
+        .map(|health| health.pid)
+}
+
+fn control_http_with_timeout(
+    base: &str,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<&serde_json::Value>,
+    timeout: Duration,
+) -> Result<String, String> {
     let address = base
         .strip_prefix("http://")
         .ok_or_else(|| "控制接口只支持 loopback HTTP".to_string())?;
     let mut stream = TcpStream::connect(address)
         .map_err(|error| format!("无法连接控制接口 {address}：{error}"))?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
     let body = body
         .map(serde_json::to_string)
         .transpose()
@@ -2035,6 +1506,127 @@ fn update_settings(
     }
 }
 
+#[tauri::command]
+fn identity_overview(manager: State<'_, ServiceManager>) -> ControlResult<serde_json::Value> {
+    match control_call::<serde_json::Value>(&manager, "GET", "/control/v1/identity", None) {
+        Ok(data) => ControlResult {
+            ok: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => ControlResult {
+            ok: false,
+            data: None,
+            error: Some(error),
+        },
+    }
+}
+
+#[tauri::command]
+fn identity_proposals(
+    manager: State<'_, ServiceManager>,
+    limit: Option<i64>,
+) -> ControlResult<serde_json::Value> {
+    let limit = limit.unwrap_or(50);
+    let path = format!("/control/v1/identity/proposals?limit={limit}");
+    match control_call::<serde_json::Value>(&manager, "GET", &path, None) {
+        Ok(data) => ControlResult {
+            ok: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => ControlResult {
+            ok: false,
+            data: None,
+            error: Some(error),
+        },
+    }
+}
+
+#[tauri::command]
+fn approve_identity_proposal(
+    manager: State<'_, ServiceManager>,
+    proposal_id: String,
+    explicit_consent: bool,
+) -> ControlResult<serde_json::Value> {
+    let path = format!("/control/v1/identity/proposals/{proposal_id}/approve");
+    let body = serde_json::json!({ "operator": "desktop", "explicitConsent": explicit_consent });
+    match control_call::<serde_json::Value>(&manager, "POST", &path, Some(body)) {
+        Ok(data) => ControlResult {
+            ok: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => ControlResult {
+            ok: false,
+            data: None,
+            error: Some(error),
+        },
+    }
+}
+
+#[tauri::command]
+fn reject_identity_proposal(
+    manager: State<'_, ServiceManager>,
+    proposal_id: String,
+) -> ControlResult<serde_json::Value> {
+    let path = format!("/control/v1/identity/proposals/{proposal_id}/reject");
+    let body = serde_json::json!({ "operator": "desktop" });
+    match control_call::<serde_json::Value>(&manager, "POST", &path, Some(body)) {
+        Ok(data) => ControlResult {
+            ok: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => ControlResult {
+            ok: false,
+            data: None,
+            error: Some(error),
+        },
+    }
+}
+
+#[tauri::command]
+fn rollback_identity(
+    manager: State<'_, ServiceManager>,
+    version: Option<i64>,
+) -> ControlResult<serde_json::Value> {
+    let body = serde_json::json!({ "operator": "desktop", "version": version });
+    match control_call::<serde_json::Value>(
+        &manager,
+        "POST",
+        "/control/v1/identity/rollback",
+        Some(body),
+    ) {
+        Ok(data) => ControlResult {
+            ok: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => ControlResult {
+            ok: false,
+            data: None,
+            error: Some(error),
+        },
+    }
+}
+
+#[tauri::command]
+fn trigger_evolution(manager: State<'_, ServiceManager>) -> ControlResult<serde_json::Value> {
+    match control_call::<serde_json::Value>(&manager, "POST", "/control/v1/identity/evolve", None) {
+        Ok(data) => ControlResult {
+            ok: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => ControlResult {
+            ok: false,
+            data: None,
+            error: Some(error),
+        },
+    }
+}
+
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开知微", true, None::<&str>)?;
     let start = MenuItem::with_id(app, "start", "启动通道", true, None::<&str>)?;
@@ -2108,19 +1700,19 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             }
             "logs" => {
                 let manager = app.state::<ServiceManager>();
-                let _ = reveal_file(&manager.inner.log_file);
+                let _ = reveal_file(&manager.supervisor.plan().log_file);
             }
             "gateway_logs" => {
                 let manager = app.state::<GatewayManager>();
-                let _ = reveal_file(&manager.inner.log_file);
+                let _ = reveal_file(&manager.supervisor.plan().log_file);
             }
             "gateway_env" => {
                 let manager = app.state::<GatewayManager>();
-                let _ = open_env_file(&manager.inner.env_file);
+                let _ = open_env_file(&manager.env_file);
             }
             "folder" => {
                 let manager = app.state::<ServiceManager>();
-                let _ = open_directory(&manager.inner.working_dir);
+                let _ = open_directory(&manager.working_dir);
             }
             "quit" => {
                 let manager = app.state::<ServiceManager>();
@@ -2162,7 +1754,7 @@ pub fn run() {
             let manager = ServiceManager::discover().map_err(std::io::Error::other)?;
             app.manage(manager.clone());
             let gateway = GatewayManager::discover();
-            let gateway_installed = gateway.inner.installed;
+            let gateway_installed = gateway.installed;
             app.manage(gateway.clone());
             WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
                 .title("知微 Zhiwei")
@@ -2178,9 +1770,13 @@ pub fn run() {
                 show_settings(app.handle());
             }
 
-            let _ = manager.start();
-            if gateway_installed {
-                let _ = gateway.start();
+            // 开发态（tauri dev / debug 构建）不自启：service 与媒体网关由开发者
+            // 先手动拉起，桌面壳只当 UI 并识别外部进程。发布版维持托管自启。
+            if !cfg!(debug_assertions) {
+                let _ = manager.start();
+                if gateway_installed {
+                    let _ = gateway.start();
+                }
             }
             let app_handle = app.handle().clone();
             thread::spawn(move || loop {
@@ -2220,7 +1816,13 @@ pub fn run() {
             control_health,
             settings_view,
             settings_schema,
-            update_settings
+            update_settings,
+            identity_overview,
+            identity_proposals,
+            approve_identity_proposal,
+            reject_identity_proposal,
+            rollback_identity,
+            trigger_evolution
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Zhiwei desktop");
@@ -2229,15 +1831,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn restart_backoff_is_bounded() {
-        assert_eq!(restart_delay(0), 5);
-        assert_eq!(restart_delay(1), 5);
-        assert_eq!(restart_delay(2), 15);
-        assert_eq!(restart_delay(3), 30);
-        assert_eq!(restart_delay(99), 60);
-    }
 
     #[test]
     fn backend_directory_is_inferred_from_cargo_output() {
@@ -2309,5 +1902,101 @@ mod tests {
             "http://127.0.0.1:8788",
             "http://127.0.0.1:8787"
         ));
+    }
+
+    #[test]
+    fn gateway_resolution_prefers_source_entry_then_packaged_exe() {
+        let root =
+            std::env::temp_dir().join(format!("zhiwei-gateway-resolve-{}", std::process::id()));
+        let base = root.join("desktop").join("app");
+        let gateway_dir = root.join("media-gateway");
+        let source_entry = gateway_dir.join("main.py");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(&gateway_dir).unwrap();
+
+        let dist = gateway_dir.join("dist");
+        fs::create_dir_all(&dist).unwrap();
+        let packaged = dist.join("media-gateway.exe");
+        fs::write(&packaged, b"exe").unwrap();
+
+        // 只有打包产物时用打包版。
+        assert_eq!(resolve_gateway_from(&base), packaged);
+
+        // 仓库里有源码入口时优先跑源码（开发态改动立即生效）。
+        fs::write(&source_entry, "# gateway entry\n").unwrap();
+        assert_eq!(resolve_gateway_from(&base), source_entry);
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn service_resolution_prefers_matching_build_profile() {
+        let root =
+            std::env::temp_dir().join(format!("zhiwei-service-resolve-{}", std::process::id()));
+        let base = root
+            .join("desktop")
+            .join("src-tauri")
+            .join("target")
+            .join("debug");
+        let debug = root
+            .join("backend")
+            .join("target")
+            .join("debug")
+            .join("zhiwei-service.exe");
+        let release = root
+            .join("backend")
+            .join("target")
+            .join("release")
+            .join("zhiwei-service.exe");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(debug.parent().unwrap()).unwrap();
+        fs::create_dir_all(release.parent().unwrap()).unwrap();
+        fs::write(&debug, b"debug").unwrap();
+        fs::write(&release, b"release").unwrap();
+
+        assert_eq!(
+            find_service_in_profiles(&base, &["debug", "release"]),
+            Some(debug.clone())
+        );
+        assert_eq!(
+            find_service_in_profiles(&base, &["release", "debug"]),
+            Some(release.clone())
+        );
+
+        let paths = service_image_paths(&debug);
+        assert!(paths.contains(&debug));
+        assert!(paths.contains(&release));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn control_health_reports_running_service_pid() {
+        let root =
+            std::env::temp_dir().join(format!("zhiwei-control-health-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let pid = std::process::id();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let body = format!("{{\"status\":\"ok\",\"pid\":{pid},\"version\":\"test\"}}");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let state_file = root.join("control.json");
+        let token_file = root.join("control.token");
+        fs::write(&state_file, format!("{{\"address\":\"{address}\"}}")).unwrap();
+        fs::write(&token_file, "test-token").unwrap();
+        assert_eq!(control_health_pid(&state_file, &token_file), Some(pid));
+
+        server.join().unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 }

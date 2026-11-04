@@ -160,10 +160,11 @@ $releaseEnv = Join-Path $OutputDir '.env'
 if (-not (Test-Path -LiteralPath $releaseEnv)) {
     $sourceEnv = @(
         (Join-Path $MigrationSource '.env'),
+        (Join-Path $backend '.env.prod'),
         (Join-Path $backend '.env')
     ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if (-not $sourceEnv) {
-        throw 'Missing both the legacy release .env and backend/.env.'
+        throw 'Missing the legacy release .env and backend/.env.prod.'
     }
     Copy-Item -LiteralPath $sourceEnv -Destination $releaseEnv
 }
@@ -187,13 +188,23 @@ if ($WithMediaGateway) {
     }
     if (-not (Test-Path -LiteralPath $gatewayEnvDest)) {
         $gatewayEnvSource = @(
+            (Join-Path $root 'media-gateway\.env.prod'),
             (Join-Path $root 'media-gateway\.env'),
             (Join-Path $root 'media-gateway\.env.example')
         ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
         if (-not $gatewayEnvSource) {
-            throw 'Missing media-gateway/.env and media-gateway/.env.example.'
+            throw 'Missing media-gateway/.env.prod and media-gateway/.env.example.'
         }
         Copy-Item -LiteralPath $gatewayEnvSource -Destination $gatewayEnvDest
+    }
+    # ComfyUI 工作流 JSON 必须跟网关 exe 同级（冻结后相对路径按 exe 所在目录解析），
+    # 并把配置钉成相对文件名——写绝对路径会在换机器/仓库搬家后静默失效，
+    # 表现为出图时才 500：读取工作流文件失败。
+    $gatewayWorkflow = Join-Path $root 'media-gateway\SD模板2.json'
+    if (Test-Path -LiteralPath $gatewayWorkflow) {
+        Copy-Item -LiteralPath $gatewayWorkflow `
+            -Destination (Join-Path (Split-Path -Parent $gatewayEnvDest) 'SD模板2.json') -Force
+        Set-EnvValue -Path $gatewayEnvDest -Name 'COMFYUI_WORKFLOW_FILE' -Value 'SD模板2.json'
     }
     $gatewayPort = 8787
     $portLine = Get-Content -LiteralPath $gatewayEnvDest -Encoding UTF8 |

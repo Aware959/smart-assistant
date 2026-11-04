@@ -8,3 +8,4 @@ pub mod client;
 mod http;
 
 pub use http::serve;
+pub use http::ServeParams;

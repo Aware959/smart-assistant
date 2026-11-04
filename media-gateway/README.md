@@ -145,6 +145,21 @@ checkpoint / 模型），只需通过 `COMFYUI_WORKFLOW_FILE` 告诉本服务文
 即你只需两步：① 在 ComfyUI 里 "Save (API Format)" 导出工作流；② 在 `.env` 里设
 `COMFYUI_WORKFLOW_FILE=/路径/你的工作流.json`。其余全交给自动识别。
 
+**提示词怎么进模板**（`gateway/imaging/workflow.py` 的 `inject_prompt` / `apply_prompt`）：
+
+- 正向提示词节点的 `text` 是**模板字符串**，不是要被清空的槽位。在里面写
+  `{prompt}` 占位符，网关会把请求里的画面描述注入到这个位置，模板其余部分原样保留：
+
+  ```json
+  { "text": "{prompt}, soft sunlight, highly detailed, masterpiece, best quality, 8k" }
+  ```
+
+  这样"质量词/风格词"写一次就每张图都带着，而画面描述随请求变。模板为空（内置兜底
+  工作流就是空的）时，提示词即全文；模板非空但没有占位符时，提示词追加在模板之后。
+- **负向提示词原样保留**：请求里的 `negative_prompt` 不参与注入，工作流里写的负面词
+  （抑制畸形手、多余肢体、水印…）是模板作者的调校结果，不该被清空。
+- 尺寸 / 步数 / CFG 同理——请求没带就不覆盖，沿用模板的值；种子每次随机（避免连出同图）。
+
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `DIFFUSION_BACKEND_URL` | `http://127.0.0.1:8188` | 后端地址（看 ComfyUI 监听端口） |
@@ -160,10 +175,10 @@ checkpoint / 模型），只需通过 `COMFYUI_WORKFLOW_FILE` 告诉本服务文
 > 并带 `filename_prefix: smart-assistant` 以符合新版本 ComfyUI 对 SaveImage 的必填项要求。
 > **正式用请导出你自己的工作流**并指向 `COMFYUI_WORKFLOW_FILE`，无需关心内部节点 id。
 
-请求体（均为可选，缺省有合理默认；尺寸/步数/CFG 仅当对应节点存在时才覆盖）：
+请求体（`prompt` 必填，其余可选；`negative_prompt` 当前不参与注入，见上）：
 
 ```json
-{ "prompt": "a cat on a windowsill at sunset", "negative_prompt": "", "width": 512, "height": 512, "steps": 20, "cfg_scale": 7 }
+{ "prompt": "a cat on a windowsill at sunset", "width": 512, "height": 512, "steps": 20, "cfg_scale": 7 }
 ```
 
 ## 语音（TTS）

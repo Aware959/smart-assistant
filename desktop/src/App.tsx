@@ -3,11 +3,13 @@ import {
   FileTextOutlined,
   SendOutlined,
   AudioOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
 import { ConfigProvider, Layout, Menu, theme } from "antd";
 import { useEffect, useState } from "react";
 import FilesPage from "./pages/FilesPage";
 import GatewayPage from "./pages/GatewayPage";
+import IdentityPage from "./pages/IdentityPage";
 import OverviewPage from "./pages/OverviewPage";
 import ServicePage from "./pages/ServicePage";
 import type { ProcessPhase } from "./types";
@@ -23,6 +25,7 @@ const phaseColor: Record<ProcessPhase, string> = {
 const items = [
   { key: "overview", icon: <AppstoreOutlined />, label: "概览" },
   { key: "service", icon: <SendOutlined />, label: "通道服务" },
+  { key: "identity", icon: <UserOutlined />, label: "身份演化" },
   { key: "gateway", icon: <AudioOutlined />, label: "媒体网关" },
   { key: "files", icon: <FileTextOutlined />, label: "本机文件" },
 ];
@@ -81,6 +84,7 @@ export default function App() {
         <Layout.Content className="app-content">
           {page === "overview" && <OverviewPage phaseColor={phaseColor} />}
           {page === "service" && <ServicePage />}
+          {page === "identity" && <IdentityPage />}
           {page === "gateway" && <GatewayPage phaseColor={phaseColor} />}
           {page === "files" && <FilesPage />}
         </Layout.Content>

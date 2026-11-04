@@ -81,3 +81,26 @@ export type GatewaySettingsResult = {
   restarted: boolean;
   warning: string | null;
 };
+
+export type IdentityOverview = {
+  version: number | null;
+  text: string;
+  latestCheckAt: string | null;
+  gate: "run" | "pending_limit" | "global_cooldown" | "disabled";
+  pendingCount: number;
+};
+
+export type ProposalView = {
+  id: string;
+  fieldKey: string;
+  beforeValue: string | null;
+  afterValue: string;
+  reason: string;
+  evidenceMessageIds: string[];
+  confidence: string;
+  riskLevel: "low" | "medium" | "high";
+  status: string;
+  proposer: string;
+  decidedBy: string | null;
+  baseVersion: number;
+};

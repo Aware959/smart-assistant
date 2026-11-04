@@ -78,16 +78,20 @@ def env_file() -> Path:
 
     优先级：
     1. `MEDIA_GATEWAY_ENV`（桌面壳显式传入，相对路径按 [`BASE_DIR`] 解析）
-    2. `media-gateway.env`（发布目录推荐，与 `.env` 分开，避免和后端 env 混用）
-    3. `.env`（开发目录沿用旧约定）
+    2. `.env.<ZHIWEI_ENV>`（dev / prod 分档；缺省 dev）
+    3. `media-gateway.env`（发布目录推荐，与 `.env` 分开，避免和后端 env 混用）
+    4. `.env`（开发目录沿用旧约定）
     """
     explicit = os.getenv("MEDIA_GATEWAY_ENV", "").strip()
     if explicit:
         path = Path(explicit)
         return path if path.is_absolute() else BASE_DIR / path
-    packaged = BASE_DIR / "media-gateway.env"
-    if packaged.exists():
-        return packaged
+
+    profile = (os.getenv("ZHIWEI_ENV", "dev").strip().lower() or "dev")
+    for name in (f".env.{profile}", "media-gateway.env", ".env"):
+        candidate = BASE_DIR / name
+        if candidate.exists():
+            return candidate
     return BASE_DIR / ".env"
 
 
