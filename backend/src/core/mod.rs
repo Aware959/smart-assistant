@@ -4,6 +4,7 @@
 //! `channels` / `api`（传输层）。core 内部：
 //!
 //! - [`agent`]：单轮对话流水线（编排 + 记忆写入工具）；
+//! - [`confirm`]：人工确认闸门（有外部副作用的工具执行前先问用户）；
 //! - [`context`]：上下文组装（历史时间线 / 记忆召回 / 提示词拼装的取数与渲染）；
 //! - [`session`]：会话内存运行时（`Sessions`，首碰水合 + 写穿）；
 //! - [`memory`]：记忆（模型主动写入/存储/召回 + 关系/作息纯实现）；
@@ -18,6 +19,7 @@
 
 pub mod agent;
 pub mod agent_role;
+pub mod confirm;
 pub mod context;
 pub mod identity;
 pub mod memory;

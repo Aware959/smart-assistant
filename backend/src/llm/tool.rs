@@ -145,11 +145,19 @@ fn media_tools(media_enabled: bool, voice_enabled: bool) -> Vec<Tool> {
 ///
 /// 这是第一道边界：模型根本看不到无权使用的工具。派发前还有第二道硬校验
 /// （[`dispatch_for`]），防止模型幻觉调用未下发的工具。
+///
+/// MCP 工具走的是另一条边界：它们的名单来自外部服务器、随时会变，不适合写进
+/// 静态白名单。这里由 [`AgentRole::allows_mcp`] 整体开关把关，具体暴露哪些工具
+/// 再由服务器配置里的 `tools` 白名单收窄（见 [`crate::mcp`]）。
 pub fn definitions_for(role: AgentRole, stickers: &StickerCatalog) -> Vec<Tool> {
-    definitions(stickers)
+    let mut defs: Vec<Tool> = definitions(stickers)
         .into_iter()
         .filter(|def| role.allows_tool(def.name.as_str()))
-        .collect()
+        .collect();
+    if role.allows_mcp() {
+        defs.extend(crate::mcp::tool_definitions());
+    }
+    defs
 }
 
 /// 主动开口路径的工具集：去掉 `remember` 与非文本输出。

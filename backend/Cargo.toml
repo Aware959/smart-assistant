@@ -75,15 +75,18 @@ dotenvy = "0.15"
 
 # Telegram Bot API 调用（channels/telegram 长轮询）；multipart 用于上传生成的图片/语音字节
 reqwest = { version = "0.12", optional = true, features = ["json", "multipart"] }
-# 微信 iLink 通道：base64（X-WECHAT-UIN）+ 终端二维码渲染（扫码登录）
-base64 = { version = "0.22", optional = true }
+# base64：微信 iLink 通道的 X-WECHAT-UIN 头 + MCP 协议的二进制内容块
+base64 = "0.22"
+# 终端二维码渲染（扫码登录）
 qrcode = { version = "0.14", optional = true }
 
 [features]
-default = ["desktop", "telegram", "ilink"]
+default = ["desktop", "telegram", "ilink", "mcp-http"]
 desktop = ["axum-server", "tower-http"]
 telegram = ["dep:reqwest"]
-ilink = ["dep:reqwest", "dep:base64", "dep:qrcode"]
+ilink = ["dep:reqwest", "dep:qrcode"]
+# MCP 的 Streamable HTTP 传输（stdio 传输不依赖任何外部 crate）
+mcp-http = ["dep:reqwest"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -63,13 +63,13 @@ if (-not $SkipBuild) {
         }
 
         Write-Host '.. Building runtime service' -ForegroundColor Yellow
-        & cargo build --release --no-default-features --features telegram,ilink `
+        & cargo build --release --no-default-features --features telegram,ilink,mcp-http `
             --bin zhiwei-service
         Assert-LastExitCode 'cargo build --release'
 
         if ($WithTools) {
             Write-Host '.. Building maintenance CLI' -ForegroundColor Yellow
-            & cargo build --release --no-default-features --features telegram `
+            & cargo build --release --no-default-features --features telegram,mcp-http `
                 --bin zhiwei-cli
             Assert-LastExitCode 'cargo build --release zhiwei-cli'
         }

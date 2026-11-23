@@ -52,6 +52,16 @@ impl AgentRole {
         self.allowed_tools().contains(&name)
     }
 
+    /// 该角色是否可以使用 MCP 工具。
+    ///
+    /// MCP 工具意味着「以本机身份执行外部动作」（跑工作流、读文件、调接口），
+    /// 副作用落在本机别处，比内置工具更难收口——内置工具的副作用都还在本仓的
+    /// 边界内（发消息、写记忆）。故只对**对话**角色开放：主动开口轮次没有用户
+    /// 的新输入作依据，让它自发调用外部动作等于让它在没人要求时动用户的机器。
+    pub fn allows_mcp(self) -> bool {
+        matches!(self, Self::Conversation)
+    }
+
     /// 是否可以产生用户可见的投递。身份演化角色永远为 `false`。
     pub fn can_message_user(self) -> bool {
         matches!(self, Self::Conversation | Self::Proactive)
@@ -110,6 +120,19 @@ mod tests {
         assert!(role.allows_tool(tool::SEND_MESSAGE));
         assert!(!role.allows_tool(tool::REMEMBER));
         assert!(!role.allows_tool(tool::SEND_DICE));
+    }
+
+    #[test]
+    fn only_conversation_role_may_use_mcp_tools() {
+        assert!(AgentRole::Conversation.allows_mcp());
+        assert!(
+            !AgentRole::Proactive.allows_mcp(),
+            "主动开口不得自发调用外部工具"
+        );
+        assert!(
+            !AgentRole::IdentityEvolution.allows_mcp(),
+            "身份演化不得调用外部工具"
+        );
     }
 
     #[test]

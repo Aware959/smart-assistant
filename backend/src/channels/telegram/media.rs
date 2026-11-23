@@ -42,7 +42,7 @@ pub(super) async fn media_generate(
 pub(super) struct MediaPart {
     method: &'static str,
     field: &'static str,
-    filename: &'static str,
+    filename: String,
 }
 
 /// Telegram caption（图片/语音旁白）长度上限（UTF-16 码元，emoji 占 2）。
@@ -68,7 +68,7 @@ pub(super) async fn send_photo(
         MediaPart {
             method: "sendPhoto",
             field: "photo",
-            filename: "image.png",
+            filename: "image.png".to_string(),
         },
         bytes.to_vec(),
         caption.map(str::to_string),
@@ -91,9 +91,57 @@ pub(super) async fn send_voice(
         MediaPart {
             method: "sendVoice",
             field: "voice",
-            filename: "voice.ogg",
+            filename: "voice.ogg".to_string(),
         },
         bytes.to_vec(),
+        caption.map(str::to_string),
+    )
+    .await
+}
+
+/// 上传一段音频（Telegram 的 `sendAudio`：与语音消息 `sendVoice` 是两个接口）。
+pub(super) async fn send_audio(
+    client: &reqwest::Client,
+    base: &str,
+    chat_id: i64,
+    bytes: Vec<u8>,
+    filename: String,
+    caption: Option<&str>,
+) -> Result<(), String> {
+    send_media(
+        client,
+        base,
+        chat_id,
+        MediaPart {
+            method: "sendAudio",
+            field: "audio",
+            filename,
+        },
+        bytes,
+        caption.map(str::to_string),
+    )
+    .await
+}
+
+/// 上传一个通用文件（多部件）。
+pub(super) async fn send_document(
+    client: &reqwest::Client,
+    base: &str,
+    chat_id: i64,
+    bytes: Vec<u8>,
+    filename: String,
+    caption: Option<&str>,
+) -> Result<(), String> {
+    send_media(
+        client,
+        base,
+        chat_id,
+        MediaPart {
+            method: "sendDocument",
+            field: "document",
+            filename,
+        },
+        bytes,
         caption.map(str::to_string),
     )
     .await
@@ -126,6 +174,10 @@ pub(super) async fn send_media(
         other => other,
     };
     let url = format!("{base}/{}", part.method);
+    // 重试闭包是 FnMut（可能跑多次），捕获的值每次都得是新的：文件名跟着字节
+    // 一起在闭包内克隆，否则第二次重试就拿不到它了。
+    let field = part.field;
+    let filename = part.filename.clone();
     with_send_retry(
         &format!("telegram/{}", part.method),
         SEND_RETRY,
@@ -134,13 +186,14 @@ pub(super) async fn send_media(
             let url = url.clone();
             let bytes = bytes.clone();
             let caption = caption.clone();
+            let filename = filename.clone();
             let what = part.method;
             async move {
                 let mut form = reqwest::multipart::Form::new()
                     .text("chat_id", chat_id.to_string())
                     .part(
-                        part.field,
-                        reqwest::multipart::Part::bytes(bytes).file_name(part.filename),
+                        field,
+                        reqwest::multipart::Part::bytes(bytes).file_name(filename),
                     );
                 if let Some(c) = caption {
                     form = form.text("caption", c);

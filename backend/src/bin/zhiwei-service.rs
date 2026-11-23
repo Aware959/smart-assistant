@@ -49,6 +49,12 @@ async fn main() {
         "database ready"
     );
 
+    // MCP 服务器预热：拉起子进程、取回工具表。放在启动期做，第一轮对话就不必
+    // 替连接与握手买单。失败只记日志——MCP 不可用不该挡住通道起来。
+    if cfg.mcp_enabled {
+        let _ = tokio::task::spawn_blocking(smart_assistant::mcp::warmup).await;
+    }
+
     // 各长驻循环的句柄：退出时统一 abort 收尾（不再依赖 runtime drop 一把梭）。
     let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -166,6 +172,9 @@ async fn main() {
             _ = &mut deadline => break,
         }
     }
+
+    // MCP 子进程收尾：它们是本进程拉起来的，宿主退出后不该继续占着端口与显存。
+    smart_assistant::mcp::shutdown();
 
     tracing::info!("zhiwei-service 退出完毕");
 }

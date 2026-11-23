@@ -53,6 +53,8 @@ cargo run --bin zhiwei-cli -- db check          # 巡检向量签名（只读）
 cargo run --bin zhiwei-cli -- db rebuild [--force]  # 重建向量表
 cargo run --bin zhiwei-cli -- sticker fetch <包名>  # 拉取 Telegram 贴纸包生成表情包目录
 cargo run --bin zhiwei-cli -- config get            # 读取数据库运行时配置
+cargo run --bin zhiwei-cli -- mcp list              # 查看 MCP 服务器连接状态与工具表
+cargo run --bin zhiwei-cli -- mcp call <服> <工具>   # 试调一次 MCP 工具
 ```
 
 以下命令属于非主线的 Web / iLink 端，主线开发期间不要用来做验证：

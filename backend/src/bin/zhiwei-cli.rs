@@ -9,6 +9,8 @@
 //! zhiwei-cli config schema
 //! zhiwei-cli config set <key> <value>
 //! zhiwei-cli config audit [--limit N]
+//! zhiwei-cli mcp list
+//! zhiwei-cli mcp call <服务器> <工具> [JSON 参数]
 //! ```
 //!
 //! `db` 与 `sticker` 直接操作本地数据；`config` 只通过 `zhiwei-service`
@@ -38,6 +40,8 @@ const USAGE: &str = "\
   zhiwei-cli config schema
   zhiwei-cli config set <key> <value>
   zhiwei-cli config audit [--limit N]
+  zhiwei-cli mcp list
+  zhiwei-cli mcp call <服务器> <工具> [JSON 参数]
   zhiwei-cli --version";
 
 fn main() -> ExitCode {
@@ -52,6 +56,7 @@ fn main() -> ExitCode {
         [group, sub, rest @ ..] if group == "db" => cmd_db(sub, rest),
         [group, sub, rest @ ..] if group == "sticker" => cmd_sticker(sub, rest),
         [group, sub, rest @ ..] if group == "config" => cmd_config(sub, rest),
+        [group, sub, rest @ ..] if group == "mcp" => cmd_mcp(sub, rest),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -60,6 +65,86 @@ fn main() -> ExitCode {
             eprintln!("错误: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `mcp` 子命令：查看 MCP 服务器连接状态、试调一个工具。
+///
+/// 它只读配置、只起 MCP 子进程，不碰数据库与消息——用来在接真机之前确认
+/// "服务器起没起来、工具名对不对、参数收不收"。
+fn cmd_mcp(sub: &str, args: &[String]) -> Result<(), String> {
+    if !Config::get().mcp_enabled {
+        return Err(
+            "MCP 未启用：设 MCP_ENABLED=1 后重试（启用即授权本机起 MCP 子进程）".to_string(),
+        );
+    }
+    match sub {
+        "list" => {
+            let statuses = smart_assistant::mcp::server_status();
+            if statuses.is_empty() {
+                println!("没有配置任何 MCP 服务器。");
+                println!("  配置文件：{}", Config::get().mcp_config_file);
+                if let Some(error) = smart_assistant::mcp::load_error() {
+                    println!("  原因：{error}");
+                }
+                println!("  格式参考 backend/mcp.json.example。");
+                return Ok(());
+            }
+            for status in statuses {
+                println!(
+                    "{}  {}  目标 {}",
+                    status.name,
+                    if status.connected {
+                        "[已连接]"
+                    } else {
+                        "[未连接]"
+                    },
+                    status.target
+                );
+                if let Some(error) = &status.error {
+                    println!("  错误：{error}");
+                }
+                for tool in &status.tools {
+                    let description = tool.description.trim();
+                    // 人工确认闸门点名的工具标出来：调用它之前用户得先点头。
+                    let mark = if status.confirm_tools.iter().any(|t| t == &tool.name) {
+                        "（需确认）"
+                    } else {
+                        ""
+                    };
+                    if description.is_empty() {
+                        println!("    {}  {}", tool.name, mark);
+                    } else {
+                        println!("    {}  {}  ——  {}", tool.name, mark, description);
+                    }
+                }
+            }
+            Ok(())
+        }
+        "call" => {
+            let usage = "用法：zhiwei-cli mcp call <服务器> <工具> [JSON 参数]";
+            let server = args.first().ok_or(usage)?;
+            let tool = args.get(1).ok_or(usage)?;
+            let arguments = match args.get(2) {
+                Some(raw) => serde_json::from_str::<Value>(raw)
+                    .map_err(|error| format!("参数不是合法 JSON：{error}"))?,
+                None => serde_json::json!({}),
+            };
+            let outcome = smart_assistant::mcp::call(server, tool, &arguments)?;
+            if !outcome.text.trim().is_empty() {
+                println!("{}", outcome.text);
+            }
+            for artifact in &outcome.artifacts {
+                let mime = if artifact.mime.is_empty() {
+                    "未知类型"
+                } else {
+                    artifact.mime.as_str()
+                };
+                println!("  产物：{mime}  {} 字节", artifact.bytes.len());
+            }
+            Ok(())
+        }
+        _ => Err("用法：zhiwei-cli mcp list | mcp call <服务器> <工具> [JSON 参数]".to_string()),
     }
 }
 

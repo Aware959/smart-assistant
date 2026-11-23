@@ -147,3 +147,201 @@ fn 贴纸投影不带选择键() {
     };
     assert_eq!(reply.projection(), "[发了一个表情包]");
 }
+
+/// MCP 带回来的成品媒体：投影只说"发了什么"，不把字节写进历史。
+#[test]
+fn 成品媒体投影只描述形态() {
+    let image = Reply::Media {
+        bytes: vec![0x89, 0x50],
+        mime: "image/png".to_string(),
+        filename: Some("pic.png".to_string()),
+        caption: None,
+    };
+    assert_eq!(image.projection(), "[发了一张图片]");
+    assert!(image.as_text().is_none());
+
+    let audio = Reply::Media {
+        bytes: vec![0x4f, 0x67],
+        mime: "audio/ogg".to_string(),
+        filename: None,
+        caption: None,
+    };
+    assert_eq!(audio.projection(), "[发了一段音频]");
+
+    let file = Reply::Media {
+        bytes: vec![0x50, 0x44, 0x46],
+        mime: "application/pdf".to_string(),
+        filename: None,
+        caption: None,
+    };
+    assert_eq!(file.projection(), "[发了一个文件]");
+}
+
+/// MIME 判不出来的一律当文件：通用投递总能用，猜错成图片反而可能投不出去。
+#[test]
+fn 媒体种类按mime判定() {
+    assert_eq!(MediaKind::from_mime("image/png"), MediaKind::Image);
+    assert_eq!(MediaKind::from_mime("IMAGE/JPEG"), MediaKind::Image);
+    assert_eq!(MediaKind::from_mime("audio/mpeg"), MediaKind::Audio);
+    assert_eq!(MediaKind::from_mime("application/pdf"), MediaKind::File);
+    assert_eq!(MediaKind::from_mime(""), MediaKind::File);
+}
+
+/// 造一个装在内存库上的 Agent（不碰磁盘库、不连模型）。
+fn agent_with(conv: Arc<Sessions>) -> Agent {
+    let db = Arc::new(std::sync::Mutex::new(
+        crate::db::Database::in_memory().unwrap(),
+    ));
+    Agent::new(
+        conv,
+        Arc::new(crate::llm::chat::Llm),
+        Arc::new(crate::core::memory::Store::new(db.clone())),
+        Arc::new(crate::core::identity::profile::Profile::new(db)),
+        crate::core::sticker::StickerCatalog::load_default(),
+    )
+}
+
+/// 确认闸门：用户点头才放行，拒绝则回填拒绝原因。
+///
+/// 闸门等的是**会话时间线**里的用户消息——通道侧收到消息的当下就落库，
+/// 这一轮跑着的时候新消息也只落库不起第二轮。故这里直接往时间线里写。
+#[test]
+fn 确认闸门按用户回应放行或拒绝() {
+    for (reply, approved) in [("确认", true), ("取消", false)] {
+        let conv = Arc::new(sessions());
+        let sid = conv.resolve("telegram", "100").unwrap();
+        let trigger = conv.add_message(&sid, "user", "帮我跑个工作流").unwrap();
+        let agent = agent_with(conv.clone());
+        let call = ChatCall::new(
+            "c1",
+            "mcp__comfy__run_workflow",
+            serde_json::json!({"prompt": "一只猫"}),
+        );
+        let target = crate::mcp::Target {
+            server: "comfy".to_string(),
+            tool: "run_workflow".to_string(),
+        };
+        let mut state = DispatchState {
+            cursor: Some(trigger.id.clone()),
+            confirmed: HashMap::new(),
+        };
+        let mut delivered: Vec<Reply> = Vec::new();
+        // 用户在闸门等到之前回了话。
+        conv.add_message(&sid, "user", reply).unwrap();
+
+        let outcome = agent
+            .confirm_gate(
+                &sid,
+                &call,
+                &target,
+                &mut |_reply: &Reply| Ok(None),
+                &mut delivered,
+                &mut state,
+            )
+            .unwrap();
+
+        // 确认请求一定投给了用户（用户得看得到，才谈得上确认）。
+        assert_eq!(delivered.len(), 1, "确认请求应投给用户");
+        let request = delivered[0].as_text().unwrap_or_default();
+        assert!(request.contains("comfy"));
+        assert!(request.contains("run_workflow"));
+
+        match (approved, outcome) {
+            (true, GateOutcome::Proceed { .. }) => {}
+            (false, GateOutcome::Refused { content, .. }) => {
+                assert!(content.contains("拒绝"), "回填给模型的说明：{content}");
+                assert!(content.contains("未执行"));
+            }
+            (true, other) => panic!("应放行，却是 {other:?}"),
+            (false, other) => panic!("应拒绝，却是 {other:?}"),
+        }
+    }
+}
+
+/// 同一批里完全相同的调用只问一次：第二次沿用上一次的判定。
+#[test]
+fn 同一批里重复的调用不重复问用户() {
+    let conv = Arc::new(sessions());
+    let sid = conv.resolve("telegram", "101").unwrap();
+    let trigger = conv.add_message(&sid, "user", "跑一下").unwrap();
+    let agent = agent_with(conv.clone());
+    let call = ChatCall::new(
+        "c1",
+        "mcp__comfy__run_workflow",
+        serde_json::json!({"prompt": "猫"}),
+    );
+    let target = crate::mcp::Target {
+        server: "comfy".to_string(),
+        tool: "run_workflow".to_string(),
+    };
+    let mut state = DispatchState {
+        cursor: Some(trigger.id.clone()),
+        confirmed: HashMap::new(),
+    };
+    let mut delivered: Vec<Reply> = Vec::new();
+    conv.add_message(&sid, "user", "取消").unwrap();
+
+    let first = agent
+        .confirm_gate(
+            &sid,
+            &call,
+            &target,
+            &mut |_reply: &Reply| Ok(None),
+            &mut delivered,
+            &mut state,
+        )
+        .unwrap();
+    assert!(matches!(first, GateOutcome::Refused { .. }));
+
+    // 第二次同样的调用：不再投递确认请求，也不等新的回应。
+    let mut delivered2: Vec<Reply> = Vec::new();
+    let second = agent
+        .confirm_gate(
+            &sid,
+            &call,
+            &target,
+            &mut |_reply: &Reply| Ok(None),
+            &mut delivered2,
+            &mut state,
+        )
+        .unwrap();
+    assert!(delivered2.is_empty(), "不该再问一次");
+    assert!(matches!(second, GateOutcome::Refused { .. }));
+}
+
+/// 确认请求投递不出去 = 用户没看到 = 不能当作已同意。
+#[test]
+fn 确认请求投递失败即视为未确认() {
+    let conv = Arc::new(sessions());
+    let sid = conv.resolve("telegram", "102").unwrap();
+    let trigger = conv.add_message(&sid, "user", "跑一下").unwrap();
+    let agent = agent_with(conv.clone());
+    let call = ChatCall::new("c1", "mcp__comfy__run_workflow", serde_json::json!({}));
+    let target = crate::mcp::Target {
+        server: "comfy".to_string(),
+        tool: "run_workflow".to_string(),
+    };
+    let mut state = DispatchState {
+        cursor: Some(trigger.id.clone()),
+        confirmed: HashMap::new(),
+    };
+    let mut delivered: Vec<Reply> = Vec::new();
+
+    let outcome = agent
+        .confirm_gate(
+            &sid,
+            &call,
+            &target,
+            &mut |_reply: &Reply| Err("通道断了".to_string()),
+            &mut delivered,
+            &mut state,
+        )
+        .unwrap();
+    assert!(delivered.is_empty());
+    match outcome {
+        GateOutcome::Refused { content, .. } => {
+            assert!(content.contains("未执行"), "回填给模型的说明：{content}");
+        }
+        other => panic!("应拒绝，却是 {other:?}"),
+    }
+}

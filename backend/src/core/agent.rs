@@ -3,9 +3,12 @@
 //! 重构后会话是 core 内具体类型（[`Sessions`]），能力直接以具体类型接线：
 //! LLM = [`crate::llm::chat::Llm`]，记忆 = [`crate::core::memory::Store`]。
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::core::agent_role::AgentRole;
+use crate::core::confirm::Decision;
 use crate::core::context;
 use crate::core::identity::profile::Profile;
 use crate::core::memory::{MemoryKind, MemoryRecord, Store};
@@ -53,6 +56,40 @@ pub enum Reply {
     },
     /// 一段本机合成的语音。`text` 是要念的内容；合成 + 上传在通道层完成。
     Voice { text: String },
+    /// 一段**已经做好**的媒体（图片 / 音频 / 文件）。
+    ///
+    /// 与 [`Reply::Photo`] 的分工：Photo 携带的是**生成意图**（prompt），字节由
+    /// 通道层的投递工人去取；这里携带的是**成品字节**——MCP 服务器已经把图或音频
+    /// 做好了，内核拿字节直接投，不必再绕一趟生成。
+    Media {
+        bytes: Vec<u8>,
+        mime: String,
+        filename: Option<String>,
+        caption: Option<String>,
+    },
+}
+
+/// 媒体种类：决定通道用哪种投递方式（图片 / 音频 / 通用文件）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Audio,
+    File,
+}
+
+impl MediaKind {
+    /// 按 MIME 判定种类。判不出来的一律当文件——通用投递总能用，
+    /// 猜错成图片或音频反而可能投不出去。
+    pub fn from_mime(mime: &str) -> MediaKind {
+        let mime = mime.trim().to_ascii_lowercase();
+        if mime.starts_with("image/") {
+            MediaKind::Image
+        } else if mime.starts_with("audio/") {
+            MediaKind::Audio
+        } else {
+            MediaKind::File
+        }
+    }
 }
 
 impl Reply {
@@ -75,6 +112,11 @@ impl Reply {
                 None => format!("[发了一张图片：{prompt}]"),
             },
             Reply::Voice { text } => format!("[发了一段语音] {text}"),
+            Reply::Media { mime, .. } => match MediaKind::from_mime(mime) {
+                MediaKind::Image => "[发了一张图片]".to_string(),
+                MediaKind::Audio => "[发了一段音频]".to_string(),
+                MediaKind::File => "[发了一个文件]".to_string(),
+            },
         }
     }
 
@@ -85,7 +127,8 @@ impl Reply {
             Reply::Dice { .. }
             | Reply::Sticker { .. }
             | Reply::Photo { .. }
-            | Reply::Voice { .. } => None,
+            | Reply::Voice { .. }
+            | Reply::Media { .. } => None,
         }
     }
 }
@@ -312,18 +355,15 @@ impl Agent {
         //
         // 插话游标从本条用户消息起算：这一轮在跑的时候用户还能接着说，那些消息到达即落库
         // （通道侧），由循环在迭代边界并进 live 上下文（见 [`ingest_steers`]）。
-        let tools = crate::llm::tool::definitions_for(AgentRole::Conversation, &self.stickers);
         let (delivered, last_memory) = self.run_tool_loop(
             &session.id,
             &user_message_id,
             messages,
-            &tools,
             ToolPolicy::MustReply,
             AgentRole::Conversation,
             Some(user_message_id.clone()),
             deliver,
         )?;
-
         // 对话路径一条消息都没产出 = 失败。主动路径的"空"是"决定不开口"，
         // 所以那条判据留在各自的入口，不放进共用的循环里。
         if delivered.is_empty() {
@@ -393,12 +433,10 @@ impl Agent {
             "主动决策：提示词已组装"
         );
 
-        let tools = crate::llm::tool::definitions_for(AgentRole::Proactive, &self.stickers);
         let (delivered, _) = self.run_tool_loop(
             session_id,
             "",
             messages,
-            &tools,
             ToolPolicy::MayStaySilent,
             AgentRole::Proactive,
             // 主动轮次不并入用户消息：它的提示词是"该不该开口"的主动语境，
@@ -431,7 +469,6 @@ impl Agent {
         session_id: &str,
         user_message_id: &str,
         mut messages: Vec<ChatMessage>,
-        tools: &[genai::chat::Tool],
         tool_policy: ToolPolicy,
         role: AgentRole,
         steer_after: Option<String>,
@@ -453,16 +490,24 @@ impl Agent {
         // 连续多少轮只调只读工具、一次都没说话。防止模型在工具上来回打转不说话。
         let mut mute_rounds = 0u32;
         // 插话游标：已并入上下文的最后一条用户消息，每轮循环边界往后推进。
-        let mut steer_cursor = steer_after;
+        // 与确认闸门共用同一个水位线（见 [`DispatchState`]）。
+        let mut state = DispatchState {
+            cursor: steer_after,
+            confirmed: HashMap::new(),
+        };
 
         for iter in 1..=MAX_TOOL_ITER {
+            // 工具表**每轮重建**：MCP 服务器的工具集是动态的（服务器可能没起来、
+            // 工具可能增减），固定不变会让模型看到已经消失的工具、或看不到刚出现
+            // 的工具。内置工具集是静态的，重建开销可以忽略。
+            let tools = crate::llm::tool::definitions_for(role, &self.stickers);
             // 运行中收到的插话：通道在收到消息的当下就把它落库了，这里按游标把它贴进本轮
             // live 上下文，本次生成模型就能看到——不必等这一轮跑完再发下一条（Codex 式
             // 运行时插话）。位置在"上一批工具结果之后、本次生成之前"，协议序列依然合法。
             let steered = ingest_steers(
                 self.conversation.as_ref(),
                 session_id,
-                &mut steer_cursor,
+                &mut state.cursor,
                 &mut messages,
             )?;
             if steered > 0 {
@@ -491,7 +536,7 @@ impl Agent {
             let mut on_delta = |_piece: &str| {};
             let outcome = match self.llm.complete_stream_with_tools(
                 &messages,
-                tools,
+                &tools,
                 tool_choice,
                 &mut on_delta,
             ) {
@@ -532,7 +577,7 @@ impl Agent {
                 if ingest_steers(
                     self.conversation.as_ref(),
                     session_id,
-                    &mut steer_cursor,
+                    &mut state.cursor,
                     &mut messages,
                 )? > 0
                 {
@@ -586,6 +631,9 @@ impl Agent {
             let mut paired: Vec<String> = Vec::new();
             let mut spoke = false;
             let mut delivered_records: Vec<String> = Vec::new();
+            // 确认判定只在本批内复用：同一批里完全相同的调用问一次就够（防重复确认），
+            // 跨批（模型拿到结果后又调一次）则重新问——那是新的一次动作。
+            state.confirmed.clear();
             for call in &outcome.tool_calls {
                 // 工具入参逐条落日志：出问题第一反应就是"模型到底调了什么、传了什么"，
                 // 而参数正文只存在于工具调用里——不记就永远无法事后核对。
@@ -612,6 +660,7 @@ impl Agent {
                     &mut deliver,
                     &mut delivered,
                     &mut paired,
+                    &mut state,
                 ) {
                     Ok(progress) => progress,
                     Err(e) => {
@@ -694,7 +743,14 @@ impl Agent {
         deliver: &mut impl FnMut(&Reply) -> std::result::Result<Option<u8>, String>,
         delivered: &mut Vec<Reply>,
         paired: &mut Vec<String>,
+        state: &mut DispatchState,
     ) -> Result<CallProgress> {
+        // MCP 工具走独立分支：内置工具目录是静态的，MCP 工具来自外部服务器，
+        // 既不在内置白名单里，也不该由内置派发器处理。
+        if crate::mcp::is_mcp_tool(&call.fn_name) {
+            return self
+                .dispatch_mcp_call(session_id, role, call, deliver, delivered, paired, state);
+        }
         match crate::llm::tool::dispatch_for(role, call, tool_ctx) {
             crate::llm::tool::ToolOutcome::Sent(text) => {
                 // 已投递的正文另记一条：这是用户实际看到的内容，
@@ -832,6 +888,244 @@ impl Agent {
                 })
             }
         }
+    }
+
+    /// 执行一次 MCP 工具调用。
+    ///
+    /// 与内置工具的三点差别：
+    ///
+    /// 1. **角色门槛更靠前**：MCP 工具能以本机身份做外部动作，只有对话角色可用；
+    /// 2. **产物直接投递**：服务器返回的图片 / 音频 / 文件，模型的文字回填承载不了，
+    ///    故在这里就投给用户，再把"已发送"写进工具结果；
+    /// 3. **失败即回执**：连接失败、工具不存在、服务器报错，都回一句可读的话给模型，
+    ///    让它自己改口径重试，而不是让整轮崩掉。
+    ///
+    /// 外加一道**人工确认闸门**（见 [`Self::mcp_gate`]）：有外部副作用的工具执行前
+    /// 要用户点头，否则不执行。
+    #[allow(clippy::too_many_arguments)] // 与 `dispatch_call` 同源的管线参数
+    fn dispatch_mcp_call(
+        &self,
+        session_id: &str,
+        role: AgentRole,
+        call: &ChatCall,
+        deliver: &mut impl FnMut(&Reply) -> std::result::Result<Option<u8>, String>,
+        delivered: &mut Vec<Reply>,
+        paired: &mut Vec<String>,
+        state: &mut DispatchState,
+    ) -> Result<CallProgress> {
+        if !role.allows_mcp() {
+            let reason = format!("角色 {} 无权调用 MCP 工具", role.as_str());
+            tracing::warn!(
+                session = %session_id,
+                tool = %call.fn_name,
+                reason = %reason,
+                "MCP 工具调用被拒绝"
+            );
+            let content = format!("调用失败：{reason}");
+            self.record_tool_result(session_id, call, &content, paired)?;
+            return Ok(CallProgress {
+                record: String::new(),
+                spoke: false,
+                tool_msg: ChatMessage::tool_result(call, content),
+            });
+        }
+        // 人工确认闸门：没过就不执行，理由回填给模型。
+        let gate = self.mcp_gate(session_id, call, deliver, delivered, state)?;
+        let gate_record = match gate {
+            GateOutcome::Proceed { record } => record,
+            GateOutcome::Refused { record, content } => {
+                tracing::info!(
+                    session = %session_id,
+                    tool = %call.fn_name,
+                    "MCP 工具调用未获确认，未执行"
+                );
+                self.record_tool_result(session_id, call, &content, paired)?;
+                let spoke = !record.is_empty();
+                return Ok(CallProgress {
+                    record,
+                    spoke,
+                    tool_msg: ChatMessage::tool_result(call, content),
+                });
+            }
+        };
+        let outcome = match crate::mcp::dispatch(&call.fn_name, &call.fn_arguments) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::warn!(
+                    session = %session_id,
+                    tool = %call.fn_name,
+                    error = %error,
+                    "MCP 工具调用失败"
+                );
+                let content = format!("调用失败：{error}");
+                self.record_tool_result(session_id, call, &content, paired)?;
+                let spoke = !gate_record.is_empty();
+                return Ok(CallProgress {
+                    record: gate_record,
+                    spoke,
+                    tool_msg: ChatMessage::tool_result(call, content),
+                });
+            }
+        };
+        // 产物（图片 / 音频 / 文件）：立刻投给用户。
+        let mut records: Vec<String> = Vec::new();
+        for artifact in outcome.artifacts {
+            let reply = Reply::Media {
+                bytes: artifact.bytes,
+                mime: artifact.mime,
+                filename: artifact.filename,
+                caption: None,
+            };
+            let (record, _) = emit(deliver, delivered, reply)?;
+            if !record.is_empty() {
+                records.push(record);
+            }
+        }
+        // 回填给模型的文本：服务器给的内容 + 产物已送达的说明。
+        let mut text = outcome.text.trim().to_string();
+        if !records.is_empty() {
+            let note = format!("（已向用户发送 {} 个文件）", records.len());
+            text = if text.is_empty() {
+                note
+            } else {
+                format!("{text}\n{note}")
+            };
+        }
+        if text.is_empty() {
+            text = "（工具没有返回内容）".to_string();
+        }
+        tracing::info!(
+            session = %session_id,
+            tool = %call.fn_name,
+            artifacts = records.len(),
+            "MCP 工具已执行"
+        );
+        self.record_tool_result(session_id, call, &text, paired)?;
+        // 确认请求也算本轮投给用户的内容，一并落库：用户确实看到过它。
+        let mut record = gate_record;
+        if !records.is_empty() {
+            if !record.is_empty() {
+                record.push('\n');
+            }
+            record.push_str(&records.join("\n"));
+        }
+        let spoke = !record.is_empty();
+        Ok(CallProgress {
+            record,
+            spoke,
+            tool_msg: ChatMessage::tool_result(call, text),
+        })
+    }
+
+    /// 人工确认闸门：有外部副作用的 MCP 工具执行前，先把「调什么、传什么」投给用户，
+    /// 等一个明确的同意才放行。
+    ///
+    /// 流程与几个关键取舍：
+    ///
+    /// - **确认请求走通道投递**：用户得真看得到，才谈得上"确认"。投递失败即视为
+    ///   未获确认（不能当成"用户没反对"）。
+    /// - **等的是会话时间线**：通道侧收到消息的当下就落库，且本会话已有轮次在跑时
+    ///   不会再起第二轮——那条回复就躺在时间线里（见 [`crate::core::confirm::wait`]）。
+    /// - **只有明确同意才执行**：拒绝、回了别的内容、超时，一律不执行，并把原因
+    ///   如实回填给模型。
+    /// - **同一批里重复的调用只问一次**：模型偶尔会把同一个调用吐两遍，问一遍就够。
+    fn mcp_gate(
+        &self,
+        session_id: &str,
+        call: &ChatCall,
+        deliver: &mut impl FnMut(&Reply) -> std::result::Result<Option<u8>, String>,
+        delivered: &mut Vec<Reply>,
+        state: &mut DispatchState,
+    ) -> Result<GateOutcome> {
+        if !crate::mcp::requires_confirmation(&call.fn_name) {
+            return Ok(GateOutcome::Proceed {
+                record: String::new(),
+            });
+        }
+        let Some(target) = crate::mcp::split_target(&call.fn_name) else {
+            return Ok(GateOutcome::Proceed {
+                record: String::new(),
+            });
+        };
+        self.confirm_gate(session_id, call, &target, deliver, delivered, state)
+    }
+
+    /// 确认闸门的实际流程：投确认请求 → 等用户回应 → 判定。
+    ///
+    /// 与 [`Self::mcp_gate`] 分开是为了能单独测它——闸门本身不依赖 MCP 服务器在不在，
+    /// 只依赖"这个工具要不要确认"这个判断。
+    #[allow(clippy::too_many_arguments)] // 与 `mcp_gate` 同源的管线参数
+    fn confirm_gate(
+        &self,
+        session_id: &str,
+        call: &ChatCall,
+        target: &crate::mcp::Target,
+        deliver: &mut impl FnMut(&Reply) -> std::result::Result<Option<u8>, String>,
+        delivered: &mut Vec<Reply>,
+        state: &mut DispatchState,
+    ) -> Result<GateOutcome> {
+        // 同一批里完全相同的一次调用：沿用上一次的判定，不重复打扰用户。
+        let key = format!("{}|{}|{}", target.server, target.tool, call.fn_arguments);
+        if let Some(decision) = state.confirmed.get(&key) {
+            tracing::info!(
+                session = %session_id,
+                tool = %call.fn_name,
+                approved = decision.approved(),
+                "沿用本批已判定过的确认结果"
+            );
+            return Ok(if decision.approved() {
+                GateOutcome::Proceed {
+                    record: String::new(),
+                }
+            } else {
+                GateOutcome::Refused {
+                    record: String::new(),
+                    content: crate::core::confirm::refusal_text(decision),
+                }
+            });
+        }
+        // 把确认请求投给用户。
+        let request =
+            crate::core::confirm::request_text(&target.server, &target.tool, &call.fn_arguments);
+        let reply = Reply::Text(request);
+        if let Err(error) = deliver(&reply) {
+            // 投递不出去 = 用户看不到确认请求 = 不能当作已确认。
+            tracing::warn!(
+                session = %session_id,
+                tool = %call.fn_name,
+                error = %error,
+                "确认请求投递失败，调用未执行"
+            );
+            return Ok(GateOutcome::Refused {
+                record: String::new(),
+                content: format!("调用失败：无法向用户投递确认请求（{error}），未执行。"),
+            });
+        }
+        let record = reply.projection();
+        delivered.push(reply);
+        // 等用户回应。
+        let timeout = Duration::from_secs(crate::config::Config::get().mcp_confirm_timeout_secs);
+        let decision = crate::core::confirm::wait(
+            self.conversation.as_ref(),
+            session_id,
+            &mut state.cursor,
+            timeout,
+        );
+        state.confirmed.insert(key, decision.clone());
+        tracing::info!(
+            session = %session_id,
+            tool = %call.fn_name,
+            approved = decision.approved(),
+            "MCP 工具确认闸门已判定"
+        );
+        Ok(if decision.approved() {
+            GateOutcome::Proceed { record }
+        } else {
+            GateOutcome::Refused {
+                record,
+                content: crate::core::confirm::refusal_text(&decision),
+            }
+        })
     }
 
     /// 落一条 `tool` 结果行，并把它的调用 id 记入本批已配对集合。
@@ -990,6 +1284,30 @@ struct CallProgress {
     spoke: bool,
     /// 回填给模型的工具结果消息，拼进本轮 live 的 `messages`（落库已在分发时完成）。
     tool_msg: ChatMessage,
+}
+
+/// 一轮对话内的派发状态。
+struct DispatchState {
+    /// 本轮的消息游标：插话并入与确认闸门**共用**同一个水位线。
+    ///
+    /// 共用的意义：确认回复被闸门消费掉之后，就不该再被当成"新插话"并进上下文
+    /// 一遍——否则模型会同时看到"用户说：确认"与"用户已同意执行"两条重复信息，
+    /// 还可能把那句"确认"当成新指令又调一遍工具。
+    cursor: Option<String>,
+    /// 本批已判定过的确认（防重复确认）：键 = `服务器|工具|参数`。
+    ///
+    /// 只在**同一批**内复用：模型偶尔把同一个调用吐两遍，问一遍就够；
+    /// 跨批（拿到结果后又调一次）重新问——那是新的一次动作。
+    confirmed: HashMap<String, Decision>,
+}
+
+/// 确认闸门的判定结果。
+#[derive(Debug)]
+enum GateOutcome {
+    /// 放行执行。`record` 是本步投给用户的文本（确认请求，可能是空串）。
+    Proceed { record: String },
+    /// 不放行。`record` 是投给用户的文本，`content` 是回填给模型的说明。
+    Refused { record: String, content: String },
 }
 
 /// 工具循环的迭代硬上限。

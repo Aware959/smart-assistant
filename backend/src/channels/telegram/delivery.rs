@@ -112,8 +112,85 @@ pub(super) async fn deliver_worker(
                     }
                 }
             }
+            // MCP 工具带回的**成品**媒体：字节已经在手，按 MIME 选投递方式即可，
+            // 不必再走"生成意图 → 网关 → 字节"那条路。
+            Reply::Media {
+                bytes,
+                mime,
+                filename,
+                caption,
+            } => {
+                let kind = crate::core::agent::MediaKind::from_mime(mime);
+                let filename = filename.clone().unwrap_or_else(|| default_filename(kind));
+                match kind {
+                    crate::core::agent::MediaKind::Image => {
+                        send_chat_action(&client, &base, chat_id, "upload_photo").await;
+                        send_photo(
+                            &client,
+                            &base,
+                            chat_id,
+                            bytes.as_slice(),
+                            caption.as_deref(),
+                        )
+                        .await
+                        .map(|_| None)
+                    }
+                    crate::core::agent::MediaKind::Audio => {
+                        send_chat_action(&client, &base, chat_id, "record_voice").await;
+                        // Telegram 的语音只吃 ogg/opus；别的音频按普通音频发，
+                        // 否则服务端会拒。
+                        if is_voice_ogg(mime) {
+                            send_voice(
+                                &client,
+                                &base,
+                                chat_id,
+                                bytes.as_slice(),
+                                caption.as_deref(),
+                            )
+                            .await
+                            .map(|_| None)
+                        } else {
+                            send_audio(
+                                &client,
+                                &base,
+                                chat_id,
+                                bytes.clone(),
+                                filename,
+                                caption.as_deref(),
+                            )
+                            .await
+                            .map(|_| None)
+                        }
+                    }
+                    crate::core::agent::MediaKind::File => send_document(
+                        &client,
+                        &base,
+                        chat_id,
+                        bytes.clone(),
+                        filename,
+                        caption.as_deref(),
+                    )
+                    .await
+                    .map(|_| None),
+                }
+            }
         };
         // 回执失败 = 对话循环已放弃（超时 / 异常），工人无需再做别的。
         let _ = ack.send(result);
     }
+}
+
+/// 成品媒体没有文件名时给的兜底名（Telegram 只把它当展示名，不校验扩展名）。
+fn default_filename(kind: crate::core::agent::MediaKind) -> String {
+    match kind {
+        crate::core::agent::MediaKind::Image => "image.png".to_string(),
+        crate::core::agent::MediaKind::Audio => "audio.ogg".to_string(),
+        crate::core::agent::MediaKind::File => "file".to_string(),
+    }
+}
+
+/// 该音频能否走 `sendVoice`（Telegram 只接受 ogg/opus 两种语音容器）。
+fn is_voice_ogg(mime: &str) -> bool {
+    let mime = mime.trim().to_ascii_lowercase();
+    mime.contains("ogg") || mime.contains("opus")
 }

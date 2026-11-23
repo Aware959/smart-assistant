@@ -126,6 +126,29 @@ pub struct Config {
     /// 这条的存在是为了满足 FR-003 的"不能长时间无响应"：若只靠超时兜底，一条几分钟的
     /// 语音会一路跑到超时才静默失败，用户长时间什么也收不到。
     pub voice_transcribe_max_secs: u64,
+    /// MCP 客户端总开关：`1`/`true` 才接入 MCP 服务器。缺省关闭。
+    ///
+    /// 关着的理由不是"不信任 MCP"，而是**默认不该起子进程**：MCP 服务器是本机
+    /// 任意可执行文件，接入即等于授权它以本机身份做事。开了之后才读
+    /// [`Config::mcp_config_file`]、才拉起服务器。
+    pub mcp_enabled: bool,
+    /// MCP 配置文件路径（JSON，兼容 Claude Code 的 `mcpServers` 格式）。
+    /// 缺省 `mcp.json`（相对进程工作目录）。
+    pub mcp_config_file: String,
+    /// MCP 工具的**全局**人工确认缺省：`1`/`true` = 全部 MCP 工具都要用户点头。
+    ///
+    /// 缺省关闭——确认与否最终由 `mcp.json` 里逐服务器 / 逐工具的 `confirm` 段决定，
+    /// 这里是"谁都没说"时的兜底。打开它等于"凡 MCP 必问"，最保守。
+    pub mcp_confirm_default: bool,
+    /// 等待用户确认的超时（秒）。超时即视为拒绝（不执行）。
+    ///
+    /// 缺省 120：够人在手机上看到提示并回一句，也远小于通道的单轮预算
+    /// （`AI_DEADLINE_SECS`），不会把整轮拖死。
+    pub mcp_confirm_timeout_secs: u64,
+    /// MCP 工具结果回填给模型的文本上限（字符）。超长截断并注明截了多少。
+    ///
+    /// 缺省 4000：约一千 token，够放下大多数工具的结论，又不至于把上下文撑爆。
+    pub mcp_result_max_chars: usize,
     /// 身份演化后台任务总开关：`1`/`true` 才启动；缺省关闭。
     pub identity_evolution_enabled: bool,
     /// 身份演化任务的检查周期（小时）。默认 24 小时，任务本身还会按最近提案做冷却。
@@ -264,6 +287,22 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(120),
+            mcp_enabled: std::env::var("MCP_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            mcp_config_file: std::env::var("MCP_CONFIG_FILE")
+                .unwrap_or_else(|_| "mcp.json".to_string()),
+            mcp_confirm_default: std::env::var("MCP_CONFIRM_DEFAULT")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            mcp_confirm_timeout_secs: std::env::var("MCP_CONFIRM_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
+            mcp_result_max_chars: std::env::var("MCP_RESULT_MAX_CHARS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4000),
             identity_evolution_enabled: std::env::var("IDENTITY_EVOLUTION_ENABLED")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
