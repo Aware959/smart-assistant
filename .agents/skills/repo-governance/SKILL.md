@@ -20,7 +20,7 @@ Use when the user asks for a repository review, a "复盘", a health check, a na
 3. Run the deterministic scanner:
 
    ```powershell
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .agents/skills/repo-governance/scripts/repo_scan.ps1
+   pwsh -NoProfile -ExecutionPolicy Bypass -File .agents/skills/repo-governance/scripts/repo_scan.ps1
    ```
 
 4. Review domain cohesion with [references/audit-checklist.md](references/audit-checklist.md). The scanner cannot decide whether a directory still represents a meaningful boundary.

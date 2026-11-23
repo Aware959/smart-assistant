@@ -7,8 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode pre-edit",
-            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode pre-edit",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode pre-edit",
+            "commandWindows": "pwsh -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode pre-edit",
             "timeout": 30,
             "async": false
           }
@@ -21,8 +21,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode post-edit",
-            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode post-edit",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode post-edit",
+            "commandWindows": "pwsh -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode post-edit",
             "timeout": 60,
             "async": false
           }
@@ -34,8 +34,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode stop",
-            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode stop",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode stop",
+            "commandWindows": "pwsh -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/repo_guard.ps1 -Mode stop",
             "timeout": 180,
             "async": false
           }
