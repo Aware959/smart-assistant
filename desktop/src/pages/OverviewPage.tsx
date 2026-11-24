@@ -11,7 +11,7 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { GatewayStatus, ProcessPhase, ServiceStatus } from "../types";
+import type { ProcessPhase, ServiceStatus } from "../types";
 
 const phaseText: Record<ProcessPhase, string> = {
   running: "运行中",
@@ -27,19 +27,17 @@ export default function OverviewPage({
   phaseColor: Record<ProcessPhase, string>;
 }) {
   const [service, setService] = useState<ServiceStatus | null>(null);
-  const [gateway, setGateway] = useState<GatewayStatus | null>(null);
 
   useEffect(() => {
     const refresh = () => {
       api.serviceStatus().then(setService).catch(() => setService(null));
-      api.gatewayStatus().then(setGateway).catch(() => setGateway(null));
     };
     refresh();
     const timer = window.setInterval(refresh, 2000);
     return () => window.clearInterval(timer);
   }, []);
 
-  if (!service || !gateway) {
+  if (!service) {
     return (
       <div className="center-loading">
         <Spin size="large" />
@@ -79,41 +77,10 @@ export default function OverviewPage({
             </Row>
           </Card>
         </Col>
-        <Col xs={24} xl={12}>
-          <Card
-            title="媒体网关"
-            extra={
-              <Tag color={phaseColor[gateway.phase]} bordered={false}>
-                {phaseText[gateway.phase]}
-              </Tag>
-            }
-          >
-            <Typography.Paragraph type="secondary">
-              {gateway.message}
-            </Typography.Paragraph>
-            <Row gutter={16}>
-              <Col span={12}>
-                <Statistic title="进程 PID" value={gateway.pid ?? "—"} />
-              </Col>
-              <Col span={12}>
-                <Statistic
-                  title="健康检查"
-                  value={
-                    gateway.health
-                      ? gateway.health.ok
-                        ? "正常"
-                        : "异常"
-                      : "—"
-                  }
-                />
-              </Col>
-            </Row>
-          </Card>
-        </Col>
       </Row>
       <Card>
         <Typography.Paragraph type="secondary">
-          两个进程相互独立：通道守护负责 Telegram 长轮询，媒体网关负责本机出图、出声与语音转写；任何一边异常都不影响另一边。
+          通道守护负责 Telegram 长轮询与本机 MCP 服务器（MCP 工具按需拉起，不常驻）。
         </Typography.Paragraph>
         <Empty description={false} image={Empty.PRESENTED_IMAGE_SIMPLE} />
       </Card>

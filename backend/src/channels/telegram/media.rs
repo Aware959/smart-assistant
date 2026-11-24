@@ -4,41 +4,6 @@ use super::*;
 
 use super::super::{status_retryable, with_send_retry, SendErr, SEND_RETRY};
 
-pub(super) async fn media_generate(
-    media_url: &str,
-    kind: &str,
-    prompt: &str,
-    timeout: u64,
-) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(timeout))
-        .build()
-        .map_err(|e| format!("创建媒体网关客户端失败: {e}"))?;
-    let url = format!("{media_url}/generate/{kind}");
-    // 只传最必要的字段：图片传 prompt、语音传 text；其余参数（步数、尺寸、音色…）
-    // 由网关按自己接的后端决定默认值，Rust 不必关心。
-    let body = if kind == "image" {
-        serde_json::json!({ "prompt": prompt })
-    } else {
-        serde_json::json!({ "text": prompt })
-    };
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("调用媒体网关失败: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let detail = resp.text().await.unwrap_or_default();
-        return Err(format!("媒体网关返回 {status}: {detail}"));
-    }
-    resp.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| format!("读取媒体字节失败: {e}"))
-}
 pub(super) struct MediaPart {
     method: &'static str,
     field: &'static str,

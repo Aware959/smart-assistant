@@ -31,23 +31,27 @@ pub(super) fn inbound_text(message: &TgMessage) -> Option<String> {
 ///
 /// 拆成"先解析、后干活"两步是为了满足 FR-003：**过期**的语音必须能被识别出来并直接
 /// 存档，绝不能先付一遍下载 + 转写的代价才发现它根本不会被回复（见 `run_loop`）。
-/// 本条消息的内容来源。生命周期与 [`TgMessage`] 的借用绑定（音频字段是借来的）。
-pub(super) enum Inbound<'a> {
+/// 本条消息的内容来源。
+pub(super) enum Inbound {
     /// 直接可用的文本（含贴纸占位描述）。
     Text(String),
-    /// 需要转写的音频附件。
-    Audio(AudioRef<'a>),
+    /// 语音/音频附件（听写能力已下线，回一句提示即可）。
+    Audio,
 }
 impl TgMessage {
     /// 本条消息的"内容来源"：文本/贴纸优先，其次音频附件，都没有则 `None`（忽略）。
     ///
     /// 与 [`inbound_text`] 的优先级一致：文本 > 贴纸 > 语音 > 音频。
-    pub(super) fn resolve_inbound(&self) -> Option<Inbound<'_>> {
+    pub(super) fn resolve_inbound(&self) -> Option<Inbound> {
         if let Some(text) = inbound_text(self) {
             return Some(Inbound::Text(text));
         }
         // `inbound_text` 对语音/音频返回 None（它们没有 text 也没有 sticker），
         // 所以走到这里才轮到音频附件——顺序天然正确。
-        self.audio_attachment().map(Inbound::Audio)
+        if self.has_audio() {
+            Some(Inbound::Audio)
+        } else {
+            None
+        }
     }
 }

@@ -27,8 +27,6 @@ function Get-RepoFiles {
             $relative -notmatch "^backend\\target" -and
             $relative -notmatch "^frontend\\node_modules" -and
             $relative -notmatch "^frontend\\dist" -and
-            $relative -notmatch "^media-gateway\\.venv" -and
-            $relative -notmatch "^media-gateway\\__pycache__" -and
             $relative -notmatch "^backend\\logs" -and
             $relative -notmatch "^backend\\certs" -and
             $relative -notmatch "^backend\\bindings" -and

@@ -6,7 +6,6 @@ use crate::supervisor::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
     env, fs,
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
@@ -22,9 +21,8 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder,
 };
 
-const SERVICE_STATUS_EVENT: &str = "service-status";
-const GATEWAY_STATUS_EVENT: &str = "gateway-status";
 const INSTANCE_FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
+const SERVICE_STATUS_EVENT: &str = "service-status";
 
 struct SingleInstance {
     guard: InstanceGuard,
@@ -216,215 +214,6 @@ impl ServiceManager {
     }
 }
 
-#[derive(Clone, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct GatewayHealth {
-    ok: bool,
-    diffusion: Option<String>,
-    tts: Option<String>,
-    asr_engine: Option<String>,
-    asr_importable: Option<bool>,
-    asr_model_loaded: Option<bool>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewayStatus {
-    phase: String,
-    pid: Option<u32>,
-    message: String,
-    auto_restart: bool,
-    restart_attempts: u32,
-    installed: bool,
-    executable_path: String,
-    working_dir: String,
-    env_file: String,
-    log_file: String,
-    url: String,
-    service_url: String,
-    url_matches_service: bool,
-    health: Option<GatewayHealth>,
-}
-
-#[derive(Clone)]
-struct GatewayManager {
-    supervisor: Arc<ProcessSupervisor>,
-    desktop_dir: PathBuf,
-    executable_path: PathBuf,
-    working_dir: PathBuf,
-    env_file: PathBuf,
-    installed: bool,
-}
-
-impl GatewayManager {
-    fn discover() -> Self {
-        let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from("zhiwei-desktop.exe"));
-        let executable_dir = executable
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let executable_path = resolve_gateway(&executable_dir);
-        let working_dir = env::var_os("ZHIWEI_MEDIA_GATEWAY_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .map(|path| absolutize_from(&executable_dir, &path))
-            .or_else(|| executable_path.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| executable_dir.clone());
-        let env_file = resolve_gateway_env(&working_dir, &executable_dir);
-        let python_program =
-            resolve_python_interpreter(&executable_path, &working_dir, &executable_dir);
-        let host_dir = if working_dir
-            .file_name()
-            .is_some_and(|name| name.eq_ignore_ascii_case("media-gateway"))
-        {
-            working_dir
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| working_dir.clone())
-        } else {
-            working_dir.clone()
-        };
-        let logs_dir = host_dir.join("logs");
-        let _ = fs::create_dir_all(&logs_dir);
-
-        let installed = executable_path.is_file();
-        let command = match &python_program {
-            Some(program) => CommandPlan::Interpreter {
-                program: program.clone(),
-                entry: executable_path.clone(),
-            },
-            None => CommandPlan::Exe(executable_path.clone()),
-        };
-        let image_matcher = match &python_program {
-            Some(program) => ImageMatcher::Interpreter(program.clone()),
-            None => ImageMatcher::Path(executable_path.clone()),
-        };
-        let plan = ProcessPlan {
-            name: "媒体网关",
-            program_label: "媒体网关",
-            log_header: "--- zhiwei-desktop starting media-gateway ---",
-            log_file: logs_dir.join("media-gateway.log"),
-            pid_file: logs_dir.join("media-gateway.pid"),
-            working_dir: working_dir.clone(),
-            command,
-            image_matcher,
-            env: vec![
-                (
-                    "MEDIA_GATEWAY_ENV".to_string(),
-                    env_file.display().to_string(),
-                ),
-                ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
-            ],
-            terminate_tree: true,
-            spawn_error_hint: "",
-        };
-        let initial_message = if installed {
-            "媒体网关尚未启动".to_string()
-        } else {
-            format!("未找到媒体网关（可选组件）：{}", executable_path.display())
-        };
-        let manager = Self {
-            supervisor: Arc::new(ProcessSupervisor::new(
-                plan,
-                Box::new(spawn_process),
-                installed,
-                if installed { "stopped" } else { "unavailable" },
-                initial_message,
-            )),
-            desktop_dir: executable_dir,
-            executable_path,
-            working_dir,
-            env_file,
-            installed,
-        };
-        if installed {
-            manager.supervisor.refresh_external();
-        }
-        manager
-    }
-
-    fn snapshot(&self) -> GatewayStatus {
-        let url = resolve_gateway_url(&self.env_file, &self.desktop_dir);
-        let service_url = resolve_service_gateway_url(&self.desktop_dir);
-        let mut status = self.supervisor.snapshot();
-        let probe = self.probe_health();
-        let external = status.phase != "running" && probe.as_ref().is_some_and(|health| health.ok);
-        if external {
-            status.phase = "running".to_string();
-            status.pid = None;
-            status.message = "媒体网关已在运行（外部启动）".to_string();
-            status.auto_restart = false;
-        }
-        let health = if status.phase == "running" {
-            probe
-        } else {
-            None
-        };
-        GatewayStatus {
-            phase: status.phase,
-            pid: status.pid,
-            message: status.message,
-            auto_restart: status.auto_restart,
-            restart_attempts: status.restart_attempts,
-            installed: self.installed,
-            executable_path: self.executable_path.display().to_string(),
-            working_dir: self.working_dir.display().to_string(),
-            env_file: self.env_file.display().to_string(),
-            log_file: self.supervisor.plan().log_file.display().to_string(),
-            url: url.clone(),
-            service_url: service_url.clone(),
-            url_matches_service: urls_match(&url, &service_url),
-            health,
-        }
-    }
-
-    fn start(&self) -> Result<GatewayStatus, String> {
-        if !self.installed {
-            let message = format!("未找到媒体网关：{}", self.executable_path.display());
-            self.supervisor.mark_unavailable(&message);
-            return Err(message);
-        }
-        if self.external_running() {
-            return Ok(self.snapshot());
-        }
-        self.supervisor.start()?;
-        Ok(self.snapshot())
-    }
-
-    fn stop(&self) -> Result<GatewayStatus, String> {
-        if self.external_running() {
-            return Err("媒体网关由外部启动，桌面壳不管理它；请在启动它的终端里停止".to_string());
-        }
-        self.supervisor.stop()?;
-        Ok(self.snapshot())
-    }
-
-    fn restart(&self) -> Result<GatewayStatus, String> {
-        if self.external_running() {
-            return Err("媒体网关由外部启动，桌面壳不管理它；请在启动它的终端里重启".to_string());
-        }
-        self.supervisor.restart()?;
-        Ok(self.snapshot())
-    }
-
-    fn tick(&self) -> GatewayStatus {
-        self.supervisor.tick();
-        self.snapshot()
-    }
-
-    /// 只要端口上有健康响应就算在运行：外部手动 `python main.py` 时
-    /// supervisor 没有子进程，靠这个判断避免重复拉起。
-    fn external_running(&self) -> bool {
-        self.supervisor.snapshot().phase != "running"
-            && self.probe_health().is_some_and(|health| health.ok)
-    }
-
-    fn probe_health(&self) -> Option<GatewayHealth> {
-        let url = resolve_gateway_url(&self.env_file, &self.desktop_dir);
-        fetch_gateway_health(&url)
-    }
-}
-
 fn resolve_service(executable_dir: &Path) -> PathBuf {
     if let Some(configured) = env::var_os("ZHIWEI_SERVICE") {
         if !configured.is_empty() {
@@ -499,125 +288,6 @@ fn service_image_paths(service_path: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn resolve_gateway(executable_dir: &Path) -> PathBuf {
-    if let Some(configured) = env::var_os("ZHIWEI_MEDIA_GATEWAY") {
-        if !configured.is_empty() {
-            return absolutize_from(executable_dir, Path::new(&configured));
-        }
-    }
-
-    resolve_gateway_from(executable_dir)
-}
-
-fn resolve_gateway_from(executable_dir: &Path) -> PathBuf {
-    let adjacent = executable_dir.join("media-gateway.exe");
-    if adjacent.is_file() {
-        return adjacent;
-    }
-    let nested = executable_dir
-        .join("media-gateway")
-        .join("media-gateway.exe");
-    if nested.is_file() {
-        return nested;
-    }
-
-    for ancestor in executable_dir.ancestors() {
-        let source_entry = ancestor.join("media-gateway").join("main.py");
-        if source_entry.is_file() {
-            return source_entry;
-        }
-    }
-
-    for ancestor in executable_dir.ancestors() {
-        for candidate in [
-            ancestor
-                .join("media-gateway")
-                .join("dist")
-                .join("media-gateway.exe"),
-            ancestor
-                .join("media-gateway")
-                .join("dist")
-                .join("media-gateway")
-                .join("media-gateway.exe"),
-        ] {
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-
-    adjacent
-}
-
-fn resolve_python_interpreter(
-    entry: &Path,
-    working_dir: &Path,
-    base_dir: &Path,
-) -> Option<PathBuf> {
-    if !entry
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
-    {
-        return None;
-    }
-    if let Some(configured) = env::var_os("ZHIWEI_MEDIA_GATEWAY_PYTHON") {
-        if !configured.is_empty() {
-            return Some(absolutize_from(base_dir, Path::new(&configured)));
-        }
-    }
-    let venv_dir = working_dir.join(".venv");
-    let venv_python = venv_dir.join("Scripts").join("python.exe");
-    if venv_python.is_file() && venv_interpreter_is_usable(&venv_dir) {
-        return Some(venv_python);
-    }
-    Some(PathBuf::from("python"))
-}
-
-fn venv_interpreter_is_usable(venv_dir: &Path) -> bool {
-    let config = fs::read_to_string(venv_dir.join("pyvenv.cfg")).unwrap_or_default();
-    for line in config.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim().eq_ignore_ascii_case("home") {
-            let home = value.trim().trim_matches('"').trim_matches('\'');
-            return !home.is_empty() && Path::new(home).is_dir();
-        }
-    }
-    false
-}
-
-fn resolve_gateway_env(working_dir: &Path, desktop_dir: &Path) -> PathBuf {
-    if let Some(configured) = env::var_os("ZHIWEI_MEDIA_GATEWAY_ENV") {
-        if !configured.is_empty() {
-            return absolutize_from(desktop_dir, Path::new(&configured));
-        }
-    }
-
-    let packaged = working_dir.join("media-gateway.env");
-    if packaged.is_file() {
-        return packaged;
-    }
-    if working_dir != desktop_dir {
-        let adjacent = resolve_env_file(working_dir);
-        if adjacent.is_file() {
-            return adjacent;
-        }
-    }
-    if working_dir
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case("dist"))
-    {
-        if let Some(parent) = working_dir.parent() {
-            let development_env = resolve_env_file(parent);
-            if development_env.is_file() {
-                return development_env;
-            }
-        }
-    }
-    packaged
-}
-
 /// 当前进程的环境档位：`ZHIWEI_ENV` 优先，否则按构建档位推断（debug=dev / release=prod）。
 fn env_profile() -> String {
     env::var("ZHIWEI_ENV")
@@ -646,111 +316,6 @@ fn resolve_env_file(working_dir: &Path) -> PathBuf {
     profile_file
 }
 
-fn resolve_gateway_url(env_file: &Path, desktop_dir: &Path) -> String {
-    if let Some(port) = read_env_map(env_file)
-        .get("PORT")
-        .and_then(|value| value.trim().parse::<u16>().ok())
-    {
-        return format!("http://127.0.0.1:{port}");
-    }
-    let service_url = resolve_service_gateway_url(desktop_dir);
-    if !service_url.is_empty() {
-        return service_url;
-    }
-    "http://127.0.0.1:8787".to_string()
-}
-
-fn resolve_service_gateway_url(desktop_dir: &Path) -> String {
-    read_env_map(&resolve_env_file(desktop_dir))
-        .get("MEDIA_GATEWAY_URL")
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_default()
-}
-
-fn read_env_map(path: &Path) -> BTreeMap<String, String> {
-    let mut values = BTreeMap::new();
-    let Ok(text) = fs::read_to_string(path) else {
-        return values;
-    };
-    for line in text.lines() {
-        if let Some((key, value)) = parse_env_line(line) {
-            values.insert(key, value);
-        }
-    }
-    values
-}
-
-fn parse_env_line(line: &str) -> Option<(String, String)> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return None;
-    }
-    let (key, value) = trimmed.split_once('=')?;
-    let key = key.trim();
-    if key.is_empty() {
-        return None;
-    }
-    let mut value = value.trim().to_string();
-    if value.len() >= 2
-        && (value.starts_with('"') && value.ends_with('"')
-            || value.starts_with('\'') && value.ends_with('\''))
-    {
-        value = value[1..value.len() - 1].to_string();
-    }
-    Some((key.to_ascii_uppercase(), value))
-}
-
-fn fetch_gateway_health(base: &str) -> Option<GatewayHealth> {
-    let address = base.trim_end_matches('/').strip_prefix("http://")?;
-    let mut stream = TcpStream::connect(address).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(900)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(900)));
-    let request = format!("GET /health HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).ok()?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response).ok()?;
-    let (status, body) = parse_http_response(&response).ok()?;
-    if status != 200 {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let asr = value.get("asr");
-    Some(GatewayHealth {
-        ok: value
-            .get("ok")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true),
-        diffusion: value
-            .get("diffusion")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        tts: value
-            .get("tts")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        asr_engine: asr
-            .and_then(|value| value.get("engine"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        asr_importable: asr
-            .and_then(|value| value.get("importable"))
-            .and_then(serde_json::Value::as_bool),
-        asr_model_loaded: asr
-            .and_then(|value| value.get("model_loaded"))
-            .and_then(serde_json::Value::as_bool),
-    })
-}
-
-fn urls_match(left: &str, right: &str) -> bool {
-    if right.trim().is_empty() {
-        return true;
-    }
-    left.trim()
-        .trim_end_matches('/')
-        .eq_ignore_ascii_case(right.trim().trim_end_matches('/'))
-}
-
 fn infer_backend_dir(service_path: &Path) -> Option<PathBuf> {
     let profile_dir = service_path.parent()?;
     let target_dir = profile_dir.parent()?;
@@ -767,14 +332,6 @@ fn absolutize(path: &Path) -> PathBuf {
         env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
-    }
-}
-
-fn absolutize_from(base: &Path, path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base.join(path)
     }
 }
 
@@ -998,312 +555,6 @@ fn open_env_file_command(manager: State<'_, ServiceManager>) -> Result<(), Strin
 #[tauri::command]
 fn open_log_file(manager: State<'_, ServiceManager>) -> Result<(), String> {
     reveal_file(&manager.supervisor.plan().log_file)
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewaySettingItem {
-    key: String,
-    description: String,
-    kind: String,
-    default: String,
-    choices: Vec<String>,
-    restart_required: bool,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewaySettingsView {
-    env_file: String,
-    values: BTreeMap<String, String>,
-    schema: Vec<GatewaySettingItem>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GatewaySettingsResult {
-    view: GatewaySettingsView,
-    restarted: bool,
-    warning: Option<String>,
-}
-
-fn gateway_setting(
-    key: &str,
-    description: &str,
-    kind: &str,
-    default: &str,
-    choices: &[&str],
-    restart_required: bool,
-) -> GatewaySettingItem {
-    GatewaySettingItem {
-        key: key.to_string(),
-        description: description.to_string(),
-        kind: kind.to_string(),
-        default: default.to_string(),
-        choices: choices.iter().map(|value| value.to_string()).collect(),
-        restart_required,
-    }
-}
-
-fn gateway_setting_schema() -> Vec<GatewaySettingItem> {
-    vec![
-        gateway_setting("PORT", "监听端口", "integer", "8787", &[], true),
-        gateway_setting(
-            "DIFFUSION_BACKEND_TYPE",
-            "出图后端",
-            "choice",
-            "comfyui",
-            &["comfyui", "a1111"],
-            true,
-        ),
-        gateway_setting(
-            "DIFFUSION_BACKEND_URL",
-            "出图后端地址",
-            "string",
-            "http://127.0.0.1:8188",
-            &[],
-            true,
-        ),
-        gateway_setting(
-            "MEDIA_HTTP_TIMEOUT",
-            "媒体生成超时（秒）",
-            "integer",
-            "120",
-            &[],
-            true,
-        ),
-        gateway_setting(
-            "COMFYUI_WORKFLOW_FILE",
-            "ComfyUI 工作流文件（留空用内置）",
-            "string",
-            "",
-            &[],
-            true,
-        ),
-        gateway_setting(
-            "TTS_ENGINE",
-            "语音合成引擎",
-            "choice",
-            "sapi",
-            &["sapi", "edge-tts"],
-            true,
-        ),
-        gateway_setting(
-            "TTS_VOICE",
-            "语音音色",
-            "string",
-            "zh-CN-XiaoxiaoNeural",
-            &[],
-            true,
-        ),
-        gateway_setting(
-            "SAPI_VOICE",
-            "SAPI 音色全名（可选）",
-            "string",
-            "",
-            &[],
-            true,
-        ),
-        gateway_setting("FFMPEG_BIN", "ffmpeg 路径", "string", "ffmpeg", &[], true),
-        gateway_setting(
-            "ASR_ENGINE",
-            "语音识别引擎",
-            "choice",
-            "faster-whisper",
-            &["faster-whisper", "none"],
-            true,
-        ),
-        gateway_setting("ASR_MODEL", "Whisper 模型", "string", "small", &[], true),
-        gateway_setting("ASR_LANGUAGE", "识别语种", "string", "auto", &[], true),
-        gateway_setting(
-            "ASR_DEVICE",
-            "识别设备",
-            "choice",
-            "cpu",
-            &["cpu", "cuda"],
-            true,
-        ),
-        gateway_setting("ASR_COMPUTE_TYPE", "识别精度", "string", "int8", &[], true),
-        gateway_setting(
-            "ASR_MODEL_DIR",
-            "模型缓存目录（可选）",
-            "string",
-            "",
-            &[],
-            true,
-        ),
-        gateway_setting("ASR_WARMUP", "启动预热模型", "boolean", "1", &[], true),
-        gateway_setting("NO_PROXY", "本机代理绕过", "string", "*", &[], true),
-    ]
-}
-
-fn validate_gateway_changes(changes: &BTreeMap<String, String>) -> Result<(), String> {
-    let schema = gateway_setting_schema();
-    for (key, value) in changes {
-        if value.contains('\r') || value.contains('\n') {
-            return Err(format!("{key} 不能包含换行"));
-        }
-        let item = schema
-            .iter()
-            .find(|item| item.key == *key)
-            .ok_or_else(|| format!("未知的媒体网关配置键：{key}"))?;
-        match item.kind.as_str() {
-            "integer" => {
-                let parsed = value
-                    .trim()
-                    .parse::<u64>()
-                    .map_err(|_| format!("{} 必须是整数", item.description))?;
-                let (min, max) = if key == "PORT" {
-                    (1, 65_535)
-                } else {
-                    (1, 3_600)
-                };
-                if parsed < min || parsed > max {
-                    return Err(format!("{} 必须在 {min}..{max} 之间", item.description));
-                }
-            }
-            "boolean" => {
-                let normalized = value.trim().to_ascii_lowercase();
-                if !matches!(
-                    normalized.as_str(),
-                    "1" | "0" | "true" | "false" | "yes" | "no" | "on" | "off"
-                ) {
-                    return Err(format!("{} 只接受 1/0/true/false", item.description));
-                }
-            }
-            "choice" => {
-                if !item.choices.iter().any(|choice| choice == value.trim()) {
-                    return Err(format!(
-                        "{} 只能是 {}",
-                        item.description,
-                        item.choices.join(" / ")
-                    ));
-                }
-            }
-            _ => {
-                let trimmed = value.trim();
-                if key == "DIFFUSION_BACKEND_URL"
-                    && !(trimmed.starts_with("http://") || trimmed.starts_with("https://"))
-                {
-                    return Err("出图后端地址必须以 http:// 或 https:// 开头".to_string());
-                }
-                if key == "FFMPEG_BIN" && trimmed.is_empty() {
-                    return Err("ffmpeg 路径不能为空".to_string());
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_gateway_env(path: &Path, changes: &BTreeMap<String, String>) -> Result<(), String> {
-    validate_gateway_changes(changes)?;
-    let existing = fs::read_to_string(path).unwrap_or_default();
-    let mut remaining = changes.clone();
-    let mut lines = Vec::new();
-    if existing.trim().is_empty() {
-        lines.push("# media-gateway 配置（由 zhiwei-desktop 管理）".to_string());
-    }
-    for line in existing.lines() {
-        if let Some((key, _)) = parse_env_line(line) {
-            if let Some(value) = remaining.remove(&key) {
-                lines.push(format!("{key}={value}"));
-                continue;
-            }
-        }
-        lines.push(line.to_string());
-    }
-    for (key, value) in remaining {
-        lines.push(format!("{key}={value}"));
-    }
-    let mut text = lines.join("\n");
-    text.push('\n');
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("无法创建媒体网关配置目录 {}：{error}", parent.display()))?;
-    }
-    fs::write(path, text)
-        .map_err(|error| format!("无法写入媒体网关配置 {}：{error}", path.display()))
-}
-
-fn gateway_settings_view(manager: &GatewayManager) -> GatewaySettingsView {
-    GatewaySettingsView {
-        env_file: manager.env_file.display().to_string(),
-        values: read_env_map(&manager.env_file),
-        schema: gateway_setting_schema(),
-    }
-}
-
-#[tauri::command]
-fn gateway_status(manager: State<'_, GatewayManager>) -> GatewayStatus {
-    manager.snapshot()
-}
-
-#[tauri::command]
-fn start_gateway(manager: State<'_, GatewayManager>) -> Result<GatewayStatus, String> {
-    manager.start()
-}
-
-#[tauri::command]
-fn stop_gateway(manager: State<'_, GatewayManager>) -> Result<GatewayStatus, String> {
-    manager.stop()
-}
-
-#[tauri::command]
-fn restart_gateway(manager: State<'_, GatewayManager>) -> Result<GatewayStatus, String> {
-    manager.restart()
-}
-
-#[tauri::command]
-fn open_gateway_folder(manager: State<'_, GatewayManager>) -> Result<(), String> {
-    open_directory(&manager.working_dir)
-}
-
-#[tauri::command]
-fn open_gateway_env_file(manager: State<'_, GatewayManager>) -> Result<(), String> {
-    if !manager.env_file.is_file() {
-        let defaults = gateway_setting_schema()
-            .into_iter()
-            .map(|item| (item.key, item.default))
-            .collect::<BTreeMap<_, _>>();
-        write_gateway_env(&manager.env_file, &defaults)?;
-    }
-    open_env_file(&manager.env_file)
-}
-
-#[tauri::command]
-fn open_gateway_log_file(manager: State<'_, GatewayManager>) -> Result<(), String> {
-    reveal_file(&manager.supervisor.plan().log_file)
-}
-
-#[tauri::command]
-fn gateway_settings(manager: State<'_, GatewayManager>) -> Result<GatewaySettingsView, String> {
-    Ok(gateway_settings_view(&manager))
-}
-
-#[tauri::command]
-fn update_gateway_settings(
-    manager: State<'_, GatewayManager>,
-    changes: BTreeMap<String, String>,
-) -> Result<GatewaySettingsResult, String> {
-    let normalized = changes
-        .into_iter()
-        .map(|(key, value)| (key.trim().to_ascii_uppercase(), value.trim().to_string()))
-        .collect::<BTreeMap<_, _>>();
-    write_gateway_env(&manager.env_file, &normalized)?;
-
-    let was_running = manager.snapshot().phase == "running";
-    let mut warning = None;
-    if was_running {
-        if let Err(error) = manager.restart() {
-            warning = Some(format!("配置已保存，但媒体网关重启失败：{error}"));
-        }
-    }
-    Ok(GatewaySettingsResult {
-        view: gateway_settings_view(&manager),
-        restarted: was_running && warning.is_none(),
-        warning,
-    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1632,16 +883,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let start = MenuItem::with_id(app, "start", "启动通道", true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启通道", true, None::<&str>)?;
     let stop = MenuItem::with_id(app, "stop", "停止通道", true, None::<&str>)?;
-    let gateway_start =
-        MenuItem::with_id(app, "gateway_start", "启动媒体网关", true, None::<&str>)?;
-    let gateway_restart =
-        MenuItem::with_id(app, "gateway_restart", "重启媒体网关", true, None::<&str>)?;
-    let gateway_stop = MenuItem::with_id(app, "gateway_stop", "停止媒体网关", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "logs", "查看日志", true, None::<&str>)?;
-    let gateway_logs =
-        MenuItem::with_id(app, "gateway_logs", "查看媒体网关日志", true, None::<&str>)?;
-    let gateway_env =
-        MenuItem::with_id(app, "gateway_env", "编辑媒体网关配置", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "打开程序目录", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出知微", true, None::<&str>)?;
     let first_separator = PredefinedMenuItem::separator(app)?;
@@ -1656,11 +898,6 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             &restart,
             &stop,
             &second_separator,
-            &gateway_start,
-            &gateway_restart,
-            &gateway_stop,
-            &gateway_logs,
-            &gateway_env,
             &logs,
             &folder,
             &third_separator,
@@ -1686,29 +923,9 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                 let manager = app.state::<ServiceManager>();
                 let _ = manager.stop();
             }
-            "gateway_start" => {
-                let manager = app.state::<GatewayManager>();
-                let _ = manager.start();
-            }
-            "gateway_restart" => {
-                let manager = app.state::<GatewayManager>();
-                let _ = manager.restart();
-            }
-            "gateway_stop" => {
-                let manager = app.state::<GatewayManager>();
-                let _ = manager.stop();
-            }
             "logs" => {
                 let manager = app.state::<ServiceManager>();
                 let _ = reveal_file(&manager.supervisor.plan().log_file);
-            }
-            "gateway_logs" => {
-                let manager = app.state::<GatewayManager>();
-                let _ = reveal_file(&manager.supervisor.plan().log_file);
-            }
-            "gateway_env" => {
-                let manager = app.state::<GatewayManager>();
-                let _ = open_env_file(&manager.env_file);
             }
             "folder" => {
                 let manager = app.state::<ServiceManager>();
@@ -1717,8 +934,6 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             "quit" => {
                 let manager = app.state::<ServiceManager>();
                 let _ = manager.stop();
-                let gateway = app.state::<GatewayManager>();
-                let _ = gateway.stop();
                 app.exit(0);
             }
             _ => {}
@@ -1753,9 +968,6 @@ pub fn run() {
             start_instance_listener(listener, app.handle().clone());
             let manager = ServiceManager::discover().map_err(std::io::Error::other)?;
             app.manage(manager.clone());
-            let gateway = GatewayManager::discover();
-            let gateway_installed = gateway.installed;
-            app.manage(gateway.clone());
             WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html".into()))
                 .title("知微 Zhiwei")
                 .inner_size(820.0, 720.0)
@@ -1770,21 +982,16 @@ pub fn run() {
                 show_settings(app.handle());
             }
 
-            // 开发态（tauri dev / debug 构建）不自启：service 与媒体网关由开发者
-            // 先手动拉起，桌面壳只当 UI 并识别外部进程。发布版维持托管自启。
+            // 开发态（tauri dev / debug 构建）不自启：service 由开发者先手动拉起，
+            // 桌面壳只当 UI 并识别外部进程。发布版维持托管自启。
             if !cfg!(debug_assertions) {
                 let _ = manager.start();
-                if gateway_installed {
-                    let _ = gateway.start();
-                }
             }
             let app_handle = app.handle().clone();
             thread::spawn(move || loop {
                 thread::sleep(Duration::from_secs(2));
                 let status = manager.tick();
                 let _ = app_handle.emit(SERVICE_STATUS_EVENT, status);
-                let status = gateway.tick();
-                let _ = app_handle.emit(GATEWAY_STATUS_EVENT, status);
             });
             Ok(())
         })
@@ -1804,15 +1011,6 @@ pub fn run() {
             open_data_folder,
             open_env_file_command,
             open_log_file,
-            gateway_status,
-            start_gateway,
-            stop_gateway,
-            restart_gateway,
-            open_gateway_folder,
-            open_gateway_env_file,
-            open_gateway_log_file,
-            gateway_settings,
-            update_gateway_settings,
             control_health,
             settings_view,
             settings_schema,
@@ -1889,44 +1087,6 @@ mod tests {
 
         changes.insert("ASR_WARMUP".to_string(), "1".to_string());
         assert!(validate_gateway_changes(&changes).is_ok());
-    }
-
-    #[test]
-    fn compares_gateway_urls_without_trailing_slash() {
-        assert!(urls_match(
-            "http://127.0.0.1:8787/",
-            "http://127.0.0.1:8787"
-        ));
-        assert!(urls_match("http://127.0.0.1:8787", ""));
-        assert!(!urls_match(
-            "http://127.0.0.1:8788",
-            "http://127.0.0.1:8787"
-        ));
-    }
-
-    #[test]
-    fn gateway_resolution_prefers_source_entry_then_packaged_exe() {
-        let root =
-            std::env::temp_dir().join(format!("zhiwei-gateway-resolve-{}", std::process::id()));
-        let base = root.join("desktop").join("app");
-        let gateway_dir = root.join("media-gateway");
-        let source_entry = gateway_dir.join("main.py");
-        fs::create_dir_all(&base).unwrap();
-        fs::create_dir_all(&gateway_dir).unwrap();
-
-        let dist = gateway_dir.join("dist");
-        fs::create_dir_all(&dist).unwrap();
-        let packaged = dist.join("media-gateway.exe");
-        fs::write(&packaged, b"exe").unwrap();
-
-        // 只有打包产物时用打包版。
-        assert_eq!(resolve_gateway_from(&base), packaged);
-
-        // 仓库里有源码入口时优先跑源码（开发态改动立即生效）。
-        fs::write(&source_entry, "# gateway entry\n").unwrap();
-        assert_eq!(resolve_gateway_from(&base), source_entry);
-
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

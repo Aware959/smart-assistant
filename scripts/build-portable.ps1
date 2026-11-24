@@ -13,10 +13,6 @@ param(
     [string]$MigrationSource = 'D:\Zhiwei',
     [switch]$SkipBuild,
     [switch]$SkipTests,
-    [switch]$WithMediaGateway,
-    [ValidateSet('onefile', 'onedir')]
-    [string]$MediaGatewayMode = 'onefile',
-    [switch]$MediaGatewayWithAsr,
     [switch]$WithTools,
     [switch]$NoShortcut
 )
@@ -98,14 +94,6 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 
-    if ($WithMediaGateway) {
-        Write-Host '.. Building media-gateway.exe' -ForegroundColor Yellow
-        & (Join-Path $PSScriptRoot 'build-media-gateway.ps1') `
-            -OneDir:($MediaGatewayMode -eq 'onedir') `
-            -WithAsr:$MediaGatewayWithAsr `
-            -SkipTests:$SkipTests
-        Assert-LastExitCode 'build media-gateway'
-    }
 }
 
 $desktopExe = Join-Path $tauri 'target\release\zhiwei-desktop.exe'
@@ -140,21 +128,6 @@ foreach ($binary in $binaries) {
     Copy-Item -LiteralPath (Join-Path $backend "target\release\$binary") `
         -Destination $OutputDir -Force
 }
-if ($WithMediaGateway) {
-    if ($MediaGatewayMode -eq 'onedir') {
-        $gatewaySource = Join-Path $root 'media-gateway\dist\media-gateway'
-        if (-not (Test-Path -LiteralPath $gatewaySource)) {
-            throw "Missing media-gateway build directory: $gatewaySource"
-        }
-        Copy-Item -LiteralPath $gatewaySource -Destination $OutputDir -Recurse -Force
-    } else {
-        $gatewaySource = Join-Path $root 'media-gateway\dist\media-gateway.exe'
-        if (-not (Test-Path -LiteralPath $gatewaySource)) {
-            throw "Missing media-gateway executable: $gatewaySource"
-        }
-        Copy-Item -LiteralPath $gatewaySource -Destination $OutputDir -Force
-    }
-}
 
 $releaseEnv = Join-Path $OutputDir '.env'
 if (-not (Test-Path -LiteralPath $releaseEnv)) {
@@ -180,42 +153,6 @@ Set-EnvValue -Path $releaseEnv -Name 'CONTROL_ADDR' -Value '127.0.0.1:0'
 Set-EnvValue -Path $releaseEnv -Name 'CONTROL_STATE_FILE' -Value 'logs/control.json'
 Set-EnvValue -Path $releaseEnv -Name 'CONTROL_TOKEN_FILE' -Value 'logs/control.token'
 
-if ($WithMediaGateway) {
-    $gatewayEnvDest = if ($MediaGatewayMode -eq 'onedir') {
-        Join-Path $OutputDir 'media-gateway\media-gateway.env'
-    } else {
-        Join-Path $OutputDir 'media-gateway.env'
-    }
-    if (-not (Test-Path -LiteralPath $gatewayEnvDest)) {
-        $gatewayEnvSource = @(
-            (Join-Path $root 'media-gateway\.env.prod'),
-            (Join-Path $root 'media-gateway\.env'),
-            (Join-Path $root 'media-gateway\.env.example')
-        ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-        if (-not $gatewayEnvSource) {
-            throw 'Missing media-gateway/.env.prod and media-gateway/.env.example.'
-        }
-        Copy-Item -LiteralPath $gatewayEnvSource -Destination $gatewayEnvDest
-    }
-    # ComfyUI 工作流 JSON 必须跟网关 exe 同级（冻结后相对路径按 exe 所在目录解析），
-    # 并把配置钉成相对文件名——写绝对路径会在换机器/仓库搬家后静默失效，
-    # 表现为出图时才 500：读取工作流文件失败。
-    $gatewayWorkflow = Join-Path $root 'media-gateway\SD模板2.json'
-    if (Test-Path -LiteralPath $gatewayWorkflow) {
-        Copy-Item -LiteralPath $gatewayWorkflow `
-            -Destination (Join-Path (Split-Path -Parent $gatewayEnvDest) 'SD模板2.json') -Force
-        Set-EnvValue -Path $gatewayEnvDest -Name 'COMFYUI_WORKFLOW_FILE' -Value 'SD模板2.json'
-    }
-    $gatewayPort = 8787
-    $portLine = Get-Content -LiteralPath $gatewayEnvDest -Encoding UTF8 |
-        Where-Object { $_ -match '^\s*PORT\s*=\s*\d+\s*$' } |
-        Select-Object -Last 1
-    if ($portLine -and $portLine -match '=\s*(\d+)') {
-        $gatewayPort = [int]$Matches[1]
-    }
-    Set-EnvValue -Path $releaseEnv -Name 'MEDIA_GATEWAY_URL' `
-        -Value "http://127.0.0.1:$gatewayPort"
-}
 
 if (-not (Test-Path -LiteralPath $releaseDb)) {
     $sourceDb = @(

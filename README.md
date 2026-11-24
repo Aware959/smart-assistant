@@ -4,30 +4,30 @@
 
 核心是一个 Rust 内核（`backend/`），桌面与 Android 只是它的两种消费形态：
 
-- **backend/**：Rust 内核（对话工具循环 + 长期记忆 + 语义检索 + 主动开口）
-- **desktop/**：Windows 桌面壳，管理 `zhiwei-service` 与可选媒体网关
+- **backend/**：Rust 内核（对话工具循环 + 长期记忆 + 语义检索 + 主动开口 + MCP 客户端）
+- **desktop/**：Windows 桌面壳，管理 `zhiwei-service`
+- **mcp-servers/**：本机 MCP 服务器（目前是 ComfyUI 出图），被后端按需拉起
 - **android/**：Android 端（占位；UniFFI 导出暂已移除，待内核与对话稳定后再接）
 
 ## 快速启动（根目录）
 
-日常开发是三个独立进程，各开一个终端（开发态读 `.env.dev`，端口与数据互不抢占）：
+日常开发是两个独立进程，各开一个终端（开发态读 `.env.dev`，端口与数据互不抢占）：
 
 ```powershell
 # 终端 1：后端通道守护 —— 3002，库 backend/smart_assistant.db
 cd backend
 cargo run --bin zhiwei-service
 
-# 终端 2：本机媒体网关 —— 8788
-cd media-gateway
-python main.py
-
-# 终端 3：桌面 UI —— 不自启上面两个，只识别已运行的进程
+# 终端 2：桌面 UI —— 不自启上面那个，只识别已运行的进程
 cd desktop
 npm install        # 仅首次
 npm run desktop:dev
 ```
 
-一键编排（脚本先拉起 service 与源码态网关，再开桌面，退出时统一停止）：
+（MCP 服务器不常驻：后端在 `MCP_ENABLED=1` 时按需拉起 `mcp-servers/` 里配置的
+服务器；ComfyUI 出图还需要 ComfyUI 本体在跑。）
+
+一键编排（脚本先拉起 service，再开桌面，退出时统一停止）：
 
 ```powershell
 make dev
@@ -38,20 +38,19 @@ pwsh -NoProfile -File scripts/dev.ps1 -Telegram   # 需要 Telegram 时
 
 ```bash
 make test                           # cargo test（全过 + 零警告是基线）
-make smoke                          # 跨进程冒烟：临时库 + 源码态网关，不碰真实数据
+make smoke                          # 跨进程冒烟：临时库，不碰真实数据
 
 cd backend
 cargo check --all-targets
 cargo fmt --all -- --check
 ```
 
-后端与媒体网关的配置按环境分文件：开发态读 `backend/.env.dev` + `media-gateway/.env.dev`，
-生产态读 `.env.prod`；进程变量 `ZHIWEI_ENV=dev|prod` 决定用哪一份（未设置时 debug 构建取
-dev、release 构建取 prod），两边端口与数据库互不复用。
+后端配置按环境分文件：开发态读 `backend/.env.dev`，生产态读 `.env.prod`；进程变量
+`ZHIWEI_ENV=dev|prod` 决定用哪一份（未设置时 debug 构建取 dev、release 构建取 prod）。
 
 `npm run desktop:dev`（`tauri dev`）在开发态只启动界面，不会自启 `zhiwei-service`
-与媒体网关——先手动起这两个进程（或用 `make dev` 一键编排），桌面壳会把它们显示为
-“外部启动”。发布版仍由桌面壳托管自启。
+——先手动起它（或用 `make dev` 一键编排），桌面壳会把它显示为“外部启动”。
+发布版仍由桌面壳托管自启。
 
 ## 桌面程序（Windows）
 
@@ -86,22 +85,6 @@ pwsh -File scripts/build-portable.ps1
 启动配置与密钥仍写在 `.env`；运行时策略由桌面通过 `zhiwei-service` 本地控制接口
 写入数据库。需要维护工具时单独运行：
 
-需要把本机媒体网关一并纳入桌面运维时，加 `-WithMediaGateway`：
-
-```powershell
-pwsh -File scripts/build-portable.ps1 -WithMediaGateway
-```
-
-发布目录会带上 `media-gateway.exe` 与独立的 `media-gateway.env`，桌面壳负责
-启停、健康检查与配置编辑；`MEDIA_GATEWAY_URL` 会按网关端口自动写进发布
-`.env`。默认打单文件，要更快启动可加 `-MediaGatewayMode onedir`；需要入站
-语音转写再加 `-MediaGatewayWithAsr`（把 faster-whisper 等依赖一并打进包里，
-模型仍按 `ASR_MODEL_DIR` 首次下载）。单独打网关不发布整套目录时：
-
-```powershell
-pwsh -File scripts/build-media-gateway.ps1 [-WithAsr] [-OneDir]
-```
-
 ```powershell
 pwsh -File scripts/build-tools.ps1 -InstallDir D:\Zhiwei
 ```
@@ -120,5 +103,33 @@ zhiwei-cli config schema
 zhiwei-cli config set <key> <value>
 zhiwei-cli config audit
 ```
+
+## 本机 MCP 服务器（出图）
+
+`mcp-servers/comfy/` 是一个零 pip 依赖的 stdio MCP 服务器，把本机 ComfyUI 的出图
+能力暴露成 `mcp__comfy__generate_image` 工具：模型调它，PNG 直接作为 MCP 图片
+内容块回传，由后端投给用户（不经过任何网关进程，也不需要 ffmpeg）。
+
+在 `backend/mcp.json` 里配置后端（该文件不入库，模板见 `backend/mcp.json.example`）：
+
+```json
+{
+  "mcpServers": {
+    "comfy": {
+      "command": "D:\DevTools\Python312\python.exe",
+      "args": ["D:\MyPoject\Rust\smart-assistant\mcp-servers\comfy\main.py"],
+      "env": {
+        "COMFYUI_URL": "http://127.0.0.1:8188",
+        "COMFYUI_WORKFLOW_FILE": "D:\MyPoject\Rust\smart-assistant\mcp-servers\comfy\SD模板2.json",
+        "PYTHONUTF8": "1"
+      },
+      "tools": ["generate_image", "server_info"],
+      "timeout_secs": 300
+    }
+  }
+}
+```
+
+然后 `MCP_ENABLED=1`，并用 `zhiwei-cli mcp list` / `mcp call` 自查连接与工具表。
 
 开发约定见 [`AGENTS.md`](AGENTS.md)。

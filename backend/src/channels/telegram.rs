@@ -58,97 +58,28 @@ struct TgMessage {
     /// 音频文件：用户以"文件"方式发的录音/音乐（可能是 mp3、m4a…）。
     #[serde(default)]
     audio: Option<TgAudio>,
-    /// 音频文件可带的文字说明。语音条本身不带 caption，故它实际只与 `audio` 同时出现。
-    #[serde(default)]
-    caption: Option<String>,
     chat: TgChat,
     /// 消息发出时刻（Unix 秒，服务端收到即记），等于用户按下发送的世界时刻。
     #[serde(default)]
     date: Option<i64>,
 }
 
-/// 入站语音条（只取转写用得上的字段）。
+/// 入站语音条。**只关心它在不在**：听写能力已下线，收到语音一律回一句"发文字给我"，
+/// 不再解析时长/体积/MIME（那些字段只服务于转写的前置拦截）。
 #[derive(Debug, Deserialize)]
-struct TgVoice {
-    file_id: String,
-    /// 时长（秒）。用于**前置拦截**：超过 `VOICE_TRANSCRIBE_MAX_SECS` 就不下载（FR-003）。
-    #[serde(default)]
-    duration: Option<i64>,
-    /// Telegram 给的 MIME（语音条通常 `audio/ogg`），透传给网关当 `Content-Type`。
-    #[serde(default)]
-    mime_type: Option<String>,
-    /// 字节数。超过 Bot API 的 20 MB 下载上限就不必白跑一趟（FR-003）。
-    #[serde(default)]
-    file_size: Option<i64>,
-    #[serde(default)]
-    file_name: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-}
+struct TgVoice {}
 
-/// 入站音频文件。字段与 [`TgVoice`] 重合，另多 `file_name` / `title`。
+/// 入站音频文件（用户以"文件"方式发的录音）。同样只关心在不在。
 #[derive(Debug, Deserialize)]
-struct TgAudio {
-    file_id: String,
-    #[serde(default)]
-    duration: Option<i64>,
-    #[serde(default)]
-    mime_type: Option<String>,
-    #[serde(default)]
-    file_size: Option<i64>,
-    #[serde(default)]
-    file_name: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-}
-
-/// 音频附件的**公共视角**：转写需要的字段 + 排错用的文件信息，不必分它是语音条还是音频文件。
-#[derive(Debug)]
-struct AudioRef<'a> {
-    file_id: &'a str,
-    duration: Option<i64>,
-    mime_type: Option<&'a str>,
-    file_size: Option<i64>,
-    file_name: Option<&'a str>,
-    title: Option<&'a str>,
-    /// 语音条为 true。仅用于在 `mime_type` 缺失时决定回退成 `audio/ogg` 还是 `audio/mpeg`。
-    is_voice: bool,
-}
-
-impl AudioRef<'_> {
-    /// 送给网关的 `Content-Type`：优先用 Telegram 给的 `mime_type`，缺省按类型回退。
-    fn mime(&self) -> &str {
-        self.mime_type.unwrap_or(if self.is_voice {
-            "audio/ogg"
-        } else {
-            "audio/mpeg"
-        })
-    }
-}
+struct TgAudio {}
 
 impl TgMessage {
-    /// 取本条消息里的音频附件（语音条优先于音频文件）。没有则 `None`。
-    fn audio_attachment(&self) -> Option<AudioRef<'_>> {
-        if let Some(v) = self.voice.as_ref() {
-            return Some(AudioRef {
-                file_id: &v.file_id,
-                duration: v.duration,
-                mime_type: v.mime_type.as_deref(),
-                file_size: v.file_size,
-                file_name: v.file_name.as_deref(),
-                title: v.title.as_deref(),
-                is_voice: true,
-            });
-        }
-        self.audio.as_ref().map(|a| AudioRef {
-            file_id: &a.file_id,
-            duration: a.duration,
-            mime_type: a.mime_type.as_deref(),
-            file_size: a.file_size,
-            file_name: a.file_name.as_deref(),
-            title: a.title.as_deref(),
-            is_voice: false,
-        })
+    /// 本条消息带不带音频（语音条或音频文件）。
+    ///
+    /// 听写能力已下线，这里只回答"在不在"：通道据此回一句"发文字给我"，
+    /// 而不是把整条消息默默丢掉。
+    fn has_audio(&self) -> bool {
+        self.voice.is_some() || self.audio.is_some()
     }
 }
 
@@ -220,7 +151,6 @@ mod media;
 mod poll;
 mod retry;
 mod turn;
-mod voice;
 
 use api::*;
 use command::*;
@@ -229,7 +159,6 @@ use inbound::*;
 use media::*;
 use retry::*;
 use turn::*;
-use voice::*;
 
 pub use api::fetch_sticker_set;
 pub use poll::run;

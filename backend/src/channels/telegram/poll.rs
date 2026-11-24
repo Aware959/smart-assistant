@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// 过期的语音消息入库时留下的占位文本（只入库不回复）。
+pub(super) const EXPIRED_VOICE_PLACEHOLDER: &str = "[对方发来一条语音（已过期）]";
+
+/// 语音/音频入站时的回话：听写能力已下线，直说比默默忽略好——用户知道自己发的
+/// 东西没被听见，而不是以为对方没回。
+pub(super) const VOICE_UNSUPPORTED_HINT: &str = "我这边暂时听不了语音，发文字给我吧～";
+
 /// 长轮询入口。token 为空时直接返回，由 server 入口决定是否调用。
 /// 异常退出后自动重连（启动期网络抖动不再导致永久掉线）。
 pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, identity: Arc<IdentityService>) {
@@ -39,12 +46,6 @@ pub(super) async fn run_loop(
     }
     tracing::info!("telegram bot 已连接，开始长轮询");
     super::push_ready().store(true, std::sync::atomic::Ordering::Relaxed);
-
-    // 入站语音转写：运行参数取一次快照，并做一次能力自检。
-    // 自检**只影响日志**——网关没起、依赖没装都不该阻止长轮询（FR-013）。
-    let voice = VoiceCfg::from_env();
-    let gateway_url = Config::get().media_gateway_url.clone();
-    probe_voice_capability(&voice, &gateway_url).await;
 
     // 拉取游标：从上次确认的位置续传，而不是跳到最新把离线期消息整段丢弃。
     //
@@ -155,7 +156,7 @@ pub(super) async fn run_loop(
                     continue;
                 }
                 // 过期语音：只落一条占位说明，**不下载、不转写**。
-                Inbound::Audio(_audio) if freshness == InboundFreshness::TooOld => {
+                Inbound::Audio if freshness == InboundFreshness::TooOld => {
                     tracing::info!(chat_id, "语音已超时效，只入库不转写");
                     let _ = touch_user_reply(&session, &chat_id.to_string(), sent_at);
                     if let Err(e) = session.archive_only(
@@ -169,21 +170,16 @@ pub(super) async fn run_loop(
                     continue;
                 }
                 Inbound::Text(text) => text,
-                // 新鲜语音/音频：转成文字，之后与用户直接打字走**完全相同**的那条路。
-                Inbound::Audio(audio) => {
-                    let caption = message.caption.as_deref();
-                    let transcriber = GatewayTranscriber {
-                        client: &client,
-                        token,
-                        gateway_url: &gateway_url,
-                    };
-                    match inbound_audio_content(&voice, chat_id, &audio, caption, &transcriber)
-                        .await
+                // 语音/音频入站：**不再做转写**（听写能力已下线）。
+                // 回一句实话比默默忽略好——用户知道自己发的东西没被听见，
+                // 而不是以为她没回。
+                Inbound::Audio => {
+                    send_typing(&client, &base, chat_id).await;
+                    if let Err(e) = send_text(&client, &base, chat_id, VOICE_UNSUPPORTED_HINT).await
                     {
-                        Some(text) => text,
-                        // 系统故障：不落库、不起轮次（FR-006/013）。
-                        None => continue,
+                        tracing::error!(error = %e, chat_id, "语音提示发送失败");
                     }
+                    continue;
                 }
             };
 

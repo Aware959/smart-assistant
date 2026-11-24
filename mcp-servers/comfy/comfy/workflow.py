@@ -9,9 +9,9 @@ from __future__ import annotations
 import copy
 import json
 
-from ..config import settings
-from ..errors import GatewayError
-from ..httpclient import get_json
+from .config import settings
+from .errors import ComfyError
+from .httpclient import get_json
 
 # 正向提示词在**工作流模板**里的占位符。
 #
@@ -58,7 +58,7 @@ def apply_prompt(wf: dict, nodes: dict, req: dict) -> None:
             req.get("prompt", ""),
         )
     else:
-        raise GatewayError(500, "工作流里找不到正向提示词节点（KSampler.positive 缺失）")
+        raise ComfyError("工作流里找不到正向提示词节点（KSampler.positive 缺失）")
 
     # 负向提示词：**刻意不覆盖**（见函数说明）。
     if req.get("width") and req.get("height") and nodes.get("size") in wf:
@@ -107,7 +107,7 @@ def default_workflow_with_ckpt() -> dict:
     wf = copy.deepcopy(DEFAULT_WORKFLOW)
     try:
         s, b = get_json(
-            f"{settings.diffusion_backend_url.rstrip('/')}/object_info/CheckpointLoaderSimple"
+            f"{settings.comfyui_url.rstrip('/')}/object_info/CheckpointLoaderSimple"
         )
         if s == 200:
             opts = json.loads(b)["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
@@ -126,7 +126,7 @@ def load_workflow(path: str | None = None) -> dict:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:  # noqa: BLE001
-            raise GatewayError(500, f"读取 ComfyUI 工作流文件失败：{e}")
+            raise ComfyError(f"读取 ComfyUI 工作流文件失败：{e}")
     return default_workflow_with_ckpt()
 
 

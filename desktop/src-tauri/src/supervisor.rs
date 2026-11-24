@@ -1,5 +1,5 @@
 //! 通用子进程监管：启动 / 停止 / 重启、退出检测、退避重试与 PID 文件归属判断。
-//! `zhiwei-service` 与媒体网关共用这一套状态机；差异（程序形态、终止方式、
+//! `zhiwei-service` 用这一套状态机；差异（程序形态、终止方式、
 //! 提示文案）全部收在 [`ProcessPlan`] 里。
 
 use std::{
@@ -23,21 +23,18 @@ pub struct SupervisorSnapshot {
 
 pub enum CommandPlan {
     Exe(PathBuf),
-    Interpreter { program: PathBuf, entry: PathBuf },
 }
 
 impl CommandPlan {
     pub fn entry(&self) -> &Path {
         match self {
             CommandPlan::Exe(path) => path,
-            CommandPlan::Interpreter { entry, .. } => entry,
         }
     }
 }
 
 pub enum ImageMatcher {
     Path(PathBuf),
-    Interpreter(PathBuf),
 }
 
 pub struct ProcessPlan {
@@ -271,10 +268,6 @@ impl ProcessSupervisor {
         self.set_status("error", None, message, None);
     }
 
-    pub fn mark_unavailable(&self, message: &str) {
-        self.set_status("unavailable", None, message, None);
-    }
-
     pub fn reset_stopped(&self, message: &str) {
         self.set_status("stopped", None, message, Some(0));
     }
@@ -440,11 +433,6 @@ pub fn spawn_process(plan: &ProcessPlan) -> Result<Box<dyn SupervisedProcess>, S
             command.current_dir(&plan.working_dir);
             command
         }
-        CommandPlan::Interpreter { program, entry } => {
-            let mut command = Command::new(program);
-            command.arg(entry).current_dir(&plan.working_dir);
-            command
-        }
     };
     for (key, value) in &plan.env {
         command.env(key, value);
@@ -506,23 +494,7 @@ pub fn pid_matches(matcher: &ImageMatcher, pid: u32) -> bool {
     };
     match matcher {
         ImageMatcher::Path(expected) => paths_equal(&image, expected),
-        ImageMatcher::Interpreter(python) => program_image_matches(&image, python),
     }
-}
-
-fn program_image_matches(image: &Path, interpreter: &Path) -> bool {
-    if paths_equal(image, interpreter) {
-        return true;
-    }
-    let file_name = |path: &Path| {
-        path.file_name()
-            .map(|name| name.to_string_lossy().to_lowercase())
-            .unwrap_or_default()
-            .trim_end_matches(".exe")
-            .to_string()
-    };
-    let expected = file_name(interpreter);
-    !expected.is_empty() && file_name(image) == expected
 }
 
 fn restart_delay(attempts: u32) -> u64 {

@@ -98,34 +98,6 @@ pub struct Config {
     /// 追踪日志是否记录内容全文（召回记忆 / 提示词 / 回复 / 判定原文）。
     /// 缺省只记摘要（条数 / 字符数），避免默认把内容大量落盘。
     pub trace_content: bool,
-    /// 本机媒体网关地址（独立进程，包装扩散软件与 TTS）。留空用默认
-    /// `http://127.0.0.1:8787`。Rust 调它时强制不走系统代理（见 [`media_gateway_client`]）。
-    pub media_gateway_url: String,
-    /// 媒体生成工具开关：`1`/`true` 才向模型下发 `generate_image` / `generate_voice`；
-    /// 缺省关闭——未起网关时模型看不到这两个工具，零侵入。
-    pub media_gateway_enabled: bool,
-    /// 语音合成工具（`generate_voice`）单独开关：`1`/`true` 才向模型下发。
-    ///
-    /// 与 [`Config::media_gateway_enabled`] 分开：出图与语音合成的**可用性前提不同**——
-    /// 出图只要本地扩散后端在跑；语音合成还取决于 TTS 引擎的音质与依赖（当前本机只有
-    /// Windows SAPI，音质是明显的机器音）。故缺省只开出图，语音另开。
-    pub voice_generate_enabled: bool,
-    /// 媒体生成超时（秒）：图片生成可能很慢，默认 120，超时即本轮回执失败走兜底话术。
-    pub media_gateway_timeout: u64,
-    /// 入站语音转写总开关：`1`/`true` 才转写用户发来的语音。缺省关闭。
-    ///
-    /// **刻意不复用** [`Config::media_gateway_enabled`]——那个管的是"是否把
-    /// `generate_image`/`generate_voice` 下发给模型"（出站），与"是否把用户语音转成
-    /// 文字"（入站）是两件事，混用会让"关掉出图工具"顺手关掉语音转写。
-    pub voice_transcribe_enabled: bool,
-    /// 单次转写硬超时（秒）。超时归**系统故障**路径（不落库、不起轮次）——它的前提是
-    /// `voice_transcribe_max_secs` 的前置拦截已把合法语音挡在超时之前。
-    pub voice_transcribe_timeout: u64,
-    /// 语音时长的**前置上限**（秒）：超过则不下载、不转写，直接判内容层面失败。
-    ///
-    /// 这条的存在是为了满足 FR-003 的"不能长时间无响应"：若只靠超时兜底，一条几分钟的
-    /// 语音会一路跑到超时才静默失败，用户长时间什么也收不到。
-    pub voice_transcribe_max_secs: u64,
     /// MCP 客户端总开关：`1`/`true` 才接入 MCP 服务器。缺省关闭。
     ///
     /// 关着的理由不是"不信任 MCP"，而是**默认不该起子进程**：MCP 服务器是本机
@@ -264,29 +236,6 @@ impl Config {
             trace_content: std::env::var("TRACE_CONTENT")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
-            media_gateway_url: std::env::var("MEDIA_GATEWAY_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8787".to_string()),
-            media_gateway_enabled: std::env::var("MEDIA_GATEWAY_ENABLED")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            voice_generate_enabled: std::env::var("VOICE_GENERATE_ENABLED")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            media_gateway_timeout: std::env::var("MEDIA_GATEWAY_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(120),
-            voice_transcribe_enabled: std::env::var("VOICE_TRANSCRIBE_ENABLED")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            voice_transcribe_timeout: std::env::var("VOICE_TRANSCRIBE_TIMEOUT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(180),
-            voice_transcribe_max_secs: std::env::var("VOICE_TRANSCRIBE_MAX_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(120),
             mcp_enabled: std::env::var("MCP_ENABLED")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),

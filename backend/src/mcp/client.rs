@@ -13,7 +13,7 @@
 //! 自己实现比引一整套 SDK 更可控——依赖树不变，行为可测，出问题时的现场
 //! 就是这几百行代码。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,24 +26,51 @@ use serde_json::{json, Value};
 use super::config::{ServerConfig, TransportKind};
 use super::protocol::{self, CallResult, ToolInfo, PROTOCOL_VERSION};
 
-/// 握手超时：连不上或握手卡住不该拖垮一整轮对话。
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// 一种传输：发请求 / 发通知，外加存活判断与收尾。
 trait Transport: Send + Sync {
     /// 发一个请求并等回应。
     fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String>;
     /// 发一个通知（无回应）。
-    fn notify(&self, method: &str, params: Value) -> Result<(), String>;
+    fn notify(&self, method: &str, params: Value, timeout: Duration) -> Result<(), String>;
     /// 连接是否还可用。
     fn is_alive(&self) -> bool;
+    /// 服务器 stderr 的尾部若干行（供错误信息附上；没有则为空）。
+    fn stderr_tail(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// 收尾（杀进程 / 关会话）。
     fn shutdown(&self);
+}
+
+/// stderr 尾部保留的行数：够看出 Python 的 traceback 头几行，又不至于把
+/// 错误信息撑成一整屏日志。
+const STDERR_TAIL_LINES: usize = 20;
+
+/// 把服务器 stderr 的尾部附到错误信息后面。
+///
+/// 服务器起不来时，它的报错**只**写在这条管道里（Python traceback、uv 的
+/// 安装失败…）。不把它带出来，调用方只看到"进程已退出"四个字，等于什么也没说。
+fn with_stderr_tail(message: String, tail: &[String]) -> String {
+    let tail: Vec<&str> = tail
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect();
+    if tail.is_empty() {
+        return message;
+    }
+    format!("{message}（服务器 stderr：\n{}\n）", tail.join("\n"))
 }
 
 /// 一个 MCP 客户端：传输 + MCP 协议流程（握手 / 列工具 / 调工具）。
 pub struct McpClient {
     transport: Arc<dyn Transport>,
+    /// 握手与工具列举的超时。
+    ///
+    /// 用服务器配置的 `timeout_secs`，不用更短的固定值：冷启动慢的服务器
+    /// （`uvx`/`npx` 首次拉依赖、Python 首次导入模块）在这段时间里还没开始
+    /// 应答，用 30s 的固定值会把"启动慢"误报成"连不上"。
+    timeout: Duration,
 }
 
 impl McpClient {
@@ -60,8 +87,14 @@ impl McpClient {
                 )
             }
         };
-        let client = Self { transport };
-        client.initialize()?;
+        let client = Self {
+            transport,
+            timeout: config.timeout(),
+        };
+        // 握手失败时把服务器 stderr 带上：起不来的原因只写在它自己的管道里。
+        client
+            .initialize()
+            .map_err(|error| with_stderr_tail(error, &client.transport.stderr_tail()))?;
         Ok(client)
     }
 
@@ -74,13 +107,13 @@ impl McpClient {
                 "capabilities": {},
                 "clientInfo": {"name": "zhiwei", "version": env!("CARGO_PKG_VERSION")},
             }),
-            HANDSHAKE_TIMEOUT,
+            self.timeout,
         )?;
         if let Some(version) = result.get("protocolVersion").and_then(|v| v.as_str()) {
             tracing::info!(server_version = version, "MCP 握手完成");
         }
         self.transport
-            .notify("notifications/initialized", json!({}))?;
+            .notify("notifications/initialized", json!({}), self.timeout)?;
         Ok(())
     }
 
@@ -93,9 +126,7 @@ impl McpClient {
             if let Some(cursor) = &cursor {
                 params["cursor"] = json!(cursor);
             }
-            let result = self
-                .transport
-                .request("tools/list", params, HANDSHAKE_TIMEOUT)?;
+            let result = self.transport.request("tools/list", params, self.timeout)?;
             all.extend(protocol::parse_tools(&result));
             cursor = result
                 .get("nextCursor")
@@ -295,6 +326,8 @@ struct StdioTransport {
     /// 子进程句柄。留在本仓是为了**能主动杀掉它**：服务器进程若不收尾，
     /// 会在宿主退出后继续占着端口与显存。
     child: Mutex<Option<Child>>,
+    /// 服务器 stderr 的尾部（起不来时它就是唯一的现场）。
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl StdioTransport {
@@ -315,7 +348,13 @@ impl StdioTransport {
         // 服务器会卡住——表现为"工具调用莫名超时"。
         // 抽干同样按字节读行：服务器写出一行非 UTF-8 的日志不该让抽干就此
         // 停止——那等于把管道重新堵回去，正是这段代码要防的事。
+        //
+        // 同时留一份尾部：服务器起不来时，它的报错只写在这条管道里（Python
+        // 的 traceback 之类），不进日志就等于没有——错误信息里必须带上它，
+        // 否则"进程已退出"这句话什么也说明不了。
+        let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
         if let Some(stderr) = child.stderr.take() {
+            let tail = stderr_tail.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stderr);
                 let mut buf: Vec<u8> = Vec::new();
@@ -325,7 +364,13 @@ impl StdioTransport {
                         Ok(0) | Err(_) => break,
                         Ok(_) => {}
                     }
-                    tracing::debug!(line = %String::from_utf8_lossy(&buf).trim(), "MCP 服务器 stderr");
+                    let line = String::from_utf8_lossy(&buf).trim().to_string();
+                    tracing::debug!(line = %line, "MCP 服务器 stderr");
+                    let mut tail = tail.lock().unwrap_or_else(|e| e.into_inner());
+                    if tail.len() >= STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
                 }
             });
         }
@@ -335,6 +380,7 @@ impl StdioTransport {
         Ok(Self {
             conn,
             child: Mutex::new(Some(child)),
+            stderr_tail,
         })
     }
 }
@@ -342,7 +388,10 @@ impl StdioTransport {
 impl Transport for StdioTransport {
     fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
         if !self.conn.alive.load(Ordering::SeqCst) {
-            return Err("MCP 服务器进程已退出".to_string());
+            return Err(with_stderr_tail(
+                "MCP 服务器进程已退出".to_string(),
+                &self.stderr_tail(),
+            ));
         }
         let id = self.conn.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
@@ -362,7 +411,7 @@ impl Transport for StdioTransport {
         }
         match rx.recv_timeout(timeout) {
             Ok(Ok(value)) => Ok(value),
-            Ok(Err(e)) => Err(e),
+            Ok(Err(e)) => Err(with_stderr_tail(e, &self.stderr_tail())),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // 超时后要把这条登记摘掉，否则等待者永远不会回收这条槽位。
                 self.conn
@@ -372,17 +421,29 @@ impl Transport for StdioTransport {
                     .remove(&id);
                 Err(format!("MCP 调用 {method} 超时（{}s）", timeout.as_secs()))
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err("MCP 服务器已关闭连接".to_string()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(with_stderr_tail(
+                "MCP 服务器已关闭连接".to_string(),
+                &self.stderr_tail(),
+            )),
         }
     }
 
-    fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    fn notify(&self, method: &str, params: Value, _timeout: Duration) -> Result<(), String> {
         let payload = json!({"jsonrpc": "2.0", "method": method, "params": params});
         self.conn.write_message(&payload)
     }
 
     fn is_alive(&self) -> bool {
         self.conn.alive.load(Ordering::SeqCst)
+    }
+
+    fn stderr_tail(&self) -> Vec<String> {
+        self.stderr_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
     fn shutdown(&self) {
@@ -422,7 +483,7 @@ impl HttpTransport {
     fn new(config: &ServerConfig) -> Result<Self, String> {
         let url = config.url.clone().ok_or("HTTP 传输需要配置 url")?;
         // 强制不走系统代理：本机 Clash 之类会把 127.0.0.1 也路由进代理，
-        // 那样就连不上本机的 MCP 网关（与媒体网关客户端同一处置，见 media.rs）。
+        // 那样就连不上本机的 MCP 服务器（HTTP 传输多半指向本机网关）。
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -526,9 +587,9 @@ impl Transport for HttpTransport {
         }
     }
 
-    fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+    fn notify(&self, method: &str, params: Value, timeout: Duration) -> Result<(), String> {
         let payload = json!({"jsonrpc": "2.0", "method": method, "params": params});
-        let (status, _, body) = block_on(self.post(&payload, HANDSHAKE_TIMEOUT))?;
+        let (status, _, body) = block_on(self.post(&payload, timeout))?;
         if !(200..300).contains(&status) {
             let detail: String = body.chars().take(300).collect();
             return Err(format!("MCP HTTP 端点返回 {status}：{detail}"));
@@ -621,6 +682,7 @@ mod tests {
             StdioTransport {
                 conn,
                 child: Mutex::new(None),
+                stderr_tail: Arc::new(Mutex::new(VecDeque::new())),
             },
             sink,
         )
@@ -732,6 +794,32 @@ mod tests {
         let (conn, sink) = test_conn();
         assert!(!handle_raw_line(&conn, b"   \r\n"));
         assert!(sink.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn 错误信息带上服务器_stderr() {
+        // 服务器起不来时，traceback 只在它自己的 stderr 里；不带出来就等于没信息。
+        let message = with_stderr_tail(
+            "MCP 服务器进程已退出".to_string(),
+            &[
+                "Traceback (most recent call last):".to_string(),
+                "ModuleNotFoundError: No module named 'mcp.server.fastmcp'".to_string(),
+            ],
+        );
+        assert!(message.contains("进程已退出"));
+        assert!(message.contains("ModuleNotFoundError"));
+    }
+
+    #[test]
+    fn 没有_stderr_时错误信息保持原样() {
+        assert_eq!(
+            with_stderr_tail("连不上".to_string(), &[]),
+            "连不上".to_string()
+        );
+        assert_eq!(
+            with_stderr_tail("连不上".to_string(), &["   ".to_string()]),
+            "连不上".to_string()
+        );
     }
 
     #[test]

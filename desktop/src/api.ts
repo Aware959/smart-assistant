@@ -1,9 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ControlResult,
-  GatewaySettingsResult,
-  GatewaySettingsView,
-  GatewayStatus,
   IdentityOverview,
   ProposalView,
   ServiceStatus,
@@ -15,8 +12,6 @@ import type {
 export const api = {
   serviceStatus: () => invoke<ServiceStatus>("service_status"),
   serviceCommand: (command: string) => invoke<ServiceStatus>(command),
-  gatewayStatus: () => invoke<GatewayStatus>("gateway_status"),
-  gatewayCommand: (command: string) => invoke<GatewayStatus>(command),
   settingsView: () => invoke<ControlResult<SettingsView>>("settings_view"),
   settingsSchema: () => invoke<ControlResult<SettingsSchemaItem[]>>("settings_schema"),
   updateSettings: (
@@ -27,9 +22,6 @@ export const api = {
       expectedRevision,
       changes,
     }),
-  gatewaySettings: () => invoke<GatewaySettingsView>("gateway_settings"),
-  updateGatewaySettings: (changes: Record<string, string>) =>
-    invoke<GatewaySettingsResult>("update_gateway_settings", { changes }),
   identityOverview: () => invoke<ControlResult<IdentityOverview>>("identity_overview"),
   identityProposals: (limit?: number) =>
     invoke<ControlResult<ProposalView[]>>("identity_proposals", { limit }),

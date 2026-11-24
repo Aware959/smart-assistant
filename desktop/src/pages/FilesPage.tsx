@@ -1,15 +1,13 @@
 import { Button, Card, List, Space, Typography } from "antd";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { GatewayStatus, ServiceStatus } from "../types";
+import type { ServiceStatus } from "../types";
 
 export default function FilesPage() {
   const [service, setService] = useState<ServiceStatus | null>(null);
-  const [gateway, setGateway] = useState<GatewayStatus | null>(null);
 
   useEffect(() => {
     api.serviceStatus().then(setService).catch(() => setService(null));
-    api.gatewayStatus().then(setGateway).catch(() => setGateway(null));
   }, []);
 
   const rows = [
@@ -30,24 +28,6 @@ export default function FilesPage() {
       label: "通道日志",
       value: service?.logFile,
       action: "open_log_file",
-      text: "查看",
-    },
-    {
-      label: "网关程序",
-      value: gateway?.executablePath,
-      action: "open_gateway_folder",
-      text: "打开目录",
-    },
-    {
-      label: "网关配置",
-      value: gateway?.envFile,
-      action: "open_gateway_env_file",
-      text: "编辑",
-    },
-    {
-      label: "网关日志",
-      value: gateway?.logFile,
-      action: "open_gateway_log_file",
       text: "查看",
     },
   ];

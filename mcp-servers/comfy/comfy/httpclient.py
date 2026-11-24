@@ -16,9 +16,9 @@ from .config import settings
 def post_json(url: str, payload: dict, timeout: float | None = None):
     """POST JSON，返回 `(status, body_text)`。
 
-    连接层错误（`URLError`）原样抛出，由调用方转成带语义的 `GatewayError`。
+    连接层错误（`URLError`）原样抛出，由调用方转成带语义的 [`ComfyError`]。
     """
-    timeout = settings.http_timeout if timeout is None else timeout
+    timeout = settings.timeout if timeout is None else timeout
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -32,7 +32,7 @@ def post_json(url: str, payload: dict, timeout: float | None = None):
 
 def get_bytes(url: str, params: dict | None = None, timeout: float | None = None) -> bytes:
     """GET 并返回原始字节（可带 query 参数）。"""
-    timeout = settings.http_timeout if timeout is None else timeout
+    timeout = settings.timeout if timeout is None else timeout
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept": "*/*"})
@@ -42,7 +42,7 @@ def get_bytes(url: str, params: dict | None = None, timeout: float | None = None
 
 def get_json(url: str, timeout: float | None = None):
     """GET 并返回 `(status, body_text)`。"""
-    timeout = settings.http_timeout if timeout is None else timeout
+    timeout = settings.timeout if timeout is None else timeout
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read().decode("utf-8")

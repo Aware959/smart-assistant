@@ -37,8 +37,6 @@ impl AgentRole {
                 tool::SEND_MESSAGE,
                 tool::SEND_DICE,
                 tool::SEND_STICKER,
-                tool::GENERATE_IMAGE,
-                tool::GENERATE_VOICE,
                 tool::GET_NOW,
                 tool::RECALL_MEMORY,
                 tool::REMEMBER,
@@ -102,8 +100,6 @@ mod tests {
             tool::SEND_MESSAGE,
             tool::SEND_DICE,
             tool::SEND_STICKER,
-            tool::GENERATE_IMAGE,
-            tool::GENERATE_VOICE,
             tool::REMEMBER,
         ] {
             assert!(!role.allows_tool(name), "身份角色不得拥有工具 {name}");
@@ -144,8 +140,6 @@ mod tests {
             tool::SEND_MESSAGE,
             tool::SEND_DICE,
             tool::SEND_STICKER,
-            tool::GENERATE_IMAGE,
-            tool::GENERATE_VOICE,
             tool::GET_NOW,
             tool::RECALL_MEMORY,
             tool::REMEMBER,

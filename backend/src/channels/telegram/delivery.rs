@@ -68,8 +68,6 @@ pub(super) async fn deliver_worker(
     client: reqwest::Client,
     base: String,
     chat_id: i64,
-    media_url: String,
-    media_timeout: u64,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Delivery>,
 ) {
     let mut index = 0usize;
@@ -85,33 +83,6 @@ pub(super) async fn deliver_worker(
             Reply::Sticker { file_id } => send_sticker(&client, &base, chat_id, file_id)
                 .await
                 .map(|_| None),
-            // 本机生成的图片：先告知"正在上传图片"，再调网关出图、上传到 Telegram。
-            // 生成失败直接上抛，交由对话循环的失败分支发兜底话术。
-            Reply::Photo { prompt, caption } => {
-                send_chat_action(&client, &base, chat_id, "upload_photo").await;
-                match media_generate(&media_url, "image", prompt, media_timeout).await {
-                    Ok(bytes) => send_photo(&client, &base, chat_id, &bytes, caption.as_deref())
-                        .await
-                        .map(|_| None),
-                    Err(e) => {
-                        tracing::error!(error = %e, chat_id, "图片生成失败");
-                        Err(e)
-                    }
-                }
-            }
-            // 本机合成的语音：先告知"正在录音"，再调网关合成、上传到 Telegram。
-            Reply::Voice { text } => {
-                send_chat_action(&client, &base, chat_id, "record_voice").await;
-                match media_generate(&media_url, "voice", text, media_timeout).await {
-                    Ok(bytes) => send_voice(&client, &base, chat_id, &bytes, None)
-                        .await
-                        .map(|_| None),
-                    Err(e) => {
-                        tracing::error!(error = %e, chat_id, "语音合成失败");
-                        Err(e)
-                    }
-                }
-            }
             // MCP 工具带回的**成品**媒体：字节已经在手，按 MIME 选投递方式即可，
             // 不必再走"生成意图 → 网关 → 字节"那条路。
             Reply::Media {

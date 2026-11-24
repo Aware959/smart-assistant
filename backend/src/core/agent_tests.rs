@@ -109,36 +109,6 @@ fn 水位线失效时不重灌历史() {
     assert_eq!(cursor, Some("不存在的 id".to_string()));
 }
 
-/// 语音投影要带上真正念出去的那段话：用户听到了，后续轮次的模型也必须看得到，
-/// 否则它会知道自己"发过一条语音"，却不知道说了什么。
-#[test]
-fn 语音投影带出念的话() {
-    let reply = Reply::Voice {
-        text: "晚安，早点睡".to_string(),
-    };
-    assert_eq!(reply.projection(), "[发了一段语音] 晚安，早点睡");
-}
-
-/// 图片投影带上生成描述（可选旁白跟在后面）：图片本身进不了历史，
-/// 描述是它唯一的文本痕迹。
-#[test]
-fn 图片投影带出画面描述与旁白() {
-    let with_caption = Reply::Photo {
-        prompt: "一只橘猫".to_string(),
-        caption: Some("看这只猫".to_string()),
-    };
-    assert_eq!(
-        with_caption.projection(),
-        "[发了一张图片：一只橘猫] 看这只猫"
-    );
-
-    let bare = Reply::Photo {
-        prompt: "一只橘猫".to_string(),
-        caption: None,
-    };
-    assert_eq!(bare.projection(), "[发了一张图片：一只橘猫]");
-}
-
 /// 贴纸不带选择键：键只是目录里的索引，对"说过什么"没有信息量。
 #[test]
 fn 贴纸投影不带选择键() {

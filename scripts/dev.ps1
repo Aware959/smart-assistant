@@ -3,18 +3,17 @@
     开发态一键编排：编译 zhiwei-service 调试构建，并用桌面壳拉起全套。
 
 .DESCRIPTION
-    桌面壳会自动发现 backend/target/debug 的服务与 media-gateway/main.py 源码
-    （优先使用 media-gateway/.venv 的解释器），全程不需要 PyInstaller 产物。
-    脚本先按开发态配置拉起 service 与源码态网关，再启动 tauri dev（桌面壳只当 UI，
-    不再自启这两个进程）；配置与数据走 backend/.env.dev + backend/smart_assistant.db，
+    桌面壳会自动发现 backend/target/debug 的服务，全程不需要 PyInstaller 产物。
+    脚本先按开发态配置拉起 service，再启动 tauri dev（桌面壳只当 UI，
+    不再自启这个进程）；配置与数据走 backend/.env.dev + backend/smart_assistant.db，
     Telegram 默认关闭以免开发态误发消息，需要时加 -Telegram 启用。
+    （本机 MCP 服务器不常驻：后端在 MCP_ENABLED=1 时按需拉起 mcp-servers/ 里的服务器。）
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
     [switch]$Telegram,
     [int]$WebPort = 3002,
-    [int]$GatewayPort = 8788,
     [string]$LogLevel = 'info'
 )
 
@@ -37,8 +36,7 @@ function Stop-RepoDevProcesses {
         Where-Object {
             $path = $_.ExecutablePath
             $inRepo = $path -and $path.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)
-            $isGateway = $_.CommandLine -and $_.CommandLine -match 'media-gateway[\\/]main\.py'
-            $inRepo -or $isGateway
+            $inRepo
         }
     foreach ($victim in $victims) {
         Write-Host "停止上一轮开发进程：$($victim.ProcessId) $($victim.Name)" -ForegroundColor DarkGray
@@ -75,71 +73,17 @@ $env:SMART_ASSISTANT_ADDR = "127.0.0.1:$WebPort"
 # 本机可能全局设了 RUST_LOG=warn，会把启动日志全滤掉；开发态默认要看得见。
 $env:RUST_LOG = $LogLevel
 
-# 开发网关用独立端口：正式版 8787、测试版 8789，开发态 8788。
-$gatewayDir = Join-Path $root 'media-gateway'
-$gatewayEnvSource = @(
-    (Join-Path $gatewayDir '.env.dev'),
-    (Join-Path $gatewayDir '.env')
-) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-$devGatewayEnv = Join-Path $backend 'logs\media-gateway.dev.env'
-if ($gatewayEnvSource) {
-    $gatewayLines = Get-Content -LiteralPath $gatewayEnvSource |
-        Where-Object { $_ -notmatch '^\s*PORT\s*=' }
-    $gatewayLines = @("PORT=$GatewayPort") + $gatewayLines
-    New-Item -ItemType Directory -Path (Split-Path -Parent $devGatewayEnv) -Force | Out-Null
-    [IO.File]::WriteAllLines(
-        $devGatewayEnv,
-        $gatewayLines,
-        [Text.UTF8Encoding]::new($false)
-    )
-    $env:ZHIWEI_MEDIA_GATEWAY_HOME = $gatewayDir
-    $env:ZHIWEI_MEDIA_GATEWAY_ENV = $devGatewayEnv
-    $env:MEDIA_GATEWAY_URL = "http://127.0.0.1:$GatewayPort"
-}
-
 Write-Host "ZHIWEI_SERVICE      = $serviceExe" -ForegroundColor Yellow
 Write-Host "ZHIWEI_HOME         = $backend（读 backend/.env.dev）" -ForegroundColor Yellow
 Write-Host "TELEGRAM_ENABLED    = $env:TELEGRAM_ENABLED" -ForegroundColor Yellow
 Write-Host "RUST_LOG            = $env:RUST_LOG" -ForegroundColor Yellow
-if (Test-Path -LiteralPath $devGatewayEnv) {
-    Write-Host "开发网关端口        = $GatewayPort（配置：$devGatewayEnv）" -ForegroundColor Cyan
-}
-
-$gatewayEntry = Join-Path $gatewayDir 'main.py'
-$venvDir = Join-Path $gatewayDir '.venv'
-$venvPython = Join-Path $venvDir 'Scripts\python.exe'
-$pythonExe = 'python'
-if (Test-Path -LiteralPath $venvPython) {
-    $venvHome = Get-Content -LiteralPath (Join-Path $venvDir 'pyvenv.cfg') -ErrorAction SilentlyContinue |
-        Where-Object { $_ -match '^\s*home\s*=' } |
-        Select-Object -First 1
-    if ($venvHome) {
-        $homePath = ($venvHome -split '=', 2)[1].Trim().Trim('"').Trim("'")
-        if ($homePath -and (Test-Path -LiteralPath $homePath)) { $pythonExe = $venvPython }
-    }
-}
-if (Test-Path -LiteralPath $gatewayEntry) {
-    Write-Host "媒体网关将以源码态运行：$gatewayEntry" -ForegroundColor Yellow
-    if ($pythonExe -eq 'python' -and -not (Get-Command python -ErrorAction SilentlyContinue)) {
-        Write-Host '警告：media-gateway/.venv 不可用，且 PATH 中没有 python，媒体网关将无法启动' -ForegroundColor Red
-    }
-}
-
-# tauri dev 不再自启 service / 网关：这里按开发态配置先拉起，退出时一并收尾。
+# tauri dev 不再自启 service：这里按开发态配置先拉起，退出时一并收尾。
 $serviceStdout = Join-Path $backend 'logs\zhiwei-service.stdout.log'
 New-Item -ItemType Directory -Path (Split-Path -Parent $serviceStdout) -Force | Out-Null
 $serviceProc = Start-Process -FilePath $serviceExe -WorkingDirectory $backend -PassThru `
     -WindowStyle Hidden -RedirectStandardOutput $serviceStdout -RedirectStandardError "$serviceStdout.err"
-$gatewayProc = $null
-if (Test-Path -LiteralPath $gatewayEntry) {
-    $gatewayStdout = Join-Path $backend 'logs\media-gateway.stdout.log'
-    $gatewayProc = Start-Process -FilePath $pythonExe -ArgumentList 'main.py' `
-        -WorkingDirectory $gatewayDir -PassThru -WindowStyle Hidden `
-        -RedirectStandardOutput $gatewayStdout -RedirectStandardError "$gatewayStdout.err"
-}
 Start-Sleep -Seconds 2
-$gatewayPid = if ($gatewayProc) { $gatewayProc.Id } else { '-' }
-Write-Host "开发进程            = service pid=$($serviceProc.Id) / gateway pid=$gatewayPid" -ForegroundColor Cyan
+Write-Host "开发进程            = service pid=$($serviceProc.Id)" -ForegroundColor Cyan
 
 Push-Location $desktop
 try {
@@ -148,10 +92,8 @@ try {
 }
 finally {
     Pop-Location
-    foreach ($proc in @($serviceProc, $gatewayProc)) {
-        if ($proc -and -not $proc.HasExited) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-        }
+    if ($serviceProc -and -not $serviceProc.HasExited) {
+        Stop-Process -Id $serviceProc.Id -Force -ErrorAction SilentlyContinue
     }
-    Write-Host '已停止脚本拉起的 service / 网关' -ForegroundColor DarkGray
+    Write-Host '已停止脚本拉起的 service' -ForegroundColor DarkGray
 }

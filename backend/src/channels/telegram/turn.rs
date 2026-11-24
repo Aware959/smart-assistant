@@ -100,14 +100,7 @@ pub(super) fn spawn_turn(
         // 阻塞等回执，顺序天然不乱，骰子点数也在这条路径上当场拿回并回填给模型。
         let (deliver_tx, deliver_rx) = tokio::sync::mpsc::unbounded_channel();
         let deliverer = TgDeliver::new(deliver_tx);
-        let worker = tokio::spawn(deliver_worker(
-            client,
-            base,
-            chat_id,
-            Config::get().media_gateway_url.clone(),
-            crate::core::settings::snapshot().media_gateway_timeout,
-            deliver_rx,
-        ));
+        let worker = tokio::spawn(deliver_worker(client, base, chat_id, deliver_rx));
         let started = std::time::Instant::now();
 
         let handled = tokio::time::timeout(

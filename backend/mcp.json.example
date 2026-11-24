@@ -1,28 +1,15 @@
 {
   "mcpServers": {
     "comfy": {
-      "command": "comfy-mcp",
-      "args": [],
+      "command": "D:\\DevTools\\Python312\\python.exe",
+      "args": ["D:\\MyPoject\\Rust\\smart-assistant\\mcp-servers\\comfy\\main.py"],
       "env": {
-        "COMFY_BIN": "C:/ComfyUI/venv/Scripts/comfy.exe"
+        "COMFYUI_URL": "http://127.0.0.1:8188",
+        "COMFYUI_WORKFLOW_FILE": "D:\\MyPoject\\Rust\\smart-assistant\\mcp-servers\\comfy\\SD模板2.json",
+        "PYTHONUTF8": "1"
       },
-      "tools": ["server_info", "run_workflow", "job_status", "wait_for_job", "fetch_outputs"],
-      "timeout_secs": 300,
-      "confirm": {
-        "default": true,
-        "tools": {
-          "server_info": false,
-          "job_status": false,
-          "fetch_outputs": false
-        }
-      }
-    },
-    "fetch": {
-      "url": "http://127.0.0.1:3425/mcp/run/fetch",
-      "headers": {},
-      "confirm": {
-        "default": false
-      }
+      "tools": ["generate_image", "server_info"],
+      "timeout_secs": 300
     }
   }
 }

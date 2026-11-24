@@ -48,19 +48,10 @@ pub enum Reply {
     /// 一张贴纸（表情包）。`file_id` 来自 [`crate::core::sticker::StickerCatalog`]，
     /// 选择键不进片段——键可能被手改，历史里留键反而会在重拉目录后指向别的图。
     Sticker { file_id: String },
-    /// 一张本机生成的图片。`prompt` 是生成描述，`caption` 是可选的随图旁白；
-    /// 真正调网关取字节 + 上传在通道层完成，这里只承载意图。
-    Photo {
-        prompt: String,
-        caption: Option<String>,
-    },
-    /// 一段本机合成的语音。`text` 是要念的内容；合成 + 上传在通道层完成。
-    Voice { text: String },
     /// 一段**已经做好**的媒体（图片 / 音频 / 文件）。
     ///
-    /// 与 [`Reply::Photo`] 的分工：Photo 携带的是**生成意图**（prompt），字节由
-    /// 通道层的投递工人去取；这里携带的是**成品字节**——MCP 服务器已经把图或音频
-    /// 做好了，内核拿字节直接投，不必再绕一趟生成。
+    /// 携带的是**成品字节**：MCP 服务器已经把图或音频做好了，内核拿字节直接投，
+    /// 不必再绕一趟生成。
     Media {
         bytes: Vec<u8>,
         mime: String,
@@ -107,11 +98,6 @@ impl Reply {
             Reply::Text(text) => text.clone(),
             Reply::Dice { emoji } => format!("[发了骰子 {emoji}]"),
             Reply::Sticker { .. } => "[发了一个表情包]".to_string(),
-            Reply::Photo { prompt, caption } => match caption {
-                Some(c) => format!("[发了一张图片：{prompt}] {c}"),
-                None => format!("[发了一张图片：{prompt}]"),
-            },
-            Reply::Voice { text } => format!("[发了一段语音] {text}"),
             Reply::Media { mime, .. } => match MediaKind::from_mime(mime) {
                 MediaKind::Image => "[发了一张图片]".to_string(),
                 MediaKind::Audio => "[发了一段音频]".to_string(),
@@ -124,11 +110,7 @@ impl Reply {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             Reply::Text(text) => Some(text),
-            Reply::Dice { .. }
-            | Reply::Sticker { .. }
-            | Reply::Photo { .. }
-            | Reply::Voice { .. }
-            | Reply::Media { .. } => None,
+            Reply::Dice { .. } | Reply::Sticker { .. } | Reply::Media { .. } => None,
         }
     }
 }
@@ -821,47 +803,6 @@ impl Agent {
                     record,
                     spoke: true,
                     tool_msg: ChatMessage::tool_result(call, crate::llm::tool::SEND_STICKER_ACK),
-                })
-            }
-            crate::llm::tool::ToolOutcome::GenerateImage(prompt) => {
-                // 真正的出图 + 上传在通道投递工人里异步完成，这里是"投递意图"的往返。
-                let caption = call
-                    .arg_str("caption")
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
-                let record = self.deliver_and_record(
-                    session_id,
-                    call,
-                    deliver,
-                    delivered,
-                    paired,
-                    Reply::Photo {
-                        prompt: prompt.clone(),
-                        caption,
-                    },
-                    crate::llm::tool::GENERATE_IMAGE_ACK,
-                )?;
-                Ok(CallProgress {
-                    record,
-                    spoke: true,
-                    tool_msg: ChatMessage::tool_result(call, crate::llm::tool::GENERATE_IMAGE_ACK),
-                })
-            }
-            crate::llm::tool::ToolOutcome::GenerateVoice(text) => {
-                let record = self.deliver_and_record(
-                    session_id,
-                    call,
-                    deliver,
-                    delivered,
-                    paired,
-                    Reply::Voice { text: text.clone() },
-                    crate::llm::tool::GENERATE_VOICE_ACK,
-                )?;
-                Ok(CallProgress {
-                    record,
-                    spoke: true,
-                    tool_msg: ChatMessage::tool_result(call, crate::llm::tool::GENERATE_VOICE_ACK),
                 })
             }
             crate::llm::tool::ToolOutcome::Filled(text) => {

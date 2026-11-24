@@ -263,11 +263,11 @@ mod tests {
     fn audit_records_before_and_after_without_secret_fields() {
         let service = service();
         let mut changes = BTreeMap::new();
-        changes.insert("voice_transcribe_enabled".to_string(), json!(true));
+        changes.insert("intent_enabled".to_string(), json!(true));
         service.update(changes, 0, "desktop:test", at(0)).unwrap();
         let audit = service.audit(1).unwrap();
         assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].key, "voice_transcribe_enabled");
+        assert_eq!(audit[0].key, "intent_enabled");
         assert_eq!(audit[0].operator, "desktop:test");
         assert!(audit[0].after_json.contains("true"));
     }

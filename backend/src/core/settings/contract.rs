@@ -22,17 +22,12 @@ pub enum SettingsKey {
     IntentMaxIdleDays,
     MemoryRecallMinSimilarity,
     MemoryDedupMinSimilarity,
-    MediaGatewayEnabled,
-    MediaGatewayTimeout,
-    VoiceTranscribeEnabled,
-    VoiceTranscribeTimeout,
-    VoiceTranscribeMaxSecs,
     IdentityEvolutionEnabled,
     IdentityEvolutionIntervalHours,
 }
 
 impl SettingsKey {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 10] = [
         Self::IntentEnabled,
         Self::IntentMinMinutes,
         Self::IntentMaxMinutes,
@@ -41,11 +36,6 @@ impl SettingsKey {
         Self::IntentMaxIdleDays,
         Self::MemoryRecallMinSimilarity,
         Self::MemoryDedupMinSimilarity,
-        Self::MediaGatewayEnabled,
-        Self::MediaGatewayTimeout,
-        Self::VoiceTranscribeEnabled,
-        Self::VoiceTranscribeTimeout,
-        Self::VoiceTranscribeMaxSecs,
         Self::IdentityEvolutionEnabled,
         Self::IdentityEvolutionIntervalHours,
     ];
@@ -60,11 +50,6 @@ impl SettingsKey {
             Self::IntentMaxIdleDays => "intent_max_idle_days",
             Self::MemoryRecallMinSimilarity => "memory_recall_min_similarity",
             Self::MemoryDedupMinSimilarity => "memory_dedup_min_similarity",
-            Self::MediaGatewayEnabled => "media_gateway_enabled",
-            Self::MediaGatewayTimeout => "media_gateway_timeout",
-            Self::VoiceTranscribeEnabled => "voice_transcribe_enabled",
-            Self::VoiceTranscribeTimeout => "voice_transcribe_timeout",
-            Self::VoiceTranscribeMaxSecs => "voice_transcribe_max_secs",
             Self::IdentityEvolutionEnabled => "identity_evolution_enabled",
             Self::IdentityEvolutionIntervalHours => "identity_evolution_interval_hours",
         }
@@ -80,10 +65,7 @@ impl SettingsKey {
 
     pub fn kind(self) -> &'static str {
         match self {
-            Self::IntentEnabled
-            | Self::MediaGatewayEnabled
-            | Self::VoiceTranscribeEnabled
-            | Self::IdentityEvolutionEnabled => "boolean",
+            Self::IntentEnabled | Self::IdentityEvolutionEnabled => "boolean",
             Self::MemoryRecallMinSimilarity | Self::MemoryDedupMinSimilarity => "number",
             Self::IntentQuietHours => "string",
             _ => "integer",
@@ -100,11 +82,6 @@ impl SettingsKey {
             Self::IntentMaxIdleDays => "用户沉默超过多少天后停止主动联系",
             Self::MemoryRecallMinSimilarity => "记忆召回最低余弦相似度",
             Self::MemoryDedupMinSimilarity => "记忆去重最低余弦相似度",
-            Self::MediaGatewayEnabled => "图片/语音生成工具总开关",
-            Self::MediaGatewayTimeout => "媒体生成超时（秒）",
-            Self::VoiceTranscribeEnabled => "入站语音转写总开关",
-            Self::VoiceTranscribeTimeout => "单次语音转写超时（秒）",
-            Self::VoiceTranscribeMaxSecs => "允许转写的语音时长上限（秒）",
             Self::IdentityEvolutionEnabled => "身份演化后台任务总开关",
             Self::IdentityEvolutionIntervalHours => "身份演化检查周期（小时）",
         }
@@ -122,11 +99,6 @@ pub struct RuntimeSettings {
     pub intent_max_idle_days: i64,
     pub memory_recall_min_similarity: f32,
     pub memory_dedup_min_similarity: f32,
-    pub media_gateway_enabled: bool,
-    pub media_gateway_timeout: u64,
-    pub voice_transcribe_enabled: bool,
-    pub voice_transcribe_timeout: u64,
-    pub voice_transcribe_max_secs: u64,
     pub identity_evolution_enabled: bool,
     pub identity_evolution_interval_hours: i64,
 }
@@ -143,11 +115,6 @@ impl RuntimeSettings {
             intent_max_idle_days: cfg.intent_max_idle_days,
             memory_recall_min_similarity: cfg.memory_recall_min_similarity,
             memory_dedup_min_similarity: cfg.memory_dedup_min_similarity,
-            media_gateway_enabled: cfg.media_gateway_enabled,
-            media_gateway_timeout: cfg.media_gateway_timeout,
-            voice_transcribe_enabled: cfg.voice_transcribe_enabled,
-            voice_transcribe_timeout: cfg.voice_transcribe_timeout,
-            voice_transcribe_max_secs: cfg.voice_transcribe_max_secs,
             identity_evolution_enabled: cfg.identity_evolution_enabled,
             identity_evolution_interval_hours: cfg.identity_evolution_interval_hours,
         }
@@ -189,26 +156,6 @@ impl RuntimeSettings {
             (
                 SettingsKey::MemoryDedupMinSimilarity.as_str().to_string(),
                 json!(self.memory_dedup_min_similarity),
-            ),
-            (
-                SettingsKey::MediaGatewayEnabled.as_str().to_string(),
-                json!(self.media_gateway_enabled),
-            ),
-            (
-                SettingsKey::MediaGatewayTimeout.as_str().to_string(),
-                json!(self.media_gateway_timeout),
-            ),
-            (
-                SettingsKey::VoiceTranscribeEnabled.as_str().to_string(),
-                json!(self.voice_transcribe_enabled),
-            ),
-            (
-                SettingsKey::VoiceTranscribeTimeout.as_str().to_string(),
-                json!(self.voice_transcribe_timeout),
-            ),
-            (
-                SettingsKey::VoiceTranscribeMaxSecs.as_str().to_string(),
-                json!(self.voice_transcribe_max_secs),
             ),
             (
                 SettingsKey::IdentityEvolutionEnabled.as_str().to_string(),
@@ -270,26 +217,6 @@ impl RuntimeSettings {
                 SettingsKey::MemoryDedupMinSimilarity => {
                     next.memory_dedup_min_similarity = similarity_value(key, value)?;
                     normalized.insert(raw_key.clone(), json!(next.memory_dedup_min_similarity));
-                }
-                SettingsKey::MediaGatewayEnabled => {
-                    next.media_gateway_enabled = bool_value(key, value)?;
-                    normalized.insert(raw_key.clone(), json!(next.media_gateway_enabled));
-                }
-                SettingsKey::MediaGatewayTimeout => {
-                    next.media_gateway_timeout = uint_value(key, value, 1)?;
-                    normalized.insert(raw_key.clone(), json!(next.media_gateway_timeout));
-                }
-                SettingsKey::VoiceTranscribeEnabled => {
-                    next.voice_transcribe_enabled = bool_value(key, value)?;
-                    normalized.insert(raw_key.clone(), json!(next.voice_transcribe_enabled));
-                }
-                SettingsKey::VoiceTranscribeTimeout => {
-                    next.voice_transcribe_timeout = uint_value(key, value, 1)?;
-                    normalized.insert(raw_key.clone(), json!(next.voice_transcribe_timeout));
-                }
-                SettingsKey::VoiceTranscribeMaxSecs => {
-                    next.voice_transcribe_max_secs = uint_value(key, value, 1)?;
-                    normalized.insert(raw_key.clone(), json!(next.voice_transcribe_max_secs));
                 }
                 SettingsKey::IdentityEvolutionEnabled => {
                     next.identity_evolution_enabled = bool_value(key, value)?;
@@ -367,16 +294,6 @@ fn int_value(key: SettingsKey, value: &Value, min: i64) -> Result<i64> {
     let parsed = value
         .as_i64()
         .ok_or_else(|| SqlError::Config(format!("{} 必须是整数", key.as_str())))?;
-    if parsed < min {
-        return Err(SqlError::Config(format!("{} 不能小于 {min}", key.as_str())));
-    }
-    Ok(parsed)
-}
-
-fn uint_value(key: SettingsKey, value: &Value, min: u64) -> Result<u64> {
-    let parsed = value
-        .as_u64()
-        .ok_or_else(|| SqlError::Config(format!("{} 必须是非负整数", key.as_str())))?;
     if parsed < min {
         return Err(SqlError::Config(format!("{} 不能小于 {min}", key.as_str())));
     }
