@@ -1,5 +1,5 @@
 {
-  "name": "zhiwei-desktop",
+  "name": "zhiwei-app",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -9,8 +9,8 @@
     "check": "tsc --noEmit",
     "preview": "node scripts/preview.mjs",
     "tauri": "tauri",
-    "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build --no-bundle"
+    "app:dev": "tauri dev",
+    "app:build": "tauri build --no-bundle"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",

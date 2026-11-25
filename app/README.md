@@ -1,15 +1,15 @@
-# Zhiwei Desktop
+# Zhiwei App
 
-`zhiwei-desktop` 是知微的 Windows 托盘与本地服务托管壳。它管理独立的
-`zhiwei-service.exe`（通道守护），
-不把 Telegram、Agent 或数据库逻辑搬进桌面进程。通道的运行时配置
-通过 `zhiwei-service` 的 loopback 控制 API 读写，桌面进程不直连 SQLite。
+`zhiwei-app` 是知微的应用壳（Windows 托盘与本地服务托管；未来的 Android APK 也走
+这份代码）。它管理独立的 `zhiwei-service.exe`（通道守护），
+不把 Telegram、Agent 或数据库逻辑搬进应用进程。通道的运行时配置
+通过 `zhiwei-service` 的 loopback 控制 API 读写，应用进程不直连 SQLite。
 界面使用 React + Ant Design 5（暗色主题），代码按页面拆分在 `src/pages/`。
 
 ## 开发
 
 一键编排（编译后端调试构建，脚本先拉起 service，再启动
-`tauri dev`；桌面壳在开发态只当 UI，不自启这两个进程）：
+`tauri dev`；应用壳在开发态只当 UI，不自启这两个进程）：
 
 ```powershell
 pwsh -NoProfile -File scripts/dev.ps1     # 仓库根目录也可 make dev
@@ -36,16 +36,16 @@ pwsh -NoProfile -File scripts/dev.ps1 -Telegram
 cd backend
 cargo run --bin zhiwei-service
 
-# 终端 3：桌面 UI
-cd desktop
+# 终端 3：应用 UI
+cd app
 npm install
-npm run desktop:dev
+npm run app:dev
 ```
 
-`tauri dev` **不会**自动启动 service。桌面壳通过 `logs/control.json`
-里的 pid 和网关的 `/health` 识别外部进程，界面显示“已在运行（外部启动）”，
-不会重复拉起；这类进程也不归桌面壳停止 / 重启，请在启动它的终端里操作。
-发布版（release 构建）仍由桌面壳托管自启。
+`tauri dev` **不会**自动启动 service。应用壳通过 `logs/control.json`
+里的 pid 和网关的 `/health` 识别外部进程，界面显示"已在运行（外部启动）"，
+不会重复拉起；这类进程也不归应用壳停止 / 重启，请在启动它的终端里操作。
+发布版（release 构建）仍由应用壳托管自启。
 
 开发时可用环境变量指定服务程序和工作目录：
 
@@ -55,7 +55,7 @@ $env:ZHIWEI_HOME = "D:\MyPoject\Rust\smart-assistant\backend"
 npm run tauri dev
 ```
 
-不设置时，桌面壳优先寻找可执行文件同目录的 `zhiwei-service.exe`；开发构建会向上查找
+不设置时，应用壳优先寻找可执行文件同目录的 `zhiwei-service.exe`；开发构建会向上查找
 仓库里的 `backend/target/release/zhiwei-service.exe` 或 `backend/target/debug/zhiwei-service.exe`。
 排查设置窗口时可加 `$env:ZHIWEI_SHOW_ON_START = "1"`，让窗口在启动时显示。
 
@@ -75,6 +75,4 @@ npm run dev              # 打开 http://localhost:1420/preview.html
 - 关闭状态窗口只隐藏，托盘继续运行；
 - 构建配置关闭安装器打包，输出仍是可直接运行的便携程序。
 
-状态窗口同时展示运行时配置，保存时使用 revision 乐观锁；启动配置与密钥仍在
-`.env`，运行策略已存入数据库，桌面 / Linux / Android 共用同一配置契约。
-
+状态窗口同时展示运行时配置，保存时使用 revision 乐观锁。桌面 / Linux / Android 共用同一配置契约。

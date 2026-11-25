@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Build Zhiwei maintenance tools without rebuilding the desktop release.
+    Build Zhiwei maintenance tools without rebuilding the app release.
 
 .DESCRIPTION
     Builds the single zhiwei-cli maintenance executable in release mode. It is

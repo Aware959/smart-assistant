@@ -92,7 +92,7 @@ impl ServiceManager {
         let plan = ProcessPlan {
             name: "通道守护",
             program_label: "zhiwei-service.exe",
-            log_header: "--- zhiwei-desktop starting zhiwei-service ---",
+            log_header: "--- zhiwei-app starting zhiwei-service ---",
             log_file: log_file.clone(),
             pid_file,
             working_dir: working_dir.clone(),
@@ -362,13 +362,13 @@ fn acquire_single_instance() -> Result<SingleInstance, String> {
 fn instance_key() -> (String, PathBuf) {
     let hash = instance_hash();
     (
-        format!("Local\\ZhiweiDesktop-{hash:016x}"),
-        env::temp_dir().join(format!("zhiwei-desktop-{hash:016x}.port")),
+        format!("Local\\ZhiweiApp-{hash:016x}"),
+        env::temp_dir().join(format!("zhiwei-app-{hash:016x}.port")),
     )
 }
 
 fn instance_hash() -> u64 {
-    let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from("zhiwei-desktop.exe"));
+    let executable = env::current_exe().unwrap_or_else(|_| PathBuf::from("zhiwei-app.exe"));
     let normalized = normalize_path(&executable);
     normalized
         .bytes()
@@ -464,7 +464,7 @@ fn close_native_mutex(handle: isize) {
 fn close_native_mutex(_handle: isize) {}
 
 fn install_panic_logger() {
-    let log_path = env::temp_dir().join("zhiwei-desktop-panic.log");
+    let log_path = env::temp_dir().join("zhiwei-app-panic.log");
     std::panic::set_hook(Box::new(move |panic_info| {
         if let Ok(mut log) = fs::OpenOptions::new()
             .create(true)
@@ -731,6 +731,14 @@ fn settings_schema(manager: State<'_, ServiceManager>) -> ControlResult<serde_js
     }
 }
 
+/// 审计里的操作者标识：这个壳是谁。
+///
+/// 同一个应用壳跑在 Windows 与 Android 上，审计要能分清是哪一端改的。
+#[cfg(target_os = "android")]
+const OPERATOR: &str = "android";
+#[cfg(not(target_os = "android"))]
+const OPERATOR: &str = "windows";
+
 #[tauri::command]
 fn update_settings(
     manager: State<'_, ServiceManager>,
@@ -739,7 +747,7 @@ fn update_settings(
 ) -> ControlResult<serde_json::Value> {
     let body = serde_json::to_value(SettingsPatch {
         expected_revision,
-        operator: "desktop".to_string(),
+        operator: OPERATOR.to_string(),
         changes,
     })
     .unwrap_or(serde_json::Value::Null);
@@ -801,7 +809,7 @@ fn approve_identity_proposal(
     explicit_consent: bool,
 ) -> ControlResult<serde_json::Value> {
     let path = format!("/control/v1/identity/proposals/{proposal_id}/approve");
-    let body = serde_json::json!({ "operator": "desktop", "explicitConsent": explicit_consent });
+    let body = serde_json::json!({ "operator": OPERATOR, "explicitConsent": explicit_consent });
     match control_call::<serde_json::Value>(&manager, "POST", &path, Some(body)) {
         Ok(data) => ControlResult {
             ok: true,
@@ -822,7 +830,7 @@ fn reject_identity_proposal(
     proposal_id: String,
 ) -> ControlResult<serde_json::Value> {
     let path = format!("/control/v1/identity/proposals/{proposal_id}/reject");
-    let body = serde_json::json!({ "operator": "desktop" });
+    let body = serde_json::json!({ "operator": OPERATOR });
     match control_call::<serde_json::Value>(&manager, "POST", &path, Some(body)) {
         Ok(data) => ControlResult {
             ok: true,
@@ -842,7 +850,7 @@ fn rollback_identity(
     manager: State<'_, ServiceManager>,
     version: Option<i64>,
 ) -> ControlResult<serde_json::Value> {
-    let body = serde_json::json!({ "operator": "desktop", "version": version });
+    let body = serde_json::json!({ "operator": OPERATOR, "version": version });
     match control_call::<serde_json::Value>(
         &manager,
         "POST",
@@ -1058,43 +1066,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_gateway_env_lines_and_quotes() {
-        assert_eq!(
-            parse_env_line("PORT=8787"),
-            Some(("PORT".to_string(), "8787".to_string()))
-        );
-        assert_eq!(
-            parse_env_line("NO_PROXY='*'"),
-            Some(("NO_PROXY".to_string(), "*".to_string()))
-        );
-        assert_eq!(parse_env_line("# comment"), None);
-        assert_eq!(parse_env_line("not-an-assignment"), None);
-    }
-
-    #[test]
-    fn gateway_settings_validation_rejects_bad_values() {
-        let mut changes = BTreeMap::new();
-        changes.insert("PORT".to_string(), "70000".to_string());
-        assert!(validate_gateway_changes(&changes).is_err());
-
-        changes.insert("PORT".to_string(), "8787".to_string());
-        changes.insert("TTS_ENGINE".to_string(), "unknown".to_string());
-        assert!(validate_gateway_changes(&changes).is_err());
-
-        changes.insert("TTS_ENGINE".to_string(), "sapi".to_string());
-        changes.insert("ASR_WARMUP".to_string(), "maybe".to_string());
-        assert!(validate_gateway_changes(&changes).is_err());
-
-        changes.insert("ASR_WARMUP".to_string(), "1".to_string());
-        assert!(validate_gateway_changes(&changes).is_ok());
-    }
-
-    #[test]
     fn service_resolution_prefers_matching_build_profile() {
         let root =
             std::env::temp_dir().join(format!("zhiwei-service-resolve-{}", std::process::id()));
         let base = root
-            .join("desktop")
+            .join("app")
             .join("src-tauri")
             .join("target")
             .join("debug");

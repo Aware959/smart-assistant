@@ -82,7 +82,7 @@ cargo run --bin zhiwei-cli -- mcp call <服> <工具>   # 试调一次 MCP 工�
 进程模型：`zhiwei-web` 与 `zhiwei-service` 是两个独立进程，共享同一份 `.env` / `smart_assistant.db`；
 主线只需 `zhiwei-service`。开发 Telegram 时不要用 Web 端做启动方式。
 
-根目录 `make test / tools` 仅保留后端测试与运维 CLI 构建；桌面发布用 `scripts/build-portable.ps1`。
+根目录 `make test / tools` 仅保留后端测试与运维 CLI 构建；应用壳发布用 `scripts/build-portable.ps1`。
 
 ## 代码约定
 

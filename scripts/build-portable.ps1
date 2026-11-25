@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    Build a portable Zhiwei desktop release.
+    Build a portable Zhiwei release.
 
 .DESCRIPTION
-    Produces a directly runnable directory containing zhiwei-desktop.exe and
+    Produces a directly runnable directory containing zhiwei-app.exe and
     zhiwei-service.exe. This is not an installer: existing .env and data files in
     the output directory are preserved. The database lives under data/.
 #>
@@ -20,8 +20,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $backend = Join-Path $root 'backend'
-$desktop = Join-Path $root 'desktop'
-$tauri = Join-Path $desktop 'src-tauri'
+$app = Join-Path $root 'app'
+$tauri = Join-Path $app 'src-tauri'
 $requiredBinaries = @('zhiwei-service.exe')
 $toolBinaries = @('zhiwei-cli.exe')
 $binaries = if ($WithTools) { $requiredBinaries + $toolBinaries } else { $requiredBinaries }
@@ -74,21 +74,21 @@ if (-not $SkipBuild) {
         Pop-Location
     }
 
-    Push-Location $desktop
+    Push-Location $app
     try {
         if (-not (Test-Path -LiteralPath 'node_modules')) {
             & npm ci
             Assert-LastExitCode 'npm ci'
         }
 
-        Write-Host '.. Building desktop frontend' -ForegroundColor Yellow
+        Write-Host '.. Building app frontend' -ForegroundColor Yellow
         & npm run build
         Assert-LastExitCode 'npm run build'
 
-        Write-Host '.. Building zhiwei-desktop.exe' -ForegroundColor Yellow
+        Write-Host '.. Building zhiwei-app.exe' -ForegroundColor Yellow
         & cargo build --manifest-path (Join-Path $tauri 'Cargo.toml') `
             --release --features custom-protocol
-        Assert-LastExitCode 'cargo build zhiwei-desktop'
+        Assert-LastExitCode 'cargo build zhiwei-app'
     }
     finally {
         Pop-Location
@@ -96,9 +96,9 @@ if (-not $SkipBuild) {
 
 }
 
-$desktopExe = Join-Path $tauri 'target\release\zhiwei-desktop.exe'
-if (-not (Test-Path -LiteralPath $desktopExe)) {
-    throw "Missing desktop executable: $desktopExe"
+$appExe = Join-Path $tauri 'target\release\zhiwei-app.exe'
+if (-not (Test-Path -LiteralPath $appExe)) {
+    throw "Missing app executable: $appExe"
 }
 foreach ($binary in $binaries) {
     $source = Join-Path $backend "target\release\$binary"
@@ -123,7 +123,7 @@ if ($running) {
 }
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-Copy-Item -LiteralPath $desktopExe -Destination $OutputDir -Force
+Copy-Item -LiteralPath $appExe -Destination $OutputDir -Force
 foreach ($binary in $binaries) {
     Copy-Item -LiteralPath (Join-Path $backend "target\release\$binary") `
         -Destination $OutputDir -Force
@@ -183,21 +183,21 @@ foreach ($localFile in @('sticker_catalog.json', 'ilink_session.json')) {
     }
 }
 
-$desktopExe = Join-Path $OutputDir 'zhiwei-desktop.exe'
+$appExe = Join-Path $OutputDir 'zhiwei-app.exe'
 if (-not $NoShortcut) {
     $shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Zhiwei.lnk'
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $desktopExe
+    $shortcut.TargetPath = $appExe
     $shortcut.WorkingDirectory = $OutputDir
-    $shortcut.IconLocation = "$desktopExe,0"
+    $shortcut.IconLocation = "$appExe,0"
     $shortcut.Description = '知微 Zhiwei'
     $shortcut.Save()
 }
 
 Write-Host ''
 Write-Host "Portable release: $OutputDir" -ForegroundColor Green
-Write-Host "Launch:           $desktopExe" -ForegroundColor Green
+Write-Host "Launch:           $appExe" -ForegroundColor Green
 if (-not $NoShortcut) {
     Write-Host "Desktop shortcut: $(Join-Path ([Environment]::GetFolderPath('Desktop')) 'Zhiwei.lnk')" `
         -ForegroundColor Green

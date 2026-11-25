@@ -5,9 +5,9 @@
 核心是一个 Rust 内核（`backend/`），桌面与 Android 只是它的两种消费形态：
 
 - **backend/**：Rust 内核（对话工具循环 + 长期记忆 + 语义检索 + 主动开口 + MCP 客户端）
-- **desktop/**：Windows 桌面壳，管理 `zhiwei-service`
+- **app/**：Tauri 2 应用壳（Windows 托盘 + 未来的 Android APK），管理 `zhiwei-service`
 - **mcp-servers/**：本机 MCP 服务器（目前是 ComfyUI 出图），被后端按需拉起
-- **android/**：Android 端（占位；UniFFI 导出暂已移除，待内核与对话稳定后再接）
+- **android/**：Android 端（占位；改由 Tauri 生成 `app/src-tauri/gen/android`，UniFFI 路线已作废）
 
 ## 快速启动（根目录）
 
@@ -18,10 +18,10 @@
 cd backend
 cargo run --bin zhiwei-service
 
-# 终端 2：桌面 UI —— 不自启上面那个，只识别已运行的进程
-cd desktop
+# 终端 2：应用 UI —— 不自启上面那个，只识别已运行的进程
+cd app
 npm install        # 仅首次
-npm run desktop:dev
+npm run app:dev
 ```
 
 （MCP 服务器不常驻：后端在 `MCP_ENABLED=1` 时按需拉起 `mcp-servers/` 里配置的
@@ -48,13 +48,14 @@ cargo fmt --all -- --check
 后端配置按环境分文件：开发态读 `backend/.env.dev`，生产态读 `.env.prod`；进程变量
 `ZHIWEI_ENV=dev|prod` 决定用哪一份（未设置时 debug 构建取 dev、release 构建取 prod）。
 
-`npm run desktop:dev`（`tauri dev`）在开发态只启动界面，不会自启 `zhiwei-service`
-——先手动起它（或用 `make dev` 一键编排），桌面壳会把它显示为“外部启动”。
-发布版仍由桌面壳托管自启。
+`npm run app:dev`（`tauri dev`）在开发态只启动界面，不会自启 `zhiwei-service`
+——先手动起它（或用 `make dev` 一键编排），应用壳会把它显示为“外部启动”。
+发布版仍由应用壳托管自启。
 
 ## 桌面程序（Windows）
 
-`desktop/` 是知微的 Tauri 2 托盘壳，管理独立的 `zhiwei-service.exe`。当前 P1 已支持：
+`app/` 是知微的 Tauri 2 应用壳（Windows 托盘 + 未来的 Android APK），管理独立的
+`zhiwei-service.exe`。当前 P1 已支持：
 
 - 默认仅驻留右下角托盘，不打开主窗口；
 - 左键托盘打开状态窗口，右键菜单可启动、停止、重启、查看日志或退出；
@@ -65,9 +66,9 @@ cargo fmt --all -- --check
 开发运行：
 
 ```powershell
-cd desktop
+cd app
 npm install
-npm run desktop:dev
+npm run app:dev
 ```
 
 构建便携正式版，不生成 MSI/NSIS：
@@ -76,9 +77,9 @@ npm run desktop:dev
 pwsh -File scripts/build-portable.ps1
 ```
 
-默认输出到 `D:\Zhiwei`，入口是 `D:\Zhiwei\zhiwei-desktop.exe`，数据库位于
+默认输出到 `D:\Zhiwei`，入口是 `D:\Zhiwei\zhiwei-app.exe`，数据库位于
 `D:\Zhiwei\data\smart_assistant.db`。默认只构建并打包运行必需的
-`zhiwei-service.exe` 与桌面壳；维护工具不参与日常发布构建。首次创建时会从发布
+`zhiwei-service.exe` 与应用壳；维护工具不参与日常发布构建。首次创建时会从发布
 目录迁移 `.env`、数据库和本地状态；日志从新目录重新开始，避免复制历史敏感信息。
 之后只读写新目录。脚本会更新桌面的 `Zhiwei.lnk` 指向新入口；不需要时加
 `-NoShortcut`。已有数据不会被删除。

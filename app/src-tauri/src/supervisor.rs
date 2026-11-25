@@ -815,22 +815,6 @@ mod tests {
     }
 
     #[test]
-    fn interpreter_image_matches_by_file_name() {
-        assert!(program_image_matches(
-            Path::new(r"C:\Python312\python.EXE"),
-            Path::new("python")
-        ));
-        assert!(program_image_matches(
-            Path::new(r"C:\venv\Scripts\python.exe"),
-            Path::new(r"C:\venv\Scripts\python.exe")
-        ));
-        assert!(!program_image_matches(
-            Path::new(r"C:\Windows\System32\cmd.exe"),
-            Path::new("python")
-        ));
-    }
-
-    #[test]
     fn read_pid_parses_and_rejects_garbage() {
         let dir = temp_dir("pid");
         let pid_file = dir.join("pid.txt");

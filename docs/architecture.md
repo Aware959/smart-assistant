@@ -499,11 +499,18 @@ INTENT_MAX_IDLE_DAYS=7       # 超过多少天未回复则不再打扰
 
 SPA 静态文件由 `SMART_ASSISTANT_WEB_DIST` 指定目录，同源托管，未知路径回退 index.html。
 
-### 9.2 移动端（UniFFI）
+### 9.2 移动端（Tauri）
 
-研发早期先稳定对话与内核：**UniFFI 导出已移除**（`crate-type` 改回纯 rlib，无 cdylib），
-`android/` 保持占位。待内核稳定后再引入 `uniffi` 并把 `Assistant` 的对话能力导出给
-Kotlin/Swift。
+研发早期先稳定对话与内核：**UniFFI 导出已移除**（`crate-type` 改回纯 rlib，无 cdylib，
+无 Kotlin 绑定）。移动端改由 Tauri v2 承担——与桌面端共用 `app/` 这一份 React 面板与
+Rust 壳，`tauri android init` 生成 Android 工程（`app/src-tauri/gen/android/`，不入库）。
+
+两侧的差异只在"内核在哪"：Windows 上内核是独立进程 `zhiwei-service.exe`，壳托管它；
+Android 上内核在应用进程内跑。运行时配置两侧共用同一契约（见 §8），
+Android 不直连数据库，由应用内 runtime host 调用同一个 service。
+
+保活是移动端独有的问题：Tauri v2 无官方前台服务插件，需在 `gen/android` 里自写
+Kotlin 前台服务与通知。
 
 ---
 

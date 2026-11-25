@@ -35,12 +35,12 @@
 
 *.tsbuildinfo
 
-# Tauri desktop (desktop/)
-desktop/node_modules/
-desktop/dist/
-desktop/src-tauri/target/
-desktop/src-tauri/gen/
-desktop/preview.html
+# Tauri 应用壳（app/）
+app/node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+app/preview.html
 
 # Python MCP 服务器 (mcp-servers/)
 mcp-servers/**/__pycache__/
@@ -51,7 +51,7 @@ mcp-servers/**/.venv/
 mcp.json
 /backend/mcp.json
 
-# Android (android/)
+# Android（由 Tauri 生成于 app/src-tauri/gen/android/，另有独立 Gradle 工程的旧目录）
 android/.gradle/
 android/.idea/
 android/build/

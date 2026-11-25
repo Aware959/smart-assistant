@@ -20,7 +20,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $backend = Join-Path $root 'backend'
-$desktop = Join-Path $root 'desktop'
+$app = Join-Path $root 'app'
 $serviceExe = Join-Path $backend 'target\debug\zhiwei-service.exe'
 
 $devEnv = Join-Path $backend '.env.dev'
@@ -29,7 +29,7 @@ if (-not (Test-Path -LiteralPath $devEnv)) {
 }
 
 function Stop-RepoDevProcesses {
-    # 上一轮开发实例会占住 backend/desktop 的调试产物，cargo 无法覆盖重建；
+    # 上一轮开发实例会占住 backend/app 的调试产物，cargo 无法覆盖重建；
     # 这里只清理仓库目录内的进程，不碰已安装的正式版（D:\Zhiwei 等）。
     $repoPrefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
     $victims = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -85,10 +85,10 @@ $serviceProc = Start-Process -FilePath $serviceExe -WorkingDirectory $backend -P
 Start-Sleep -Seconds 2
 Write-Host "开发进程            = service pid=$($serviceProc.Id)" -ForegroundColor Cyan
 
-Push-Location $desktop
+Push-Location $app
 try {
-    & npm run desktop:dev
-    if ($LASTEXITCODE -ne 0) { throw 'npm run desktop:dev 失败' }
+    & npm run app:dev
+    if ($LASTEXITCODE -ne 0) { throw 'npm run app:dev 失败' }
 }
 finally {
     Pop-Location
