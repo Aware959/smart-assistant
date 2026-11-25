@@ -95,10 +95,10 @@ fn cosine_distance_maps_to_similarity() {
 fn dedup_threshold_is_stricter_than_recall_threshold() {
     let cfg = crate::core::settings::snapshot();
     assert!(
-        cfg.memory_dedup_min_similarity > cfg.memory_recall_min_similarity,
+        cfg.memory.dedup_min_similarity > cfg.memory.recall_min_similarity,
         "去重阈值 {} 应严于召回阈值 {}",
-        cfg.memory_dedup_min_similarity,
-        cfg.memory_recall_min_similarity
+        cfg.memory.dedup_min_similarity,
+        cfg.memory.recall_min_similarity
     );
 }
 

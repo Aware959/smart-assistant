@@ -1,22 +1,35 @@
 // 浏览器预览用 mock 桥：不需要 zhiwei-service / media-gateway 就能看 UI。
 // 正式入口 index.html 走真实 Tauri invoke，不加载本文件。
 (() => {
+  // [键, 类型, 说明, 缺省值, 分组, 分组标题, 可改, 需重启]
   const runtimeSettingsSchema = [
-    ["intent_enabled", "boolean", "主动开口总开关", true],
-    ["intent_min_minutes", "integer", "主动开口随机间隔下限（分钟）", 45],
-    ["intent_max_minutes", "integer", "主动开口随机间隔上限（分钟）", 180],
-    ["intent_quiet_hours", "string", "安静时段，格式 HH-HH", "23-7"],
-    ["intent_min_silence_hours", "integer", "用户最后发言后至少静默多少小时", 2],
-    ["intent_max_idle_days", "integer", "用户沉默超过多少天后停止主动联系", 7],
-    ["memory_recall_min_similarity", "number", "记忆召回最低余弦相似度", 0.79],
-    ["memory_dedup_min_similarity", "number", "记忆去重最低余弦相似度", 0.92],
-    ["media_gateway_enabled", "boolean", "图片/语音生成工具总开关", true],
-    ["media_gateway_timeout", "integer", "媒体生成超时（秒）", 120],
-    ["voice_transcribe_enabled", "boolean", "入站语音转写总开关", true],
-    ["voice_transcribe_timeout", "integer", "单次语音转写超时（秒）", 180],
-    ["voice_transcribe_max_secs", "integer", "允许转写的语音时长上限（秒）", 120],
-    ["identity_evolution_enabled", "boolean", "身份演化后台任务总开关", false],
-    ["identity_evolution_interval_hours", "integer", "身份演化检查周期（小时）", 24],
+    ["llm_provider", "string", "大模型提供方：openai 或 google", "openai", "llm", "大模型", true, true],
+    ["llm_api_url", "string", "大模型端点；留空用提供方默认地址", "https://api.example/v1", "llm", "大模型", true, true],
+    ["llm_api_key", "secret", "大模型密钥；留空回退 OPENAI_API_KEY 环境变量", "", "llm", "大模型", true, true],
+    ["llm_model", "string", "对话模型名", "deepseek-v4-flash", "llm", "大模型", true, false],
+    ["llm_structured_output", "string", "结构化输出模式：json_schema 或 json_object", "json_schema", "llm", "大模型", true, false],
+    ["embedding_api_url", "string", "向量端点", "http://127.0.0.1:1234/v1/embeddings", "embedding", "向量", true, true],
+    ["embedding_api_key", "secret", "向量密钥；留空回退 OPENAI_API_KEY 环境变量", "", "embedding", "向量", true, true],
+    ["embedding_model", "string", "向量模型；变更需重建向量表", "text-embedding-embeddinggemma-300m", "embedding", "向量", false, true],
+    ["embedding_dim", "integer", "向量维度；变更需重建向量表", 768, "embedding", "向量", false, true],
+    ["memory_recall_min_similarity", "number", "记忆召回最低余弦相似度", 0.79, "memory", "记忆", true, false],
+    ["memory_dedup_min_similarity", "number", "记忆去重最低余弦相似度", 0.92, "memory", "记忆", true, false],
+    ["intent_enabled", "boolean", "主动开口总开关", true, "intent", "主动开口", true, false],
+    ["intent_min_minutes", "integer", "主动开口随机间隔下限（分钟）", 45, "intent", "主动开口", true, false],
+    ["intent_max_minutes", "integer", "主动开口随机间隔上限（分钟）", 180, "intent", "主动开口", true, false],
+    ["intent_quiet_hours", "string", "安静时段，格式 HH-HH", "23-7", "intent", "主动开口", true, false],
+    ["intent_min_silence_hours", "integer", "用户最后发言后至少静默多少小时", 2, "intent", "主动开口", true, false],
+    ["intent_max_idle_days", "integer", "用户沉默超过多少天后停止主动联系", 7, "intent", "主动开口", true, false],
+    ["identity_evolution_enabled", "boolean", "身份演化后台任务总开关", false, "identity", "身份演化", true, false],
+    ["identity_evolution_interval_hours", "integer", "身份演化检查周期（小时）", 24, "identity", "身份演化", true, false],
+    ["telegram_enabled", "boolean", "Telegram 通道硬开关", true, "channel", "通道", false, true],
+    ["telegram_bot_token", "secret", "Telegram Bot Token", "********", "channel", "通道", false, true],
+    ["telegram_allowed_ids", "string", "允许接入的 chat id 白名单", "123456789", "channel", "通道", false, true],
+    ["mcp_enabled", "boolean", "MCP 客户端总开关", false, "tool", "工具", false, true],
+    ["mcp_config_file", "string", "MCP 配置文件路径", "mcp.json", "tool", "工具", false, true],
+    ["smart_assistant_db", "string", "数据库路径", "D:\\Zhiwei\\data\\smart_assistant.db", "program", "程序本身", false, true],
+    ["control_addr", "string", "本地控制接口监听地址", "127.0.0.1:0", "program", "程序本身", false, true],
+    ["rust_log", "string", "日志级别", "info", "program", "程序本身", false, true],
   ];
   const gatewaySchema = [
     ["PORT", "integer", "监听端口", "8787", []],
@@ -123,15 +136,20 @@
         case "settings_schema":
           return {
             ok: true,
-            data: runtimeSettingsSchema.map(([key, kind, description, d]) => ({
-              key,
-              kind,
-              description,
-              default: d,
-              current: d,
-              hot_reload: true,
-              restart_required: false,
-            })),
+            data: runtimeSettingsSchema.map(
+              ([key, kind, description, d, group, groupLabel, editable, restart]) => ({
+                key,
+                group,
+                group_label: groupLabel,
+                kind,
+                description,
+                default: d,
+                current: d,
+                hot_reload: !restart,
+                restart_required: restart,
+                editable,
+              }),
+            ),
             error: null,
           };
         case "update_settings":

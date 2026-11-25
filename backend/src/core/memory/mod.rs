@@ -204,7 +204,7 @@ pub fn store(
                 .into_iter()
                 .next();
             nearest.and_then(|(old, distance)| {
-                (similarity(distance) >= cfg.memory_dedup_min_similarity).then(|| {
+                (similarity(distance) >= cfg.memory.dedup_min_similarity).then(|| {
                     tracing::debug!(id = %old.id, similarity = similarity(distance), "记忆去重：改写现有条目");
                     old
                 })
@@ -268,7 +268,9 @@ pub fn search(db: &Database, query: &str, limit: usize) -> Result<Vec<(Memory, f
         return Ok(Vec::new());
     }
     let vector = embedding::embed_text(query)?;
-    let min_similarity = crate::core::settings::snapshot().memory_recall_min_similarity;
+    let min_similarity = crate::core::settings::snapshot()
+        .memory
+        .recall_min_similarity;
     Ok(db_memory::search_similar(db, &vector, limit)?
         .into_iter()
         .filter(|(_, distance)| similarity(*distance) >= min_similarity)

@@ -68,8 +68,11 @@ impl App {
             profile.clone(),
         ));
         // 开关由数据库运行时配置控制；`enabled` 只表示装配时已具备模型能力。
+        // 模型名留空 = 运行时配置里的当前模型（面板改完立即生效，见
+        // `IdentityEvolutionAgent::resolve_model`）。这里不能用 `Config::get()`：
+        // 那是 .env 快照，不含面板改过的值。
         let evolution_config = crate::core::identity::evolution::EvolutionConfig::enabled(
-            crate::config::Config::get().llm_model.clone(),
+            crate::core::identity::evolution::RUNTIME_MODEL.to_string(),
         );
         let identity_evolution = Arc::new(
             crate::core::identity::evolution::IdentityEvolutionAgent::new(

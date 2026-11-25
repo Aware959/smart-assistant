@@ -34,6 +34,12 @@ pub struct EvolutionConfig {
     pub model: String,
 }
 
+/// `model` 取这个哨兵时，模型名在**每次运行前**从运行时配置里取。
+///
+/// 面板改了模型就该立刻生效，不该等进程重启——但配置值只在运行时快照里，
+/// 装配时快照还没装好，所以这里不能在建 `EvolutionConfig` 时就把模型名定死。
+pub const RUNTIME_MODEL: &str = "\u{0}runtime-model";
+
 impl EvolutionConfig {
     pub fn disabled() -> Self {
         Self::default()
@@ -122,12 +128,12 @@ impl IdentityEvolutionAgent {
         tracing::info!("身份演化后台任务已启动，每分钟检查运行时配置");
         loop {
             let settings = crate::core::settings::snapshot();
-            if !settings.identity_evolution_enabled {
+            if !settings.identity.evolution_enabled {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 continue;
             }
             let interval = std::time::Duration::from_secs(
-                (settings.identity_evolution_interval_hours.max(1) as u64).saturating_mul(3600),
+                (settings.identity.evolution_interval_hours.max(1) as u64).saturating_mul(3600),
             );
             let now = Utc::now();
             let last_checked = match self.identity.latest_evolution_check() {
@@ -191,7 +197,8 @@ impl IdentityEvolutionAgent {
         if !self.config.enabled {
             return Ok(None);
         }
-        if self.config.model.trim().is_empty() {
+        let model = self.resolve_model();
+        if model.trim().is_empty() {
             return Err(SqlError::Config("身份演化已启用但未配置模型名".to_string()));
         }
         let allowed_ids = allowed_evidence_ids(snapshot);
@@ -202,7 +209,7 @@ impl IdentityEvolutionAgent {
         let messages = request_messages(snapshot)?;
         let raw = self.llm.complete_structured(
             &messages,
-            self.config.model.trim(),
+            model.trim(),
             SCHEMA_NAME,
             proposal_schema(),
         )?;
@@ -210,6 +217,18 @@ impl IdentityEvolutionAgent {
             return Ok(None);
         };
         self.identity.create_proposal(draft, now).map(Some)
+    }
+
+    /// 解析本次运行要用的模型名。
+    ///
+    /// 哨兵 [`RUNTIME_MODEL`] 表示"取运行时配置里的当前模型"——面板改了模型
+    /// 就该立刻生效。其余情况用调用方显式注入的名字（测试与离线调用走这条）。
+    fn resolve_model(&self) -> String {
+        if self.config.model == RUNTIME_MODEL {
+            crate::core::settings::snapshot().llm.model
+        } else {
+            self.config.model.clone()
+        }
     }
 
     /// 生产入口：收集只读证据后运行一次演化。

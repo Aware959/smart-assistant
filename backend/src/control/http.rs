@@ -464,7 +464,7 @@ mod tests {
         let sessions = Arc::new(Sessions::new(db).unwrap());
         let llm = Arc::new(crate::llm::chat::Llm);
         let evolution_config = crate::core::identity::evolution::EvolutionConfig::enabled(
-            crate::config::Config::get().llm_model.clone(),
+            crate::core::identity::evolution::RUNTIME_MODEL.to_string(),
         );
         let evolution = Arc::new(IdentityEvolutionAgent::new(
             evolution_config,

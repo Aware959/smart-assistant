@@ -27,12 +27,18 @@ export type SettingsView = {
 
 export type SettingsSchemaItem = {
   key: string;
-  kind: "boolean" | "integer" | "number" | "string";
+  /** 所属分组（llm / embedding / memory / intent / identity / channel / tool / program）。 */
+  group: string;
+  /** 分组标题（面板上的卡片标题）。 */
+  group_label: string;
+  kind: "boolean" | "integer" | "number" | "string" | "secret";
   description: string;
-  default: boolean | number | string;
-  current: boolean | number | string;
+  default: boolean | number | string | null;
+  current: boolean | number | string | null;
   hot_reload: boolean;
   restart_required: boolean;
+  /** 是否可在面板里改；启动期固定的项为 false——只展示。 */
+  editable: boolean;
 };
 
 export type IdentityOverview = {

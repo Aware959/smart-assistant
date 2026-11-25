@@ -11,7 +11,7 @@ use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget, WebConfig};
 use tokio::runtime::Runtime;
 
-use crate::config::{Config, LlmProvider};
+use crate::config::LlmProvider;
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 static CHAT_CLIENT: OnceLock<Client> = OnceLock::new();
@@ -71,17 +71,19 @@ pub(crate) fn chat_client() -> &'static Client {
         ..Default::default()
     };
     CHAT_CLIENT.get_or_init(|| {
-        let cfg = Config::get();
-        match cfg.llm_provider {
+        // 端点与密钥读运行时快照（数据库覆盖 .env）：client 是 OnceLock，
+        // 建好就不重建，所以面板改了这两项要重启才生效——schema 里标了 restart_required。
+        let cfg = crate::core::settings::snapshot();
+        match cfg.llm.provider {
             LlmProvider::OpenAI => build_client(
-                &cfg.llm_api_url,
-                &cfg.llm_api_key,
+                &cfg.llm.api_url,
+                &cfg.llm.api_key,
                 Some(&chat_options),
                 CHAT_TIMEOUT,
             ),
             LlmProvider::Gemini => build_gemini_client(
-                &cfg.llm_api_url,
-                &cfg.llm_api_key,
+                &cfg.llm.api_url,
+                &cfg.llm.api_key,
                 Some(&chat_options),
                 CHAT_TIMEOUT,
             ),
@@ -92,9 +94,10 @@ pub(crate) fn chat_client() -> &'static Client {
 /// embedding 专用的 genai Client（genez 的嵌入与 LLM 通道独立，仍按 OpenAI 兼容端点）。
 pub(crate) fn embed_client() -> &'static Client {
     EMBED_CLIENT.get_or_init(|| {
+        let cfg = crate::core::settings::snapshot();
         build_client(
-            &Config::get().embedding_api_url,
-            &Config::get().embedding_api_key,
+            &cfg.embedding.api_url,
+            &cfg.embedding.api_key,
             None,
             EMBED_TIMEOUT,
         )

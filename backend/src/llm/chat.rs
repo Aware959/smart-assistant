@@ -4,7 +4,6 @@ use genai::chat::{
     JsonSpec, StopReason, Tool, ToolCall as GenaiToolCall, ToolChoice, ToolResponse,
 };
 
-use crate::config::Config;
 use crate::error::{Result, SqlError};
 use crate::llm::genai_client;
 
@@ -156,7 +155,7 @@ where
 
 /// 调用远程 LLM 完成非流式对话，返回回复文本。
 pub fn complete(messages: &[ChatMessage]) -> Result<String> {
-    complete_with_model(messages, &crate::config::Config::get().llm_model)
+    complete_with_model(messages, &crate::core::settings::snapshot().llm.model)
 }
 
 /// 用指定模型完成非流式对话（记忆提取、判定等任务可与对话模型分离）。
@@ -177,7 +176,10 @@ pub fn complete_structured(
     name: impl Into<String>,
     schema: serde_json::Value,
 ) -> Result<String> {
-    let structured = Config::get().llm_structured_output.to_ascii_lowercase();
+    let structured = crate::core::settings::snapshot()
+        .llm
+        .structured_output
+        .to_ascii_lowercase();
     let options = if structured == "json_object" {
         ChatOptions {
             response_format: Some(ChatResponseFormat::JsonMode),
@@ -273,7 +275,7 @@ pub fn complete_stream_with_tools<F>(
 where
     F: FnMut(&str) + Send,
 {
-    let model = crate::config::Config::get().llm_model.clone();
+    let model = crate::core::settings::snapshot().llm.model.clone();
     let options = ChatOptions {
         capture_content: Some(true),
         capture_tool_calls: Some(true),

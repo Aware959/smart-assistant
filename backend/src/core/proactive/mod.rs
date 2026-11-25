@@ -52,7 +52,7 @@ const MAX_CANDIDATES_PER_CYCLE: usize = 5;
 pub async fn run(chat: Arc<Agent>, session: Arc<Sessions>, pusher: Arc<ChannelsPusher>) {
     tracing::info!("意图判定引擎已启动，每轮重新读取运行时配置");
     loop {
-        if !crate::core::settings::snapshot().intent_enabled {
+        if !crate::core::settings::snapshot().intent.enabled {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             continue;
         }

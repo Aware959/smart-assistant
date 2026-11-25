@@ -16,9 +16,9 @@ use crate::db::channel::ProactiveRow;
 /// 由调用方再按通道可推性（telegram 随时可推 / ilink 需新鲜 context_token）二次筛选。
 pub fn filter_eligible(rows: Vec<ProactiveRow>, now: DateTime<Utc>) -> Vec<ProactiveCandidate> {
     let cfg = crate::core::settings::snapshot();
-    let min_silence = Duration::hours(cfg.intent_min_silence_hours);
-    let max_idle = Duration::days(cfg.intent_max_idle_days);
-    let min_gap = Duration::minutes(cfg.intent_min_minutes);
+    let min_silence = Duration::hours(cfg.intent.min_silence_hours);
+    let max_idle = Duration::days(cfg.intent.max_idle_days);
+    let min_gap = Duration::minutes(cfg.intent.min_minutes);
 
     rows.into_iter()
         .map(|r| ProactiveCandidate {

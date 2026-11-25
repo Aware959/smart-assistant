@@ -15,7 +15,7 @@ use crate::error::{Result, SqlError};
 
 /// 配置持久化适配器。持有现有 DB 句柄，不另开连接。
 pub struct SettingsStore {
-    db: std::sync::Arc<std::sync::Mutex<Database>>,
+    pub(crate) db: std::sync::Arc<std::sync::Mutex<Database>>,
 }
 
 impl SettingsStore {
@@ -35,6 +35,7 @@ impl SettingsStore {
         &self,
         expected_revision: i64,
         changes: &BTreeMap<String, Value>,
+        redact: &BTreeSet<String>,
         operator: &str,
         now: DateTime<Utc>,
     ) -> Result<i64> {
@@ -42,6 +43,7 @@ impl SettingsStore {
             &crate::db::lock_db(&self.db),
             expected_revision,
             changes,
+            redact,
             operator,
             now,
         )
@@ -93,10 +95,14 @@ pub(crate) fn load_values(db: &Database) -> Result<BTreeMap<String, Value>> {
 ///
 /// 返回新的 revision。预期值过期时返回 [`SqlError::Conflict`]，调用方应映射成
 /// HTTP 409；这样两个客户端并发保存时不会静默覆盖。
+///
+/// `redact` 里的键在**审计行**里以占位符记录（`before` / `after` 都不落明文），
+/// 但 `app_settings` 仍存真值——运行时要用它。审计是长期留存的记录，明文密钥不该进去。
 pub(crate) fn apply_changes(
     db: &Database,
     expected_revision: i64,
     changes: &BTreeMap<String, Value>,
+    redact: &BTreeSet<String>,
     operator: &str,
     now: DateTime<Utc>,
 ) -> Result<i64> {
@@ -142,6 +148,12 @@ pub(crate) fn apply_changes(
                  updated_by = excluded.updated_by",
             params![key, after_json, now.to_rfc3339(), operator],
         )?;
+        // 审计行脱敏：密钥只留"改过"这个事实，不留值。
+        let (before_audit, after_audit) = if redact.contains(key) {
+            (before.map(|_| REDACTED.to_string()), REDACTED.to_string())
+        } else {
+            (before, after_json)
+        };
         tx.execute(
             "INSERT INTO app_settings_audit
                  (revision, key, before_json, after_json, operator, created_at)
@@ -149,8 +161,8 @@ pub(crate) fn apply_changes(
             params![
                 revision,
                 key,
-                before,
-                after_json,
+                before_audit,
+                after_audit,
                 operator,
                 now.to_rfc3339()
             ],
@@ -159,6 +171,9 @@ pub(crate) fn apply_changes(
     tx.commit()?;
     Ok(revision)
 }
+
+/// 审计行里替代明文密钥的占位符。
+pub(crate) const REDACTED: &str = "\"<redacted>\"";
 
 /// 读取审计历史（新到旧）。
 pub(crate) fn list_audit(db: &Database, limit: usize) -> Result<Vec<SettingsAudit>> {
@@ -213,7 +228,7 @@ mod tests {
             ("a".to_string(), serde_json::json!(1)),
             ("b".to_string(), serde_json::json!("x")),
         ]);
-        let revision = apply_changes(&db, 0, &changes, "test", at(0)).unwrap();
+        let revision = apply_changes(&db, 0, &changes, &BTreeSet::new(), "test", at(0)).unwrap();
         assert_eq!(revision, 1);
         assert_eq!(load_values(&db).unwrap(), changes);
         let audit = list_audit(&db, 10).unwrap();
@@ -226,10 +241,10 @@ mod tests {
     fn stale_revision_does_not_write_any_row() {
         let db = Database::in_memory().unwrap();
         let first = BTreeMap::from([("a".to_string(), serde_json::json!(1))]);
-        apply_changes(&db, 0, &first, "first", at(0)).unwrap();
+        apply_changes(&db, 0, &first, &BTreeSet::new(), "first", at(0)).unwrap();
 
         let stale = BTreeMap::from([("b".to_string(), serde_json::json!(2))]);
-        let error = apply_changes(&db, 0, &stale, "second", at(1)).unwrap_err();
+        let error = apply_changes(&db, 0, &stale, &BTreeSet::new(), "second", at(1)).unwrap_err();
         assert!(matches!(error, SqlError::Conflict(_)));
         assert_eq!(revision(&db).unwrap(), 1);
         assert!(!load_values(&db).unwrap().contains_key("b"));
@@ -242,6 +257,7 @@ mod tests {
             &db,
             0,
             &BTreeMap::from([("a".to_string(), serde_json::json!(1))]),
+            &BTreeSet::new(),
             "first",
             at(0),
         )
@@ -250,6 +266,7 @@ mod tests {
             &db,
             1,
             &BTreeMap::from([("a".to_string(), serde_json::json!(2))]),
+            &BTreeSet::new(),
             "second",
             at(1),
         )
@@ -257,5 +274,22 @@ mod tests {
         let audit = list_audit(&db, 1).unwrap();
         assert_eq!(audit[0].before_json.as_deref(), Some("1"));
         assert_eq!(audit[0].after_json, "2");
+    }
+
+    #[test]
+    fn redacted_keys_keep_the_value_but_not_the_audit() {
+        let db = Database::in_memory().unwrap();
+        let changes = BTreeMap::from([("secret".to_string(), serde_json::json!("s3cret"))]);
+        let redact = BTreeSet::from(["secret".to_string()]);
+        apply_changes(&db, 0, &changes, &redact, "test", at(0)).unwrap();
+
+        // 真值仍在配置表里（运行时要用），但审计里只有占位符。
+        assert_eq!(
+            load_values(&db).unwrap().get("secret"),
+            Some(&serde_json::json!("s3cret"))
+        );
+        let audit = list_audit(&db, 10).unwrap();
+        assert_eq!(audit[0].after_json, REDACTED);
+        assert!(audit[0].before_json.is_none());
     }
 }

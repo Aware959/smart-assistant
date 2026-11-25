@@ -31,7 +31,7 @@ pub fn in_quiet_hours(now: DateTime<Local>) -> bool {
 /// start > end 表示跨午夜（如 23-7 → 23:00~次日 6:59），start == end 视为禁用。
 pub fn quiet_remainder(hour: u32, minute: u32) -> Option<Duration> {
     quiet_remainder_for(
-        crate::core::settings::snapshot().intent_quiet_hours,
+        crate::core::settings::snapshot().intent.quiet_hours,
         hour,
         minute,
     )
@@ -64,7 +64,7 @@ pub fn quiet_remainder_for(q: (u32, u32), hour: u32, minute: u32) -> Option<Dura
 /// `[min, max]`（分钟）区间上的均匀随机；min>max 时对调，相等时取该值。
 fn random_interval() -> Duration {
     let cfg = crate::core::settings::snapshot();
-    let (mut lo, mut hi) = (cfg.intent_min_minutes, cfg.intent_max_minutes);
+    let (mut lo, mut hi) = (cfg.intent.min_minutes, cfg.intent.max_minutes);
     if lo > hi {
         std::mem::swap(&mut lo, &mut hi);
     }
