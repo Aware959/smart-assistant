@@ -2,6 +2,23 @@
   box-sizing: border-box;
 }
 
+:root {
+  /* 毛玻璃三要素：模糊半径、饱和度、半透明底色（明暗两套在 .light/.dark 覆写） */
+  --glass-blur: 28px;
+  --glass-bg: rgba(255, 255, 255, 0.62);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  --text-secondary: rgba(0, 0, 0, 0.55);
+  --page-pad-top: 16px;
+}
+
+.dark {
+  --glass-bg: rgba(28, 28, 32, 0.6);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  --text-secondary: rgba(255, 255, 255, 0.6);
+}
+
 html,
 body,
 #root {
@@ -12,94 +29,83 @@ body,
 
 body {
   overflow: hidden;
-  background: #0f1e19;
   font-family:
+    -apple-system,
+    "SF Pro Text",
     "Segoe UI",
     "Noto Sans SC",
     "Microsoft YaHei UI",
     system-ui,
     sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-.app-shell {
+/* 页面背景：柔和渐变，让毛玻璃有内容可透（双类提升特异性，盖过 antd 的 .ant-layout 背景） */
+.app-shell.light {
+  background:
+    radial-gradient(1200px 800px at 85% -10%, #dbe7ff 0%, transparent 55%),
+    radial-gradient(900px 700px at -10% 100%, #ffe9f3 0%, transparent 50%),
+    radial-gradient(700px 500px at 50% 50%, #e7f4ee 0%, transparent 60%),
+    #f2f3f7;
+}
+
+.app-shell.dark {
+  background:
+    radial-gradient(1200px 800px at 85% -10%, #1d2a44 0%, transparent 55%),
+    radial-gradient(900px 700px at -10% 100%, #2a1d38 0%, transparent 50%),
+    radial-gradient(700px 500px at 50% 50%, #17302a 0%, transparent 60%),
+    #0d0e12;
+}
+
+.ant-layout.app-shell {
   height: 100vh;
-}
-
-.app-sider {
   display: flex;
   flex-direction: column;
-  padding: 18px 12px;
-  background: #122a22 !important;
-  border-right: 1px solid #2c4d41;
 }
 
-.app-sider .ant-layout-sider-children {
+/* ---------- 顶部栏 ---------- */
+
+.top-bar {
   display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.app-sider .ant-menu {
-  flex: 1;
-  margin-top: 18px;
-  background: transparent;
-  border-inline-end: 0 !important;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px 6px;
 }
 
 .brand {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 54px;
-  padding: 0 10px;
-}
-
-.brand-orbit {
-  width: 34px;
-  height: 34px;
-  border: 2px solid #52c41a;
-  border-radius: 50%;
-  box-shadow: inset -5px 0 0 #0f1e19;
-  transform: rotate(-18deg);
-}
-
-.brand-eyebrow {
-  color: #8fbfa9;
-  font-size: 10px;
-  letter-spacing: 0.2em;
+  align-items: baseline;
+  gap: 10px;
 }
 
 .brand-name {
-  color: #f2f7f4;
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
-.sider-foot {
-  padding: 12px 10px 0;
-  color: #7f9589;
+.brand-eyebrow {
+  color: var(--text-secondary);
   font-size: 11px;
-  text-align: center;
+  letter-spacing: 0.24em;
 }
+
+.theme-switch {
+  border-radius: 999px;
+}
+
+/* ---------- 内容区 ---------- */
 
 .app-content {
-  height: 100vh;
-  padding: 28px 36px 44px;
+  flex: 1;
+  padding: var(--page-pad-top) 28px 120px;
   overflow-y: auto;
 }
 
 .page-title {
-  margin: 0;
-}
-
-.page-title::after {
-  display: block;
-  width: 48px;
-  height: 3px;
-  margin-top: 8px;
-  content: "";
-  background: #52c41a;
-  border-radius: 3px;
+  margin: 0 0 4px;
+  font-size: 26px;
+  font-weight: 700;
 }
 
 .full-width {
@@ -113,48 +119,255 @@ body {
 }
 
 .mono {
-  color: #b7c8bf;
   font-family: "Cascadia Code", "Consolas", monospace;
   font-size: 12px;
   word-break: break-all;
+  color: var(--text-secondary);
 }
+
+/* ---------- 玻璃卡片 ---------- */
+
+.app-content .ant-card {
+  border-radius: 22px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+.app-content .ant-card .ant-card-head {
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.app-content .ant-card .ant-card-head-title {
+  font-weight: 600;
+}
+
+/* 弹层也走玻璃质感 */
+.ant-modal .ant-modal-content,
+.ant-message-notice .ant-message-notice-content,
+.ant-popover .ant-popover-inner {
+  border-radius: 18px;
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+}
+
+/* ---------- iOS 分组列表式设置行 ---------- */
+
+.setting-group .ant-card-body {
+  padding: 4px 20px;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+.setting-row + .setting-row {
+  border-top: 1px solid var(--glass-border);
+}
+
+.setting-row .row-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.setting-row .row-title {
+  font-size: 15px;
+}
+
+.setting-row .row-control {
+  flex-shrink: 0;
+  max-width: 55%;
+}
+
+.setting-row .row-control .ant-input,
+.setting-row .row-control .ant-input-password,
+.setting-row .row-control .ant-input-number {
+  border-radius: 12px;
+}
+
+.readonly-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.readonly-item {
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+}
+
+.readonly-item .readonly-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ---------- 首页身份卡 ---------- */
+
+.identity-card .ant-card-body {
+  padding: 20px 24px;
+}
+
+.identity-summary {
+  margin-bottom: 8px;
+  font-size: 15px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.identity-meta {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+/* 详情弹窗 */
+
+.identity-full {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  line-height: 1.8;
+  white-space: pre-wrap;
+}
+
+.identity-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 14px 0 4px;
+}
+
+.proposal-list {
+  margin-top: 18px;
+}
+
+.proposal-card {
+  margin-bottom: 12px;
+}
+
+.proposal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.proposal-change {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal-reason {
+  margin: 8px 0;
+}
+
+.proposal-ops {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.consent-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ---------- 底部 TabBar ---------- */
+
+.tab-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  z-index: 100;
+  display: flex;
+  gap: 4px;
+  padding: 6px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.5);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+}
+
+.tab-item {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 8px 26px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background 0.25s ease,
+    color 0.25s ease;
+}
+
+.tab-item.active {
+  background: var(--glass-border);
+  color: inherit;
+  font-weight: 600;
+}
+
+.tab-item:hover:not(.active) {
+  color: inherit;
+}
+
+/* ---------- 其他 ---------- */
 
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 16px;
-  margin-top: 20px;
+  margin-top: 16px;
 }
 
-.page-descriptions {
-  margin-top: 20px;
+.save-dock {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 14px 0 4px;
+  background: linear-gradient(to top, var(--glass-bg), transparent);
+  border-radius: 0 0 18px 18px;
 }
 
-@media (max-width: 760px) {
-  .app-shell {
-    flex-direction: column;
-  }
-
-  .app-sider,
-  .app-sider.ant-layout-sider,
-  .app-sider.ant-layout-sider-dark {
-    width: 100% !important;
-    max-width: 100% !important;
-    min-width: 100% !important;
-    height: auto;
-  }
-
-  .app-sider .ant-menu {
-    flex: none;
-  }
-
+@media (max-width: 640px) {
   .app-content {
-    height: auto;
-    min-height: 0;
-    padding: 20px 16px 32px;
+    padding: 12px 16px 110px;
+  }
+
+  .top-bar {
+    padding: 12px 16px 4px;
   }
 
   .meta-grid {
     grid-template-columns: 1fr;
+  }
+
+  .setting-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .setting-row .row-control {
+    max-width: 100%;
   }
 }

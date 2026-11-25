@@ -1,29 +1,7 @@
-import {
-  Alert,
-  Button,
-  Card,
-  Checkbox,
-  Col,
-  Empty,
-  Modal,
-  Popconfirm,
-  Row,
-  Space,
-  Statistic,
-  Tag,
-  Typography,
-  message,
-} from "antd";
+import { Button, Card, Checkbox, Modal, Popconfirm, Tag, Typography, message } from "antd";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { IdentityOverview, ProposalView } from "../types";
-
-const gateText: Record<IdentityOverview["gate"], string> = {
-  run: "可运行",
-  pending_limit: "待审批已满",
-  global_cooldown: "全局冷却中",
-  disabled: "未启用",
-};
 
 const riskColor: Record<ProposalView["riskLevel"], string> = {
   low: "green",
@@ -40,8 +18,8 @@ const riskText: Record<ProposalView["riskLevel"], string> = {
 export default function IdentityPage() {
   const [overview, setOverview] = useState<IdentityOverview | null>(null);
   const [proposals, setProposals] = useState<ProposalView[]>([]);
-  const [loading, setLoading] = useState(true);
   const [deciding, setDeciding] = useState<string | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [consentModal, setConsentModal] = useState<ProposalView | null>(null);
   const [triggering, setTriggering] = useState(false);
   const [messageApi, contextHolder] = message.useMessage();
@@ -53,7 +31,6 @@ export default function IdentityPage() {
     ]);
     if (overviewResult.ok && overviewResult.data) setOverview(overviewResult.data);
     if (proposalsResult.ok && proposalsResult.data) setProposals(proposalsResult.data);
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -105,7 +82,7 @@ export default function IdentityPage() {
       if (data?.proposalId) {
         messageApi.success("演化已生成新提案");
       } else {
-        messageApi.info("本轮无新提案（证据不足或模型未识别到变化）");
+        messageApi.info("本轮无新提案");
       }
       await refresh();
     } else {
@@ -114,129 +91,123 @@ export default function IdentityPage() {
     setTriggering(false);
   };
 
-  if (loading) return <Card loading />;
+  const pendingCount = overview?.pendingCount ?? proposals.length;
+  const identityText = overview?.text?.trim();
 
   return (
-    <Space direction="vertical" size={20} className="full-width">
+    <>
       {contextHolder}
-      <Typography.Title level={3} className="page-title">
-        身份演化
+      <Typography.Title level={2} className="page-title">
+        首页
       </Typography.Title>
 
-      <Row gutter={16}>
-        <Col span={6}>
-          <Card>
-            <Statistic title="身份版本" value={overview?.version ?? "—"} />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic title="待审批" value={overview?.pendingCount ?? 0} />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic title="演化状态" value={overview ? gateText[overview.gate] : "—"} />
-          </Card>
-        </Col>
-        <Col span={6}>
-          <Card>
-            <Statistic
-              title="上次检查"
-              value={overview?.latestCheckAt ? new Date(overview.latestCheckAt).toLocaleString() : "从未"}
-            />
-          </Card>
-        </Col>
-      </Row>
-
       <Card
-        title="当前身份"
+        className="identity-card"
+        title="身份演化"
         extra={
-          <Space>
-            <Button
-              size="small"
-              loading={triggering}
-              disabled={overview?.gate !== "run"}
-              onClick={() => void trigger()}
-            >
-              手动演化
-            </Button>
-            {overview && overview.version !== null && (
-              <Popconfirm title="确定回滚到上一版本吗？" onConfirm={() => void rollback()}>
-                <Button danger size="small">
-                  回滚
-                </Button>
-              </Popconfirm>
-            )}
-          </Space>
+          pendingCount > 0 ? (
+            <Tag color="orange" bordered={false}>
+              {pendingCount} 条待审批
+            </Tag>
+          ) : null
         }
+        actions={[
+          <Button
+            key="detail"
+            type="primary"
+            onClick={() => setDetailOpen(true)}
+          >
+            查看详情
+          </Button>,
+        ]}
       >
-        <Typography.Paragraph className="mono" style={{ whiteSpace: "pre-wrap" }}>
-          {overview?.text ?? "加载中…"}
-        </Typography.Paragraph>
+        {identityText ? (
+          <Typography.Paragraph
+            className="identity-summary"
+            ellipsis={{ rows: 4, expandable: false }}
+          >
+            {identityText}
+          </Typography.Paragraph>
+        ) : (
+          <Typography.Text type="secondary">还没有身份</Typography.Text>
+        )}
+        <div className="identity-meta">
+          {overview?.version !== null && overview !== null ? (
+            <span>v{overview.version}</span>
+          ) : null}
+        </div>
       </Card>
 
-      <Card title="待审批提案">
-        {proposals.length === 0 ? (
-          <Empty description="暂无待审批提案" />
-        ) : (
-          proposals.map((proposal) => (
-            <Card
-              key={proposal.id}
-              type="inner"
-              style={{ marginBottom: 12 }}
-              title={
-                <Space>
-                  <Tag>{proposal.fieldKey}</Tag>
-                  <Tag color={riskColor[proposal.riskLevel]}>{riskText[proposal.riskLevel]}</Tag>
-                  <Typography.Text type="secondary">置信度 {proposal.confidence}</Typography.Text>
-                </Space>
-              }
-              actions={[
-                <Button
-                  key="approve"
-                  type="primary"
-                  size="small"
-                  loading={deciding === proposal.id}
-                  onClick={() => setConsentModal(proposal)}
-                >
-                  批准
-                </Button>,
-                <Popconfirm
-                  key="reject"
-                  title="确定拒绝这条提案吗？"
-                  onConfirm={() => void reject(proposal)}
-                >
-                  <Button danger size="small" loading={deciding === proposal.id}>
-                    拒绝
-                  </Button>
-                </Popconfirm>,
-              ]}
-            >
-              <Space direction="vertical" style={{ width: "100%" }}>
-                {proposal.beforeValue && (
-                  <div>
-                    <Typography.Text type="secondary">当前值：</Typography.Text>
-                    <Typography.Text delete>{proposal.beforeValue}</Typography.Text>
-                  </div>
-                )}
-                <div>
-                  <Typography.Text type="secondary">新值：</Typography.Text>
+      <Modal
+        title="身份详情"
+        open={detailOpen}
+        onCancel={() => setDetailOpen(false)}
+        footer={null}
+        width={560}
+      >
+        <div className="identity-full">
+          {identityText ?? "还没有身份"}
+        </div>
+        <div className="identity-actions">
+          <span className="mono">{overview?.version !== null && overview !== null ? `v${overview.version}` : ""}</span>
+          <Button size="small" loading={triggering} onClick={() => void trigger()}>
+            手动演化
+          </Button>
+          {overview && overview.version !== null ? (
+            <Popconfirm title="确定回滚到上一版本吗？" onConfirm={() => void rollback()}>
+              <Button danger size="small">
+                回滚
+              </Button>
+            </Popconfirm>
+          ) : null}
+        </div>
+
+        {proposals.length > 0 ? (
+          <div className="proposal-list">
+            <Typography.Title level={5}>待审批提案</Typography.Title>
+            {proposals.map((proposal) => (
+              <Card key={proposal.id} className="proposal-card" size="small">
+                <div className="proposal-head">
+                  <Tag bordered={false}>{proposal.fieldKey}</Tag>
+                  <Tag color={riskColor[proposal.riskLevel]} bordered={false}>
+                    {riskText[proposal.riskLevel]}
+                  </Tag>
+                  <span className="mono">{proposal.confidence}</span>
+                </div>
+                <div className="proposal-change">
+                  {proposal.beforeValue ? (
+                    <Typography.Text delete type="secondary">
+                      {proposal.beforeValue}
+                    </Typography.Text>
+                  ) : null}
                   <Typography.Text strong>{proposal.afterValue}</Typography.Text>
                 </div>
-                <div>
-                  <Typography.Text type="secondary">理由：</Typography.Text>
+                <Typography.Paragraph type="secondary" className="proposal-reason">
                   {proposal.reason}
+                </Typography.Paragraph>
+                <div className="proposal-ops">
+                  <Button
+                    type="primary"
+                    size="small"
+                    loading={deciding === proposal.id}
+                    onClick={() => setConsentModal(proposal)}
+                  >
+                    批准
+                  </Button>
+                  <Popconfirm
+                    title="确定拒绝这条提案吗？"
+                    onConfirm={() => void reject(proposal)}
+                  >
+                    <Button danger size="small" loading={deciding === proposal.id}>
+                      拒绝
+                    </Button>
+                  </Popconfirm>
                 </div>
-                <Alert
-                  type="info"
-                  message={`证据消息 ID：${proposal.evidenceMessageIds.join(", ") || "无"}`}
-                />
-              </Space>
-            </Card>
-          ))
-        )}
-      </Card>
+              </Card>
+            ))}
+          </div>
+        ) : null}
+      </Modal>
 
       <Modal
         title="确认应用身份变更"
@@ -245,7 +216,7 @@ export default function IdentityPage() {
         footer={null}
       >
         {consentModal && (
-          <Space direction="vertical" style={{ width: "100%" }}>
+          <div className="consent-body">
             <div>
               <Typography.Text type="secondary">字段：</Typography.Text>
               {consentModal.fieldKey}
@@ -265,9 +236,9 @@ export default function IdentityPage() {
             >
               确认应用
             </Button>
-          </Space>
+          </div>
         )}
       </Modal>
-    </Space>
+    </>
   );
 }

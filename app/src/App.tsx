@@ -1,89 +1,99 @@
+import { Segmented } from "antd";
 import {
-  AppstoreOutlined,
-  FileTextOutlined,
-  SendOutlined,
-  UserOutlined,
-} from "@ant-design/icons";
-import { ConfigProvider, Layout, Menu, theme } from "antd";
+  MonitorOutlined,
+  MoonOutlined,
+  SunOutlined,
+} from "./icons";
+import { ConfigProvider, Layout } from "antd";
 import { useEffect, useState } from "react";
-import FilesPage from "./pages/FilesPage";
 import IdentityPage from "./pages/IdentityPage";
-import OverviewPage from "./pages/OverviewPage";
-import ServicePage from "./pages/ServicePage";
-import type { ProcessPhase } from "./types";
+import SystemPage from "./pages/SystemPage";
+import {
+  buildTheme,
+  loadThemeMode,
+  saveThemeMode,
+  useResolvedDark,
+  type ThemeMode,
+} from "./theme";
 
-const phaseColor: Record<ProcessPhase, string> = {
-  running: "#52c41a",
-  stopped: "#8c8c8c",
-  starting: "#fadb14",
-  error: "#ff4d4f",
-  unavailable: "#595959",
-};
-
-const items = [
-  { key: "overview", icon: <AppstoreOutlined />, label: "概览" },
-  { key: "service", icon: <SendOutlined />, label: "通道服务" },
-  { key: "identity", icon: <UserOutlined />, label: "身份演化" },
-  { key: "files", icon: <FileTextOutlined />, label: "本机文件" },
+const tabs = [
+  { key: "identity", label: "首页" },
+  { key: "system", label: "系统" },
 ];
 
-function currentPage(): string {
+const modeOptions = [
+  { value: "light", icon: <SunOutlined /> },
+  { value: "system", icon: <MonitorOutlined /> },
+  { value: "dark", icon: <MoonOutlined /> },
+];
+
+function currentTab(): string {
   const hash = window.location.hash.replace(/^#\/?/, "");
-  return items.some((item) => item.key === hash) ? hash : "overview";
+  return tabs.some((tab) => tab.key === hash) ? hash : "identity";
+}
+
+function TabBar({
+  page,
+  onPick,
+}: {
+  page: string;
+  onPick: (key: string) => void;
+}) {
+  return (
+    <nav className="tab-bar">
+      {tabs.map((tab) => (
+        <button
+          key={tab.key}
+          type="button"
+          className={`tab-item${page === tab.key ? " active" : ""}`}
+          onClick={() => onPick(tab.key)}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </nav>
+  );
 }
 
 export default function App() {
-  const [page, setPage] = useState(currentPage);
-  const { darkAlgorithm } = theme;
+  const [page, setPage] = useState(currentTab);
+  const [mode, setMode] = useState<ThemeMode>(loadThemeMode);
+  const dark = useResolvedDark(mode);
 
   useEffect(() => {
-    const handleHashChange = () => setPage(currentPage());
+    const handleHashChange = () => setPage(currentTab());
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
   }, []);
 
+  const pick = (key: string) => {
+    window.location.hash = `#/${key}`;
+    setPage(key);
+  };
+
   return (
-    <ConfigProvider
-      theme={{
-        algorithm: darkAlgorithm,
-        token: {
-          colorPrimary: "#52c41a",
-          colorInfo: "#52c41a",
-          borderRadius: 10,
-          colorBgBase: "#0f1e19",
-          colorBgContainer: "#162c24",
-          colorBgElevated: "#1b332b",
-          colorBorder: "#2c4d41",
-          colorText: "#f2f7f4",
-          colorTextSecondary: "#b7c8bf",
-        },
-      }}
-    >
-      <Layout className="app-shell">
-        <Layout.Sider width={224} className="app-sider" theme="dark">
+    <ConfigProvider theme={buildTheme(dark)}>
+      <Layout className={`app-shell${dark ? " dark" : " light"}`}>
+        <header className="top-bar">
           <div className="brand">
-            <div className="brand-orbit" />
-            <div>
-              <div className="brand-eyebrow">见微知著</div>
-              <div className="brand-name">知微</div>
-            </div>
+            <div className="brand-name">知微</div>
+            <div className="brand-eyebrow">见微知著</div>
           </div>
-          <Menu
-            mode="inline"
-            items={items}
-            selectedKeys={[page]}
-            onClick={({ key }) => {
-              window.location.hash = `#/${key}`;
+          <Segmented
+            className="theme-switch"
+            value={mode}
+            options={modeOptions}
+            onChange={(value) => {
+              setMode(value as ThemeMode);
+              saveThemeMode(value as ThemeMode);
             }}
           />
-          <div className="sider-foot">关闭窗口仅隐藏到托盘</div>
-        </Layout.Sider>
+        </header>
         <Layout.Content className="app-content">
-          {page === "overview" && <OverviewPage phaseColor={phaseColor} />}
-          {page === "service" && <ServicePage />}
           {page === "identity" && <IdentityPage />}
-          {page === "files" && <FilesPage />}
+          {page === "system" && <SystemPage />}
         </Layout.Content>
+        <TabBar page={page} onPick={pick} />
       </Layout>
     </ConfigProvider>
   );

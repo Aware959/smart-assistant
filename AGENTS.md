@@ -47,6 +47,12 @@
   - 不要为可选项反复起后台查资料的进程：web 搜索有成本，查十来次仍无果就停下，并在说明里
     写明「未查到」。
 
+## UI 预览验证
+
+- **不要每次都截图**：验证 UI 优先用文本类工具（`preview_snapshot` 看结构、`preview_inspect` 看样式、
+  `preview_console_logs` 看报错），截图只在用户要求看效果或纯视觉改动需要展示时才用。
+- 浏览器预览入口是 `app/preview.html`（mock 桥，不需要 Tauri 壳）；真机验证才走 `npm run app:dev`。
+
 ## 文档布局
 
 - `README.md`：只保留项目介绍（简介 / 组成 / 快速启动）。

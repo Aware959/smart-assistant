@@ -91,6 +91,26 @@
     runtimeSettingsSchema.map(([key, , , defaultValue]) => [key, defaultValue]),
   );
   const gatewayValues = Object.fromEntries(gatewaySchema.map(([key, , , d]) => [key, d]));
+  // 身份演化 mock：一条待审批提案 + 一个当前身份概览。
+  const identity = {
+    version: 3,
+    pendingCount: 1,
+    gate: "run",
+    latestCheckAt: "2026-11-25T08:30:00Z",
+    text: "你叫知微，是一只安静的助手，喜欢把观察放在开口之前。语气温和，不堆语气词；对不清楚的事先确认再回答。",
+  };
+  const proposals = [
+    {
+      id: "prop-mock-1",
+      fieldKey: "tone",
+      riskLevel: "low",
+      confidence: 0.82,
+      beforeValue: "语气温和，不堆语气词",
+      afterValue: "语气更轻快，偶尔用一点幽默",
+      reason: "最近两周的对话里，轻快回复的追问率更高。",
+      evidenceMessageIds: [101, 118, 142],
+    },
+  ];
 
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: "settings" }, currentWebview: {} },
@@ -156,6 +176,24 @@
           revision += 1;
           Object.assign(runtimeValues, args.changes ?? {});
           return { ok: true, data: { revision, values: { ...runtimeValues } }, error: null };
+        case "identity_overview":
+          return { ok: true, data: { ...identity }, error: null };
+        case "identity_proposals":
+          return { ok: true, data: proposals.map((p) => ({ ...p })), error: null };
+        case "approve_identity_proposal":
+          identity.pendingCount = 0;
+          identity.version += 1;
+          proposals.length = 0;
+          return { ok: true, data: {}, error: null };
+        case "reject_identity_proposal":
+          identity.pendingCount = 0;
+          proposals.length = 0;
+          return { ok: true, data: proposals, error: null };
+        case "rollback_identity":
+          identity.version = Math.max(1, identity.version - 1);
+          return { ok: true, data: {}, error: null };
+        case "trigger_evolution":
+          return { ok: true, data: { proposalId: "prop-mock-new" }, error: null };
         case "gateway_settings":
           return {
             envFile: gateway.envFile,

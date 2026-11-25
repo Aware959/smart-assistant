@@ -409,3 +409,91 @@ fn production_run_once_collects_evidence_and_respects_daily_gate() {
     );
     assert_eq!(llm.calls().len(), 1);
 }
+
+/// json_object 模式下部分端点把 confidence 给成 0~1 浮点数；
+/// 反序列化层应映射成枚举字符串，而不是让整轮演化失败。
+#[test]
+fn numeric_confidence_is_coerced_into_enum_string() {
+    let numeric = |value: f64| {
+        serde_json::json!({
+            "field_key": "voice_style",
+            "after_value": "更愿意主动分享自己的看法",
+            "reason": "证据充分",
+            "evidence_message_ids": ["m1"],
+            "confidence": value
+        })
+        .to_string()
+    };
+
+    for (value, expected) in [(0.9, "high"), (0.55, "medium"), (0.2, "low")] {
+        let parsed: Option<RawProposal> =
+            serde_json::from_str(&numeric(value)).expect("数字 confidence 应反序列化成功");
+        let parsed = parsed.expect("对象本身应存在");
+        assert_eq!(parsed.confidence.as_deref(), Some(expected));
+    }
+}
+
+/// 字符串 confidence 原样通过，交给下游 parse_confidence 终审；
+/// 其他 JSON 类型仍应拒绝，而不是静默吞掉。
+#[test]
+fn string_confidence_passes_through_and_other_types_reject() {
+    let string_case: Option<RawProposal> = serde_json::from_str(
+        &serde_json::json!({
+            "field_key": "voice_style",
+            "after_value": "更短",
+            "reason": "证据",
+            "evidence_message_ids": ["m1"],
+            "confidence": "high"
+        })
+        .to_string(),
+    )
+    .expect("字符串 confidence 应反序列化成功");
+    let string_case = string_case.expect("对象本身应存在");
+    assert_eq!(string_case.confidence.as_deref(), Some("high"));
+
+    // "MEDIUM" 大小写也原样保留，parse_confidence 会做小写归一
+    let loose: Option<RawProposal> = serde_json::from_str(
+        &serde_json::json!({
+            "field_key": "voice_style",
+            "after_value": "更短",
+            "reason": "证据",
+            "evidence_message_ids": ["m1"],
+            "confidence": "MEDIUM"
+        })
+        .to_string(),
+    )
+    .expect("大写字符串 confidence 应反序列化成功");
+    assert_eq!(loose.unwrap().confidence.as_deref(), Some("MEDIUM"));
+
+    let bad: std::result::Result<Option<RawProposal>, serde_json::Error> = serde_json::from_str(
+        &serde_json::json!({
+            "field_key": "voice_style",
+            "after_value": "更短",
+            "reason": "证据",
+            "evidence_message_ids": ["m1"],
+            "confidence": ["low"]
+        })
+        .to_string(),
+    );
+    assert!(bad.is_err(), "数组 confidence 应被拒绝");
+}
+
+/// 端到端：数字 confidence 的提案能正常走完 agent.run 落库，
+/// 不再出现「floating point expected a string」整轮失败。
+#[test]
+fn numeric_confidence_proposal_creates_pending_entry() {
+    let (db, message_id, snapshot) = setup();
+    let response = serde_json::json!({
+        "field_key": "voice_style",
+        "after_value": "更愿意主动分享自己的看法，但仍然保持短句",
+        "reason": "用户明确表示喜欢有观点的回复",
+        "evidence_message_ids": [message_id],
+        "confidence": 0.55
+    })
+    .to_string();
+    let llm = FakeLlm::returning(response);
+    let evolution = agent(db.clone(), EvolutionConfig::enabled("test-model"), llm);
+
+    let created = evolution.run(&snapshot, at(0)).unwrap().unwrap();
+    assert_eq!(created.proposal.confidence, "medium");
+}
