@@ -4,8 +4,9 @@
 //! 提案审批由后续身份服务接入；这里先把“哪些字段可以改、值必须满足什么条件”固定下来，
 //! 避免自动演化直接作用在无约束的 KV 文本上。
 //!
-//! 当前 MVP 的六个字段全部是 [`Mutability::ApprovalRequired`]：模型可以提出变更，
-//! 但任何变更都必须先经过人工确认，不能自动写入当前身份。
+//! 当前 MVP 的全部字段都是 [`Mutability::ApprovalRequired`]：模型可以提出变更，
+//! 但任何变更都必须先经过人工确认，不能自动写入当前身份。例外是 [`IdentityFieldKey::Appearance`]：
+//! 形象由用户选定后人工写入，演化代理不得提案修改（演化提示词里显式禁止）。
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -20,6 +21,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IdentityFieldKey {
     SelfConcept,
+    Appearance,
     Personality,
     Values,
     VoiceStyle,
@@ -29,8 +31,9 @@ pub enum IdentityFieldKey {
 
 impl IdentityFieldKey {
     /// 全部字段，顺序固定。
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::SelfConcept,
+        Self::Appearance,
         Self::Personality,
         Self::Values,
         Self::VoiceStyle,
@@ -42,6 +45,7 @@ impl IdentityFieldKey {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SelfConcept => "self_concept",
+            Self::Appearance => "appearance",
             Self::Personality => "personality",
             Self::Values => "values",
             Self::VoiceStyle => "voice_style",
@@ -54,6 +58,7 @@ impl IdentityFieldKey {
     pub fn label(self) -> &'static str {
         match self {
             Self::SelfConcept => "自我概念",
+            Self::Appearance => "形象",
             Self::Personality => "性格",
             Self::Values => "价值观",
             Self::VoiceStyle => "表达风格",
@@ -66,6 +71,7 @@ impl IdentityFieldKey {
     pub fn aliases(self) -> &'static [&'static str] {
         match self {
             Self::SelfConcept => &["身份定位", "自我概念"],
+            Self::Appearance => &["形象", "外貌"],
             Self::Personality => &["性格", "人格"],
             Self::Values => &["三观", "价值观"],
             Self::VoiceStyle => &["语气", "说话风格", "表达风格"],
@@ -95,6 +101,7 @@ impl IdentityFieldKey {
     pub fn spec(self) -> IdentityFieldSpec {
         let (max_chars, description) = match self {
             Self::SelfConcept => (400, "我是谁、如何看待自己"),
+            Self::Appearance => (300, "外貌与标志性形象的视觉描述"),
             Self::Personality => (400, "稳定的人格与性格倾向"),
             Self::Values => (500, "价值立场、原则与底线"),
             Self::VoiceStyle => (300, "表达长短、语气与称呼习惯"),
@@ -117,7 +124,7 @@ impl fmt::Display for IdentityFieldKey {
     }
 }
 
-/// 字段可变性。MVP 六个字段全部需要人工批准。
+/// 字段可变性。MVP 全部字段需要人工批准。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mutability {
     Immutable,
@@ -465,7 +472,7 @@ mod tests {
     #[test]
     fn canonical_keys_are_stable_and_unique() {
         let keys = IdentityFieldKey::ALL;
-        assert_eq!(keys.len(), 6);
+        assert_eq!(keys.len(), 7);
         for (i, key) in keys.into_iter().enumerate() {
             assert_eq!(key.as_str(), key.as_str().trim());
             assert!(!key.label().is_empty());
@@ -487,6 +494,8 @@ mod tests {
         let cases = [
             ("身份定位", IdentityFieldKey::SelfConcept),
             ("自我概念", IdentityFieldKey::SelfConcept),
+            ("形象", IdentityFieldKey::Appearance),
+            ("外貌", IdentityFieldKey::Appearance),
             ("性格", IdentityFieldKey::Personality),
             ("人格", IdentityFieldKey::Personality),
             ("三观", IdentityFieldKey::Values),

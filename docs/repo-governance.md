@@ -1,7 +1,7 @@
 # 仓库治理：审计、守卫与清理
 
 > 本文记录仓库治理机制的调研结论与落地约定。
-> 最后更新：2026-10-29
+> 最后更新：2026-11-25（guard 层从 Codex hooks 迁到 Claude Code hooks）
 
 ## 结论
 
@@ -22,7 +22,7 @@
 | 层 | 作用 | 运行时机 | 是否改代码 |
 |---|---|---|---|
 | `audit` | 全盘盘点目录、命名、归属、重复、死代码、文档漂移、依赖和清理候选 | 手动或上述事件触发 | 默认只读 |
-| `guard` | 对编辑动作做确定性的路径、命名和格式检查 | `PreToolUse` / `PostToolUse` / `Stop` | 只阻断或提示，不自动清理 |
+| `guard` | 对编辑动作做确定性的路径、命名和格式检查 | `PreToolUse` / `Stop`（Claude Code hooks） | 只阻断或提示，不自动清理 |
 | `skill/AGENTS` | 判断文件应归哪里、模块边界、是否拆分、是否值得修 | 任务开始时或审计时 | 由 agent 按批准的计划执行 |
 
 ### audit：低频全盘复盘
@@ -45,15 +45,14 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .agents/skills/repo-governance/scr
 
 ### guard：每次编辑的确定性守卫
 
-项目级 hook 配置在 `.codex/hooks.json`，脚本在 `.codex/hooks/repo_guard.ps1`。
+守卫已从 Codex hooks 迁到 **Claude Code hooks**（2026-11-25）。项目级配置在 `.claude/settings.json`，脚本在 `.claude/hooks/repo_guard.ps1`（PowerShell 5.1 兼容，UTF-8 BOM 必须保留）。
 
-- `PreToolUse`（仅 `apply_patch`）：拦截本仓库明确禁止主动修改的路径，并检查新增 Rust 文件命名、`docs/archive/` 目录名。
-- `PostToolUse`（仅 `apply_patch`）：检查本次补丁的 `file:line` 级问题；Rust 改动运行 `cargo fmt --all -- --check`，并检查行尾空白。
-- `Stop`：当本次工作区有后端 Rust 改动时，运行 `cargo fmt --check` 和 `cargo check --all-targets`；只在失败时阻断并返回简短原因。
+- `PreToolUse`（matcher `Write|Edit|NotebookEdit`）：拦截主线禁改路径（当前为 `backend/src/channels/ilink/**`），检查新增 Rust 文件 snake_case 命名、`docs/archive/` 目录名英文。阻断以退出码 2 + 简短中文原因。
+- `Stop`：工作区有后端 Rust 改动（含未跟踪文件）时运行 `cargo fmt --all -- --check` 与 `cargo check --all-targets`（基线零警告）；只在失败时阻断。
 
-守卫的成功路径保持静默。不要用 `--dangerously-bypass-hook-trust` 永久绕过信任；首次启用时按 Codex 的 hook 信任提示确认本仓库脚本。
+守卫的成功路径保持静默。原 Codex 方案的 PostToolUse 行级检查未迁移；不要在 hook 配置外永久绕过守卫。
 
-守卫只覆盖 `apply_patch`。如果使用 shell 命令直接写文件，路径保护不会生效；这类操作仍需遵守 `AGENTS.md` 和本 skill 的边界。
+注意：若用 shell 命令直接写文件，路径保护不会生效（PreToolUse 只覆盖 Write/Edit/NotebookEdit 工具）；这类操作仍需遵守 `AGENTS.md` 和本 skill 的边界。守卫脚本改动后用 Python `subprocess` 模拟 stdin JSON 回归（正例 + 反例 + 空 stdin 三类）。
 
 ### skill：语义判断
 
@@ -69,7 +68,7 @@ skill 的默认流程是 `audit -> report -> user approval -> phased fix`。移�
 
 ## Token 成本
 
-- `PreToolUse` / `PostToolUse` / `Stop` 的确定性命令本身不调用模型，通常不消耗模型 token。
+- `PreToolUse` / `Stop` 的确定性命令本身不调用模型，通常不消耗模型 token。
 - 只有阻断原因、`additionalContext`、错误日志，或导致模型重试时，才会增加 token。
 - 全盘审计会读取更多文件、调用更多推理，成本明显高于单次守卫；因此不要挂在每次编辑上。
 - 守卫只回传失败摘要，不输出完整扫描报告；全盘扫描的详细结果写入报告文件，模型只读摘要和相关片段。
@@ -85,8 +84,6 @@ skill 的默认流程是 `audit -> report -> user approval -> phased fix`。移�
 
 ## 参考
 
-- [Codex skills 文档](https://developers.openai.com/codex/skills)
-- [Codex hooks 文档](https://developers.openai.com/codex/hooks)
 - [Claude Code hooks 文档](https://code.claude.com/docs/en/hooks)
 - [tech-debt-skill](https://github.com/ksimback/tech-debt-skill)
 - [Drakaniia/skills](https://github.com/Drakaniia/skills)
@@ -96,7 +93,6 @@ skill 的默认流程是 `audit -> report -> user approval -> phased fix`。移�
 
 ## 启用方式
 
-1. 重新打开或新开一个 Codex 会话，让项目级 skill 和 hook 重新加载。
-2. 首次执行编辑时确认 `.codex/hooks/repo_guard.ps1` 的 hook 信任提示。
-3. 需要全盘复盘时显式调用 `$repo-governance`，先审计、后报告、再按阶段修复。
+1. 新开一个 Claude Code 会话，让项目级 `.claude/settings.json` 的 hooks 重新加载。
+2. 需要全盘复盘时显式调用 repo-governance skill（`.agents/skills/repo-governance/`），先审计、后报告、再按阶段修复。
 

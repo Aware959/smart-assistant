@@ -11,6 +11,9 @@
 //! zhiwei-cli config audit [--limit N]
 //! zhiwei-cli mcp list
 //! zhiwei-cli mcp call <服务器> <工具> [JSON 参数]
+//! zhiwei-cli identity show
+//! zhiwei-cli identity set <字段> <值>
+//! zhiwei-cli identity unset <字段>
 //! ```
 //!
 //! `db` 与 `sticker` 直接操作本地数据；`config` 只通过 `zhiwei-service`
@@ -42,6 +45,9 @@ const USAGE: &str = "\
   zhiwei-cli config audit [--limit N]
   zhiwei-cli mcp list
   zhiwei-cli mcp call <服务器> <工具> [JSON 参数]
+  zhiwei-cli identity show
+  zhiwei-cli identity set <字段> <值>
+  zhiwei-cli identity unset <字段>
   zhiwei-cli --version";
 
 fn main() -> ExitCode {
@@ -57,6 +63,7 @@ fn main() -> ExitCode {
         [group, sub, rest @ ..] if group == "sticker" => cmd_sticker(sub, rest),
         [group, sub, rest @ ..] if group == "config" => cmd_config(sub, rest),
         [group, sub, rest @ ..] if group == "mcp" => cmd_mcp(sub, rest),
+        [group, sub, rest @ ..] if group == "identity" => cmd_identity(sub, rest),
         _ => Err(USAGE.to_string()),
     };
     match result {
@@ -208,6 +215,67 @@ fn print_db_status(status: &db::VecStatus) {
         println!("  状态          : 正常，记忆检索可用");
     } else {
         println!("  状态          : 表缺失且无签名（全新库由主程序创建）");
+    }
+}
+
+/// `identity` 子命令：查看当前身份、人工写入 / 删除身份字段。
+///
+/// 形象这类由用户直接维护的字段不走提案审批；这里走
+/// [`IdentityService::set_field_manually`]，留完整版本审计，不绕过校验手改库。
+fn cmd_identity(sub: &str, args: &[String]) -> Result<(), String> {
+    let cfg = Config::get();
+    let app =
+        smart_assistant::core::app::App::new(&cfg.db_path).map_err(|error| error.to_string())?;
+    let now = chrono::Utc::now();
+    match sub {
+        "show" => {
+            let view = app.identity.current();
+            match view.version {
+                Some(0) => println!("当前身份（未版本化，旧 self_profile）"),
+                Some(version) => println!("当前身份（v{version}）"),
+                None => println!("当前身份（读取失败，按无人设运行）"),
+            }
+            println!(
+                "{}",
+                if view.text.is_empty() {
+                    "（身份为空）"
+                } else {
+                    &view.text
+                }
+            );
+            Ok(())
+        }
+        "set" => {
+            let [field, value] = args else {
+                return Err(format!(
+                    "用法：zhiwei-cli identity set <字段> <值>\n\n{USAGE}"
+                ));
+            };
+            let version = app
+                .identity
+                .set_field_manually(field, Some(value), "人工维护", "cli", now)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "已写入 {}（身份 v{}，来源 {}）",
+                field, version.version, version.source
+            );
+            Ok(())
+        }
+        "unset" => {
+            let [field] = args else {
+                return Err(format!("用法：zhiwei-cli identity unset <字段>\n\n{USAGE}"));
+            };
+            let version = app
+                .identity
+                .set_field_manually(field, None, "人工维护（删除字段）", "cli", now)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "已删除 {}（身份 v{}，来源 {}）",
+                field, version.version, version.source
+            );
+            Ok(())
+        }
+        _ => Err(format!("未知 identity 子命令：{sub}\n\n{USAGE}")),
     }
 }
 

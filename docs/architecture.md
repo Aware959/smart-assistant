@@ -2,7 +2,7 @@
 
 > 本文描述后端 Rust 内核的分层结构、核心数据流与各子系统的协作方式。
 > 
-> 上一次更新：2026-10-05
+> 上一次更新：2026-11-25（Web 端（zhiwei-web + src/api）已删除，传输层只剩 Telegram / iLink / control；身份契约新增 appearance 字段）
 
 ---
 
@@ -11,14 +11,14 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  传输层（外部适配层，经 bin 接线）                                     │
-│  ┌──────────┐  ┌──────────────┐  ┌────────────────┐                │
-│  │ HTTP/WS  │  │ Telegram     │  │ iLink 微信     │                │
-│  │ /chat/   │  │ long-poll    │  │ long-poll      │                │
-│  │ stream   │  │ polling      │  │                │                │
-│  └────┬─────┘  └──────┬───────┘  └───────┬────────┘                │
-│       │ Agent+Sessions │ Agent+Sessions                                │
-│       │                │ + ChannelsPusher（主动外发唯一实现）        │
-├───────┴───────────────┴──────────────────┴──────────────────────────┤
+│  ┌──────────────┐  ┌────────────────┐  ┌──────────────────┐        │
+│  │ Telegram     │  │ iLink 微信     │  │ control/http.rs  │        │
+│  │ long-poll    │  │ long-poll      │  │ 本地控制接口      │        │
+│  │ polling      │  │                │  │ (面板/CLI 读写)   │        │
+│  └──────┬───────┘  └───────┬────────┘  └────────┬─────────┘        │
+│         │ Agent+Sessions   │ Agent+Sessions     │ IdentityService /│
+│         │ + ChannelsPusher（主动外发唯一实现）    │ SettingsService  │
+├─────────┴──────────────────┴────────────────────┴───────────────────┤
 │  应用本体：core/（具体类型直连，能力以具体类型接线）                    │
 │  app.rs      组合根 App：开 db、装配 Sessions / Llm / Store / Profile  │
 │              → 注入 Agent。只装配不转发。                             │
@@ -99,9 +99,10 @@ TG 长轮询收到 Update
   │       └─ ⚠ 未传 exclude_id 时必须在"本条用户消息入库之前"取（Web/iLink 路径），
   │           否则本轮消息会被算进历史、在提示词里出现两遍
   │     context::system_prompt(profile) → core/context/prompt.rs
-  │       ├─ 角色设定：self_profile KV 表（AI 自我属性，中文原文注入，最高优先级；
-  │       │   由 core/self_profile::Profile::block 渲染为「性格：…；人格：…」，
-  │       │   对话与主动开口两处共用同一 persona_block，空表整块省略）
+  │       ├─ 角色设定：身份快照（self_profile_versions 最新版本，旧 KV 为兼容回退；
+  │       │   由 core/identity::Profile 渲染为「自我概念：…；形象：…；性格：…」
+  │       │   七字段 canonical 顺序，对话与主动开口两处共用同一 persona_block，
+  │       │   空身份整块省略；appearance 由人工维护，演化代理禁写）
   │       ├─ 英文行为指令：**身份 + 3 条变长示例**（短/长/短）。
   │       │   输出形状（换行、长度、句数）只由示例表达，不写禁令条目——
   │       │   模型对"不要用空行"这类禁令抑制力很弱，示例才是分布信号。
@@ -397,7 +398,7 @@ remember(content, kind, supersedes?)
 ```
 search(query)
   │
-  ├─ db.vec_search_usable() → 向量签名不匹配时静默降级为空（等 sa-mem rebuild）
+  ├─ db.vec_search_usable() → 向量签名不匹配时静默降级为空（等 zhiwei-cli db rebuild）
   ├─ llm::embedding::embed_text(query) → EMBEDDING_API_URL（同步阻塞）
   └─ db::memory::search_similar(vector, limit)
        SELECT ... FROM memory_vectors
@@ -422,7 +423,8 @@ SQLite + WAL 模式 + sqlite-vec 向量扩展。
 | `memories` | 记忆事实（content / memory_type[CHECK 枚举] / expires_at / message_id） |
 | `memory_vectors` | sqlite-vec0 向量表（memory_id / embedding float32[]） |
 | `channel_sessions` | 通道 ↔ 会话映射（channel + external_id → session_id）；主动候选的来源表 |
-| `self_profile` | AI 自我属性 KV（key / value / updated_at），人设数据源 |
+| `self_profile` | AI 自我属性 KV（key / value / updated_at），旧渲染兼容层；真源是 `self_profile_versions` |
+| `self_profile_versions` | 身份版本审计（version / snapshot JSON / proposal_id / source / reason / operator），单事务随每次身份变更追加 |
 | `pending_retry` | 失败轮次静默重试队列（§2.2；attempts / next_attempt_at，进程重启不丢） |
 
 版本化迁移记录（v17 压平基线之后追加的步骤；判据不变——DROP / 重建表必须升版本号）：
@@ -484,22 +486,20 @@ INTENT_MAX_IDLE_DAYS=7       # 超过多少天未回复则不再打扰
 
 ## 9. 对外接口
 
-### 9.1 HTTP/WS/SSE（backend/默认端口 3000）
+### 9.1 本地控制接口（control/http.rs，loopback）
 
-由 axum 框架托管，路由挂载在 `api/mod.rs build_router()`。
+`zhiwei-service` 内的 axum 路由，只监听 loopback，供桌面面板（Tauri invoke）与
+`zhiwei-cli config` 读写运行时配置、身份提案与演化调度。Web 会话端
+（HTTP/WS/SSE 对话接口 + `src/api/` + `zhiwei-web` bin）已于 2026-11-25 **整体删除**：
+对话入口只剩通道（Telegram 主线），管理面收敛在 control 接口。将来若重启 Web 端，
+优先复用 `app/` 前端 + control 接口扩展，不恢复旧 `src/api/`。
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/v1/chat/stream` | POST | SSE 流式对话（OpenAI 兼容格式）；最后一条 `event: done` 携带 `ChatOutput JSON` |
-| `/v1/chat/stream` | GET  | WebSocket 实时对话（同一流水线，文本触发 → delta 实时下发） |
+### 9.2 运维 CLI（zhiwei-cli）
 
-会话 / 消息 / 记忆的管理端点（`/v1/sessions`、`/v1/memory`、`/v1/memory/search` 等）已随 Web
-管理页**整体移除**：记忆 / 情景状态是 core 端口的实现，对 Web 单独开管理面会把"存储实现"
-变成公共 API，破坏分层。会话由首轮对话自动创建（`session_id` 缺省）。
+`db check / rebuild`（向量签名）、`sticker fetch / show`、`config get / set`、
+`mcp list / call`、`identity show / set / unset`（人工身份写入，走完整校验与版本审计）。
 
-SPA 静态文件由 `SMART_ASSISTANT_WEB_DIST` 指定目录，同源托管，未知路径回退 index.html。
-
-### 9.2 移动端（Tauri）
+### 9.3 移动端（Tauri）
 
 研发早期先稳定对话与内核：**UniFFI 导出已移除**（`crate-type` 改回纯 rlib，无 cdylib，
 无 Kotlin 绑定）。移动端改由 Tauri v2 承担——与桌面端共用 `app/` 这一份 React 面板与
@@ -520,7 +520,7 @@ Kotlin 前台服务与通知。
 2. **LLM 阻塞调用**：genai 是阻塞 API，在 async 通道里一律 `tokio::task::spawn_blocking`。
 3. **消息 vs 记忆**：`messages` 是原始对话记录；`memories` 只沉淀事实，来源用 `message_id` 关联。
 4. **Schema 迁移**：当前 schema 完全由 `init_schema` 的 `CREATE TABLE IF NOT EXISTS` 定义（单一真源），新库直接建最新结构。历史逐版本迁移（v6~v16）已压平到 v17 基线——单人单库、真实库已升最新，保留逐版本补丁只膨胀 `schema.rs`。压平后旧版本库不再平滑升级，需 `rm` 后重建。仅保留一条 DROP 例外（v17 删三张死表），判据仍是同一条——**要删的东西必须能从别处重算出来 / 不被任何逻辑当真值来源**（见 §7）。
-5. **向量签名锁定**：embedding 模型变更不会自动重建，由独立工具 `cargo run --bin sa-mem -- rebuild` 手动触发，保证旧库不丢数据。
+5. **向量签名锁定**：embedding 模型变更不会自动重建，由独立工具 `cargo run --bin zhiwei-cli -- db rebuild` 手动触发，保证旧库不丢数据。
 6. **vec0 kNN 约束**：查询必须写 `k = ?`，把 LIMIT 写在外层查询会报 "A LIMIT or 'k = ?' constraint is required"。
 7. **JSON 结构化输出**：开口决策走 json_schema（支持的模型自动约束输出格式，不支持时退化为自由 JSON + 容错解析）。模型输出一律当**不可信输入**：字段缺失 / `null` / 类型不符 / 空白都回退默认值，不让一次格式抖动变成业务失败。记忆写入改由工具调用承载（参数有 schema 约束），不再走独立判定。
 8. **输出与写入都由模型自己发起**：模型想说的话必须调 `send_message`（唯一对外出口），想记的事必须调 `remember`。记忆不再挂在对话路径之外做旁路判定——过去每条消息都要跑一次"这条值得记吗"，而判定者只看得到单条消息，写出一堆悬空指代。现在模型在同一循环里既看得见整段对话、又能直接落笔，`remember` 的三道闸写在**工具描述**里（每轮都在上下文，且"怎么用"与"什么时候用"同处一地）。

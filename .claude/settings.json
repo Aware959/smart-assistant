@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"D:\\MyPoject\\Rust\\smart-assistant\\.claude\\hooks\\repo_guard.ps1\" PreToolUse",
+            "shell": "powershell"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"D:\\MyPoject\\Rust\\smart-assistant\\.claude\\hooks\\repo_guard.ps1\" Stop",
+            "shell": "powershell"
+          }
+        ]
+      }
+    ]
+  }
+}

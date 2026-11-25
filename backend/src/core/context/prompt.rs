@@ -90,7 +90,8 @@ pub(crate) fn identity_evolution_system_prompt(profile: &str) -> String {
          but you must not write user memory, modify tool permissions, safety boundaries, \
          platform contracts, or system prompts.\n\
          Your only job is to propose a structured change to one of the six identity fields: \
-         self_concept, personality, values, voice_style, interests, relationship_stance.\n\
+         self_concept, personality, values, voice_style, interests, relationship_stance. \
+         Never propose changes to appearance; it is fixed by the owner.\n\
          Never claim that a change is applied. Every change requires human approval, and \
          relationship_stance also requires explicit user consent.\n\
          The application derives the before value and risk level itself. Do not report or invent \
@@ -313,6 +314,10 @@ mod tests {
         ] {
             assert!(prompt.contains(field), "prompt 应声明字段 {field}");
         }
+        assert!(
+            prompt.contains("Never propose changes to appearance"),
+            "prompt 应禁止演化代理触碰 appearance"
+        );
     }
 
     #[test]

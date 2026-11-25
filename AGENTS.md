@@ -17,16 +17,16 @@
 
 **当前唯一主线是 Telegram 通道。**
 
-- **Web 端与 iLink 端不要动**：涉及 `src/api/**`（`api/chat.rs`、`api/dto.rs` 等 HTTP/SSE/WS 接口）、
-  `src/channels/ilink/**`、前端代码，一律**不主动改**。除非用户明确点名要求开发这两端，
-  才允许动。
+- **iLink 端不要动**：涉及 `src/channels/ilink/**`、前端代码，一律**不主动改**。
+  除非用户明确点名要求开发，才允许动。Web 端（HTTP API）已删除下线——若将来重启，
+  优先复用 `app/` 前端 + control 接口，不再恢复旧 `src/api/`。
 - **共享代码改动仍要做**：`core/`（agent、prompt、schema、memory）、`llm/`、`db/`、`channels/mod.rs`
-  这类被多端共用的模块照常维护，但**只保证 Telegram 端正确**——不为迁就 Web/iLink 的现有行为
-  回退或加兼容分支；它们真被要求改时再补。
-- **不主动重构、不主动"顺手修好"未被要求触碰的端**。发现 Web/iLink 端因为共享代码改动而
+  这类被多端共用的模块照常维护，但**只保证 Telegram 端正确**——不为迁就 iLink 的现有行为
+  回退或加兼容分支；它真被要求改时再补。
+- **不主动重构、不主动"顺手修好"未被要求触碰的端**。发现 iLink 端因为共享代码改动而
   行为变化，属预期结果，写进说明即可，不要自己去修。
 - **验证只跑 Telegram 主线**：需要真实通道验证时用 `zhiwei-service --telegram` 路径，别去起 iLink
-  或 Web 端做端到端；单测与 `cargo test` 照常全跑。
+  做端到端；单测与 `cargo test` 照常全跑。
 
 ## 轻量级后台任务
 
@@ -80,13 +80,12 @@ cargo run --bin zhiwei-cli -- sticker fetch <包名>  # 拉取 Telegram 贴纸�
 cargo run --bin zhiwei-cli -- config get            # 读取数据库运行时配置
 cargo run --bin zhiwei-cli -- mcp list              # 查看 MCP 服务器连接状态与工具表
 cargo run --bin zhiwei-cli -- mcp call <服> <工具>   # 试调一次 MCP 工具
+cargo run --bin zhiwei-cli -- identity show         # 查看当前身份画像
+cargo run --bin zhiwei-cli -- identity set <字段> <值>  # 人工写入身份字段（如形象）
 ```
 
-以下命令属于非主线的 Web / iLink 端，主线开发期间不要用来做验证：
-`cargo run --bin zhiwei-web`。
-
-进程模型：`zhiwei-web` 与 `zhiwei-service` 是两个独立进程，共享同一份 `.env` / `smart_assistant.db`；
-主线只需 `zhiwei-service`。开发 Telegram 时不要用 Web 端做启动方式。
+Web 端（HTTP API + `src/api/`）已下线删除：后端只剩 `zhiwei-service` 一个常驻进程，
+共享同一份 `.env` / `smart_assistant.db`；iLink 端代码仍在但不做主动开发。
 
 根目录 `make test / tools` 仅保留后端测试与运维 CLI 构建；应用壳发布用 `scripts/build-portable.ps1`。
 
@@ -105,7 +104,7 @@ cargo run --bin zhiwei-cli -- mcp call <服> <工具>   # 试调一次 MCP 工�
 
 **排版由 rustfmt 决定，不要手改**：仓库已全量 `cargo fmt` 归一（`rust-toolchain.toml` 固定 stable + rustfmt/clippy），改动写完直接跑 `cargo fmt --all`。手写排版会在下次 fmt 时被重排成另一种 diff，白白制造冲突。
 
-**验证不许污染真实库**：`smart_assistant.db` 就是用户的真实数据，`zhiwei-cli` / `zhiwei-web` / `zhiwei-service` 也都默认连它。需要真实调用 LLM 或通道来验证功能时：
+**验证不许污染真实库**：`smart_assistant.db` 就是用户的真实数据，`zhiwei-cli` / `zhiwei-service` 也都默认连它。需要真实调用 LLM 或通道来验证功能时：
 
 - 优先用 `Database::in_memory()`（`cargo test` 内部已如此，不碰磁盘库）；
 - 确需落盘验证时，改 `SMART_ASSISTANT_DB` 指向临时库跑，别用默认路径；

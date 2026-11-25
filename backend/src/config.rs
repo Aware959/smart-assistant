@@ -50,12 +50,6 @@ pub struct Config {
     /// 改写旧记忆。所以这里定得很紧：误杀一条的代价（悄悄丢掉一次纠正，
     /// 而用户以为你记住了新说法）远大于放过一条近义重复的代价。
     pub memory_dedup_min_similarity: f32,
-    /// HTTPS 证书链文件（PEM）。留空时回退到运行目录 `certs/server.pem`。
-    pub tls_cert: Option<String>,
-    /// HTTPS 私钥文件（PEM）。留空时回退到运行目录 `certs/server.key`。
-    pub tls_key: Option<String>,
-    /// Web 前端静态产物目录（SPA）。缺省不挂载；需要 Web UI 时用环境变量指向产物目录。
-    pub web_dist: Option<String>,
     /// Telegram Bot Token（@BotFather 获取）。留空则不启动 TG 长轮询。
     pub telegram_bot_token: String,
     /// Telegram 通道硬开关：`0` 明确不启动 Telegram；缺省视为开启（仍要求 token 非空）。
@@ -172,9 +166,6 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.92),
-            tls_cert: std::env::var("SMART_ASSISTANT_TLS_CERT").ok(),
-            tls_key: std::env::var("SMART_ASSISTANT_TLS_KEY").ok(),
-            web_dist: std::env::var("SMART_ASSISTANT_WEB_DIST").ok(),
             telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
             telegram_enabled: std::env::var("TELEGRAM_ENABLED")
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))

@@ -1,9 +1,8 @@
 //! 通道守护进程：telegram / iLink 长轮询 + 意图主动开口。
 //!
-//! 与 `zhiwei-web`（HTTP 会话主进程）各跑一进程、共享同一个 SQLite 库：
-//! 它只负责收消息 → 调主线聊天服务 → 回消息，以及 `INTENT_ENABLED=1`
-//! 时按节奏主动开口。同一份配置（.env / smart_assistant.db）下，
-//! 可只跑这一个 exe 让 Telegram / 微信通道单独工作，无需启动 HTTP。
+//! 唯一的后端常驻进程：收消息 → 调主线聊天服务 → 回消息，`INTENT_ENABLED=1`
+//! 时按节奏主动开口；同时挂本地控制接口（面板 / CLI 经它读写运行时配置）。
+//! 同一份配置（.env / smart_assistant.db）下，只跑这一个 exe 即可。
 //!
 //! 退出语义（Ctrl+C / Ctrl+Break）：
 //! - 第一次信号：触发优雅收尾——abort 各轮询循环任务、按句柄有界等待
@@ -38,7 +37,7 @@ async fn main() {
 
     let cfg = Config::get();
 
-    // 初始化数据库（与 zhiwei-web 共享同一个 smart_assistant.db）。
+    // 初始化数据库（控制接口、CLI 与本进程共享同一个 smart_assistant.db）。
     let start = std::time::Instant::now();
     let app = Arc::new(App::new(&cfg.db_path).expect("failed to open database"));
     app.initialize_runtime_settings(chrono::Utc::now())

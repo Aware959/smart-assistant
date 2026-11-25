@@ -452,6 +452,61 @@ pub(crate) fn insert_version(db: &Database, v: &IdentityVersion) -> Result<()> {
     insert_version_on(db.conn(), v)
 }
 
+/// 人工写入一个身份字段的完整事务：更新字段、追加完整快照版本。
+///
+/// 与提案应用共用乐观语义：读当前身份 → 合并新值 → 校验 → 单事务提交。
+/// 形象这类用户直接维护的字段不走提案审批，由这里留下版本审计记录。
+pub(crate) fn apply_manual_field(
+    db: &Database,
+    field: IdentityFieldKey,
+    value: Option<&str>,
+    reason: &str,
+    operator: &str,
+    now: DateTime<Utc>,
+) -> Result<IdentityVersion> {
+    let tx = db.conn().unchecked_transaction()?;
+    let after = value
+        .map(|raw| IdentityFieldValue::new(field, raw))
+        .transpose()
+        .map_err(identity_error)?;
+    let base = current_identity_on(&tx, now)?;
+
+    let mut fields = base.fields().clone();
+    match &after {
+        Some(v) => {
+            fields.insert(field, v.clone());
+        }
+        None => {
+            fields.remove(&field);
+        }
+    }
+    let next_version = next_version_on(&tx)?;
+    let applied = AgentIdentity::new(next_version, now, fields);
+    let snapshot = applied.to_snapshot_json()?;
+
+    replace_profile_field_on(
+        &tx,
+        field,
+        after.as_ref().map(IdentityFieldValue::as_str),
+        now,
+    )?;
+    let version = IdentityVersion {
+        version: i64::try_from(next_version)
+            .map_err(|_| SqlError::Config(format!("身份版本 {next_version} 超出数据库范围")))?,
+        snapshot,
+        proposal_id: None,
+        source: ChangeSource::Manual.as_str().to_string(),
+        reason: reason.to_string(),
+        created_at: now,
+        operator: Some(operator.to_string()),
+        rolled_back_from: None,
+    };
+    insert_version_on(&tx, &version)?;
+
+    tx.commit()?;
+    Ok(version)
+}
+
 fn insert_version_on(conn: &Connection, v: &IdentityVersion) -> Result<()> {
     conn.execute(
         "INSERT INTO self_profile_versions \

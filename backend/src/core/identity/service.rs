@@ -286,6 +286,30 @@ impl IdentityService {
         Ok(IdentityVersionView::from(&version))
     }
 
+    /// 人工写入一个身份字段，不走提案审批。
+    ///
+    /// 供运维入口（CLI）维护演化代理不得触碰的字段（如形象），或人工直接修正任何
+    /// 字段。`value = None` 表示删除该字段。写入走完整校验 + 单事务版本审计，来源
+    /// 记为 [`ChangeSource::Manual`]，成功后立即失效 Profile 缓存。
+    pub fn set_field_manually(
+        &self,
+        field_key: &str,
+        value: Option<&str>,
+        reason: &str,
+        operator: &str,
+        now: DateTime<Utc>,
+    ) -> Result<IdentityVersionView> {
+        let field = IdentityFieldKey::parse(field_key).map_err(identity_error)?;
+        let reason = required_text("reason", reason)?;
+        let operator = required_text("operator", operator)?;
+        let version = {
+            let guard = crate::db::lock_db(&self.db);
+            crate::db::identity::apply_manual_field(&guard, field, value, &reason, &operator, now)?
+        };
+        self.profile.invalidate();
+        Ok(IdentityVersionView::from(&version))
+    }
+
     /// 人工拒绝 pending 提案。拒绝不改变当前身份，因此不失效 Profile 缓存。
     pub fn reject(&self, id: &str, operator: &str, now: DateTime<Utc>) -> Result<ProposalView> {
         self.decide(id, ProposalStatus::Rejected, false, operator, now)

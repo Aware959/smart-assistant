@@ -8,12 +8,6 @@ autobins = false
 crate-type = ["lib"]
 name = "smart_assistant"
 
-# 会话主进程：HTTP(S) 静态托管 + Web API（依赖 desktop）
-[[bin]]
-name = "zhiwei-web"
-path = "src/bin/zhiwei-web.rs"
-required-features = ["desktop"]
-
 # 通道守护进程：telegram / iLink 长轮询 + 意图主动开口（依赖 telegram + ilink）
 [[bin]]
 name = "zhiwei-service"
@@ -45,18 +39,14 @@ futures = "0.3"
 # 异步运行时 (genai 需要；本库通过全局 runtime 以同步接口暴露)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 
-# HTTP 框架：zhiwei-web 与 zhiwei-service 的本地控制接口共用
+# HTTP 框架：zhiwei-service 的本地控制接口
 axum = { version = "0.8", features = ["ws", "json"] }
-# TLS 支持：以 HTTPS 暴露 API（自签名证书见 scripts/gen-cert.ps1）
-axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
-# 静态文件托管：由后端直接提供前端 build 产物 (SPA)
-tower-http = { version = "0.6", features = ["fs"], optional = true }
 
 # 错误处理
 thiserror = "2"
 anyhow = "1"
 
-# 日志（zhiwei-web / zhiwei-service 共用运行时启动脚手架，故不做可选特性）
+# 日志（zhiwei-service / zhiwei-cli 共用运行时启动脚手架，故不做可选特性）
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = { version = "0.2" }
@@ -81,8 +71,7 @@ base64 = "0.22"
 qrcode = { version = "0.14", optional = true }
 
 [features]
-default = ["desktop", "telegram", "ilink", "mcp-http"]
-desktop = ["axum-server", "tower-http"]
+default = ["telegram", "ilink", "mcp-http"]
 telegram = ["dep:reqwest"]
 ilink = ["dep:reqwest", "dep:qrcode"]
 # MCP 的 Streamable HTTP 传输（stdio 传输不依赖任何外部 crate）

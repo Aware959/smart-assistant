@@ -144,15 +144,11 @@ impl SettingsGroup {
             Self::Program => &[
                 "ZHIWEI_ENV",
                 "SMART_ASSISTANT_DB",
-                "SMART_ASSISTANT_ADDR",
                 "RUST_LOG",
                 "SMART_ASSISTANT_LOG_FILE",
                 "SMART_ASSISTANT_TRACE_FILE",
                 "TRACE_CONTENT",
                 "SMART_ASSISTANT_WATCHDOG_FILE",
-                "SMART_ASSISTANT_TLS_CERT",
-                "SMART_ASSISTANT_TLS_KEY",
-                "SMART_ASSISTANT_WEB_DIST",
                 "CONTROL_ENABLED",
                 "CONTROL_ADDR",
                 "CONTROL_STATE_FILE",
@@ -889,12 +885,6 @@ const READ_ONLY: &[ReadOnlyItem] = &[
         description: "数据库路径",
     },
     ReadOnlyItem {
-        key: "smart_assistant_addr",
-        group: SettingsGroup::Program,
-        kind: "string",
-        description: "Web 端监听地址",
-    },
-    ReadOnlyItem {
         key: "rust_log",
         group: SettingsGroup::Program,
         kind: "string",
@@ -923,24 +913,6 @@ const READ_ONLY: &[ReadOnlyItem] = &[
         group: SettingsGroup::Program,
         kind: "string",
         description: "进程假死诊断心跳文件路径",
-    },
-    ReadOnlyItem {
-        key: "smart_assistant_tls_cert",
-        group: SettingsGroup::Program,
-        kind: "string",
-        description: "HTTPS 证书链文件（PEM）",
-    },
-    ReadOnlyItem {
-        key: "smart_assistant_tls_key",
-        group: SettingsGroup::Program,
-        kind: "string",
-        description: "HTTPS 私钥文件（PEM）",
-    },
-    ReadOnlyItem {
-        key: "smart_assistant_web_dist",
-        group: SettingsGroup::Program,
-        kind: "string",
-        description: "Web 前端静态产物目录；缺省不挂载",
     },
     ReadOnlyItem {
         key: "control_enabled",

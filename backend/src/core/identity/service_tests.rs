@@ -647,3 +647,94 @@ fn approve_and_apply_failure_leaves_profile_and_cache_untouched() {
         "失败不应清空已有缓存，也不应写入新身份"
     );
 }
+
+#[test]
+fn manual_field_write_advances_version_and_renders() {
+    let db = db();
+    let service = service(db.clone());
+
+    let view = service
+        .set_field_manually(
+            "appearance",
+            Some("绯红色及腰长波浪卷发，厚重刘海微遮眉眼；紫罗兰色眼睛，肤色白皙；白色长袖衬衫，深色宽腰带。"),
+            "人工维护",
+            "cli",
+            at(0),
+        )
+        .unwrap();
+    assert_eq!(view.version, 1);
+    assert_eq!(view.source, "manual");
+    assert_eq!(view.proposal_id, None);
+
+    // 渲染含新字段，且按 canonical 顺序出现在自我概念之后。
+    let text = service.current().text;
+    assert!(text.contains("形象：绯红色及腰长波浪卷发"));
+    match (text.find("自我概念："), text.find("形象：")) {
+        (Some(self_pos), Some(appearance_pos)) => {
+            assert!(
+                self_pos < appearance_pos,
+                "形象按 canonical 顺序渲染在自我概念之后"
+            );
+        }
+        (None, Some(_)) => {}
+        other => panic!("形象字段应出现在渲染结果中：{other:?}"),
+    }
+
+    // 二次写入推进版本号；再写入另一个字段不影响 appearance。
+    let second = service
+        .set_field_manually("interests", Some("旧书店"), "人工维护", "cli", at(60))
+        .unwrap();
+    assert_eq!(second.version, 2);
+    let text = service.current().text;
+    assert!(text.contains("形象：绯红色及腰长波浪卷发"));
+    assert!(text.contains("兴趣：旧书店"));
+
+    // unset 删除字段并推进版本。
+    let removed = service
+        .set_field_manually("appearance", None, "人工维护（删除字段）", "cli", at(120))
+        .unwrap();
+    assert_eq!(removed.version, 3);
+    assert!(!service.current().text.contains("形象："));
+}
+
+#[test]
+fn manual_field_write_rejects_unknown_field_and_invalid_value() {
+    let service = service(db());
+    assert!(service
+        .set_field_manually("情绪", Some("低落"), "r", "cli", at(0))
+        .is_err());
+    assert!(service
+        .set_field_manually("appearance", Some("   "), "r", "cli", at(0))
+        .is_err());
+    let too_long = "字".repeat(IdentityFieldKey::Appearance.spec().max_chars + 1);
+    assert!(service
+        .set_field_manually("appearance", Some(&too_long), "r", "cli", at(0))
+        .is_err());
+}
+
+#[test]
+fn manual_write_coexists_with_proposal_flow() {
+    let db = db();
+    let service = service(db.clone());
+    service
+        .set_field_manually("appearance", Some("白衬衫"), "人工维护", "cli", at(0))
+        .unwrap();
+
+    // 人工写入推进了版本；演化提案基于新版本创建，before 取到人工写入的值。
+    let evidence = add_message(&db, "user", "你最近说话更简洁了");
+    let mut draft = draft(vec![evidence]);
+    draft.field_key = "voice_style".to_string();
+    let created = service.create_proposal(draft, at(60)).unwrap();
+    assert_eq!(created.proposal.base_version, 1);
+    assert_eq!(created.proposal.before_value, None);
+    assert_eq!(created.proposal.risk_level, "medium");
+
+    // 审批应用后版本继续推进，人工写入的字段保留。
+    let applied = service
+        .approve_and_apply(&created.proposal.id, false, "admin", at(120))
+        .unwrap();
+    assert_eq!(applied.version, 2);
+    let text = service.current().text;
+    assert!(text.contains("形象：白衬衫"));
+    assert!(text.contains("表达风格："));
+}

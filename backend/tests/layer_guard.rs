@@ -2,10 +2,10 @@
 //!
 //! 规则由本测试固化，并随代码边界一起维护：
 //! - **core**：应用本体（会话 / 记忆 / 主动 / 运行时 / 组装层），依赖 db 与 llm，
-//!   能力以具体类型直接接线；不得反向依赖传输层（`channels` / `api`）——唯一例外是
+//!   能力以具体类型直接接线；不得反向依赖传输层（`channels`）——唯一例外是
 //!   主动外发的具体实现 [`ChannelsPusher`]（core 需要它是"外部能力"而非传输端点）；
 //! - **db 层**：只做 SQL，不向业务暴露公共 API，表所有权归对应领域适配器；
-//! - **传输层（api / channels）**：直接持主线聊天服务（[`crate::core::agent::Agent`]）
+//! - **传输层（channels）**：直接持主线聊天服务（[`crate::core::agent::Agent`]）
 //!   及各服务引用走方法调用，但禁止 import `db::*`——数据一律经服务方法读写，db 不出壳。
 
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ const CORE_ALLOWED_CAPABILITIES: &[&str] = &["use crate::channels::ChannelsPushe
 const CORE_LAYERS: &[&str] = &["src/core"];
 
 /// 被禁碰 db / 组合根的目录（传输层）。
-const TRANSPORT_LAYERS: &[&str] = &["src/api", "src/channels"];
+const TRANSPORT_LAYERS: &[&str] = &["src/channels"];
 
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -60,9 +60,7 @@ fn core_never_imports_transport() {
                     continue;
                 }
                 if c.starts_with("use crate::channels")
-                    || c.starts_with("use crate::api")
                     || c.starts_with("use smart_assistant::channels")
-                    || c.starts_with("use smart_assistant::api")
                 {
                     violations.push(format!(
                         "{}:{no}  {}",
@@ -76,7 +74,7 @@ fn core_never_imports_transport() {
 
     assert!(
         violations.is_empty(),
-        "core 不得反向依赖传输层（channels/api），请改走具体能力（唯一例外：channels::ChannelsPusher）：\n{}",
+        "core 不得反向依赖传输层（channels），请改走具体能力（唯一例外：channels::ChannelsPusher）：\n{}",
         violations.join("\n")
     );
 }
@@ -110,7 +108,7 @@ fn transport_layers_never_import_db() {
 
     assert!(
         violations.is_empty(),
-        "传输层（api/channels）不得触碰 db，请改走服务方法：\n{}",
+        "传输层（channels）不得触碰 db，请改走服务方法：\n{}",
         violations.join("\n")
     );
 }
